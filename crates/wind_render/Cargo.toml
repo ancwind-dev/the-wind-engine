@@ -1,0 +1,10 @@
+[package]
+name = "wind_render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+eframe = "0.37.0"
+glam = "0.34.1"
+wind_sim = { version = "0.1.0", path = "../wind_sim" }

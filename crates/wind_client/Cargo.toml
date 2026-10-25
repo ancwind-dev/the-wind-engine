@@ -1,0 +1,10 @@
+[package]
+name = "wind_client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eframe = "0.37.0"
+wind_net = { version = "0.1.0", path = "../wind_net" }
+wind_render = { version = "0.1.0", path = "../wind_render" }
+wind_sim = { version = "0.1.0", path = "../wind_sim" }

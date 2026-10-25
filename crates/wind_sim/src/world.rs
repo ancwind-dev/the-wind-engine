@@ -281,9 +281,12 @@ impl World {
             } else if let Some(field) = flow.get(s.objective as usize) {
                 let to_objective = field.target - s.pos;
                 if to_objective.length() > capture_radius * 0.5 {
-                    desired = field
-                        .direction(map, s.pos)
-                        .unwrap_or_else(|| to_objective.normalize_or_zero());
+                    let dir = field.direction(map, s.pos).unwrap_or_else(|| to_objective.normalize_or_zero());
+                    // У каждого солдата своё боковое смещение — иначе все идут
+                    // по одной линии поля путей гуськом.
+                    let lane = (i as u32).wrapping_mul(2_654_435_761) >> 16;
+                    let lane = lane as f32 / 65_535.0 * 2.0 - 1.0;
+                    desired = (dir + dir.perp() * lane * 0.4).normalize_or_zero();
                 } else {
                     // На точке: медленно бродим, меняя направление раз в 2 секунды.
                     let mut rng = Rng::for_entity(seed, tick / 40, i as u32);
