@@ -140,6 +140,7 @@ fn main() {
                 Vec2::new(110.0, 300.0),
             ],
         },
+        atmosphere: Default::default(),
     };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/maps/пример");
     file.save(&dir).expect("не удалось сохранить");

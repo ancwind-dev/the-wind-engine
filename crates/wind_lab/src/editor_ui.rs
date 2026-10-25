@@ -7,6 +7,7 @@ use crate::viewport::{Scene, ScenePoint, ViewportOutput};
 use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
 use wind_sim::map::{GROUND_NAMES, INDESTRUCTIBLE};
+use wind_sim::atmosphere::{Atmosphere, Preset};
 use wind_sim::mapfile::MapFile;
 use wind_sim::{SimConfig, Vec2};
 
@@ -228,6 +229,7 @@ impl MapWorkspace {
             rings,
             lines: lines.unwrap_or_default(),
             corpses: Vec::new(),
+            atmosphere: file.atmosphere.clone(),
         }
     }
 
@@ -278,6 +280,7 @@ impl MapWorkspace {
         let mut request = None;
         theme::panel(ui, "Инструмент", true, |ui| self.tool_panel(ui));
         theme::panel(ui, "Карта", true, |ui| request = self.map_panel(ui));
+        theme::panel(ui, "Атмосфера", true, |ui| self.atmosphere_panel(ui));
         theme::panel(ui, "Проверка", true, |ui| {
             if self.editor.issues.is_empty() {
                 ui.label(RichText::new("✔ Всё в порядке: на карте можно играть").color(Color32::from_rgb(120, 200, 110)));
@@ -400,6 +403,50 @@ impl MapWorkspace {
         });
         ui.label(RichText::new(format!("Папка: {}", self.maps_dir.join(&self.editor.file.name).display())).small().color(theme::TEXT_DIM));
         request
+    }
+
+    /// Свет, туман и «плёнка» карты. Видно сразу в 3D-окне.
+    fn atmosphere_panel(&mut self, ui: &mut egui::Ui) {
+        let a = &mut self.editor.file.atmosphere;
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            for p in Preset::ALL {
+                if ui.button(p.name()).clicked() {
+                    *a = Atmosphere::preset(p);
+                    changed = true;
+                }
+            }
+        });
+        theme::props(ui, "atmosphere_props", |ui| {
+            let mut slider = |ui: &mut egui::Ui, name: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>| {
+                theme::label(ui, name);
+                changed |= ui.add(egui::Slider::new(v, range)).changed();
+                ui.end_row();
+            };
+            slider(ui, "Солнце: азимут", &mut a.sun_azimuth, 0.0..=360.0);
+            slider(ui, "Солнце: высота", &mut a.sun_elevation, 5.0..=90.0);
+            slider(ui, "Солнце: сила", &mut a.sun_strength, 0.0..=3.0);
+            slider(ui, "Туман", &mut a.fog, 0.0..=0.03);
+            slider(ui, "Ступенчатость света", &mut a.toon, 0.0..=1.0);
+            slider(ui, "Насыщенность", &mut a.saturation, 0.0..=1.5);
+            slider(ui, "Контраст", &mut a.contrast, 0.5..=1.5);
+            slider(ui, "Яркость", &mut a.brightness, 0.5..=1.5);
+            slider(ui, "Обводка", &mut a.outline, 0.0..=1.0);
+            slider(ui, "Затенение", &mut a.occlusion, 0.0..=1.0);
+            slider(ui, "Виньетка", &mut a.vignette, 0.0..=1.0);
+            let mut color = |ui: &mut egui::Ui, name: &str, c: &mut [f32; 3]| {
+                theme::label(ui, name);
+                changed |= ui.color_edit_button_rgb(c).changed();
+                ui.end_row();
+            };
+            color(ui, "Цвет солнца", &mut a.sun_color);
+            color(ui, "Цвет неба", &mut a.sky_color);
+            color(ui, "Цвет тени", &mut a.shadow_color);
+            color(ui, "Оттенок", &mut a.tint);
+        });
+        if changed {
+            self.editor.dirty = true;
+        }
     }
 
     fn new_panel(&mut self, ui: &mut egui::Ui) {

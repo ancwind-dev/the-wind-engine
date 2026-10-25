@@ -3,6 +3,8 @@
 
 use crate::camera::{Camera, to_3d};
 use crate::character::{CharacterSet, Motion};
+use crate::decals::Decals;
+use wind_sim::atmosphere::Atmosphere;
 use crate::mapmesh::MapMesher;
 use crate::models::{MeshId, SOLDIER_VOXEL};
 use crate::renderer::{FrameData, Globals, GroundPoint, Instance, MAX_POINTS, PendingMap, SHADOW_SIZE};
@@ -49,6 +51,10 @@ pub struct DrawInput<'a> {
     pub points: &'a [PointDraw],
     /// Кольцо под своим солдатом.
     pub marker: Option<Vec2>,
+    /// Атмосфера карты: свет, туман, цвет, обводка.
+    pub atmosphere: &'a Atmosphere,
+    /// Где вьюпорт в пикселях кадра: x, y, ширина, высота — для обводки.
+    pub viewport_px: [f32; 4],
     /// Дополнительные кольца на земле: (центр, радиус, цвет sRGB) — например, кисть редактора.
     pub rings: &'a [(Vec2, f32, [f32; 3])],
     pub corpses: &'a [CorpseDraw],
@@ -71,6 +77,9 @@ pub struct SceneBuilder {
     pending: Arc<Mutex<PendingMap>>,
     /// Для какой карты и версии покрытия земли уже отправлена текстура.
     ground_key: Option<(u64, u64)>,
+    /// Следы боя и для какой карты они.
+    decals: Decals,
+    decals_key: Option<u64>,
     anim: Vec<Anim>,
     /// Цвета команд (sRGB 0..1).
     pub team_colors: [[f32; 3]; 2],
@@ -84,6 +93,8 @@ impl Default for SceneBuilder {
             mesher: MapMesher::default(),
             pending: Arc::default(),
             ground_key: None,
+            decals: Decals::default(),
+            decals_key: None,
             anim: Vec::new(),
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
             characters: None,
@@ -122,6 +133,7 @@ impl SceneBuilder {
                 pending.ground = Some((input.map.width, input.map.height, input.map.ground.clone()));
             }
         }
+        self.battle_traces(input);
         let cx = input.map.chunks_x();
         let half = CHUNK as f32 * 0.5;
         let visible_chunks = (0..input.map.chunk_revisions.len() as u32)
@@ -243,6 +255,33 @@ impl SceneBuilder {
         }
     }
 
+    /// Новые подпалины и лужи крови — сразу в очередь на GPU.
+    fn battle_traces(&mut self, input: &DrawInput) {
+        let mut pending = None;
+        if self.decals_key != Some(input.map_key) {
+            self.decals_key = Some(input.map_key);
+            let size = self.decals.reset(input.map.width, input.map.height);
+            let p = pending.get_or_insert_with(|| self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+            p.decal_size = Some(size);
+            p.decal_rects.clear();
+        }
+        let mut rects = Vec::new();
+        for &(c, r, _) in input.blasts {
+            rects.extend(self.decals.blast(c, r, input.time));
+        }
+        // Кровь — когда тело уже упало.
+        for c in input.corpses.iter().filter(|c| c.age > 0.45) {
+            rects.extend(self.decals.corpse(c.id, c.pos));
+        }
+        if rects.is_empty() {
+            return;
+        }
+        let p = pending.get_or_insert_with(|| self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        for r in rects {
+            p.decal_rects.push((r, self.decals.rect(r)));
+        }
+    }
+
     /// Двигает фазу шага по пройденному пути. Возвращает сглаженную скорость.
     fn animate(&mut self, s: &SoldierDraw, dt: f32) -> f32 {
         let i = s.id as usize;
@@ -265,7 +304,13 @@ impl SceneBuilder {
 
     fn globals(&self, input: &DrawInput) -> Globals {
         let cam = input.camera;
-        let sun = Vec3::new(0.35, 0.85, 0.40).normalize();
+        let atmo = input.atmosphere;
+        let sun = Vec3::from_array(atmo.sun_direction()).normalize();
+        // Цвета атмосферы заданы в sRGB, а свет считается в линейных — переводим.
+        let lin = |c: [f32; 3], k: f32| c.map(|v| v.max(0.0).powf(2.2) * k);
+        let sun_lin = lin(atmo.sun_color, atmo.sun_strength);
+        let sky_lin = lin(atmo.sky_color, 0.8);
+        let shadow_lin = lin(atmo.shadow_color, 0.9);
         let center = to_3d(cam.target, cam.target_height);
 
         // Камера теней: ортографическая, вокруг центра экрана. Сдвиг кратен
@@ -304,13 +349,19 @@ impl SceneBuilder {
             view_proj: cam.view_proj(input.aspect).to_cols_array_2d(),
             light_view_proj: light.to_cols_array_2d(),
             sun_dir: [sun.x, sun.y, sun.z, 0.0],
-            sun_color: [1.6, 1.52, 1.36, 0.8],
-            ambient_sky: [0.42, 0.48, 0.58, 0.0],
+            sun_color: [sun_lin[0], sun_lin[1], sun_lin[2], 0.85],
+            ambient_sky: [sky_lin[0], sky_lin[1], sky_lin[2], 0.0],
             // w — с какого расстояния от глаза начинается туман.
-            ambient_ground: [0.22, 0.20, 0.17, cam.distance * 1.15],
-            fog: [0.62, 0.68, 0.72, 0.004],
+            ambient_ground: [shadow_lin[0], shadow_lin[1], shadow_lin[2], cam.distance * 1.15],
+            fog: [atmo.sky_color[0], atmo.sky_color[1], atmo.sky_color[2], atmo.fog],
             eye: [eye.x, eye.y, eye.z, 1.0],
             params: [input.map.width as f32, input.time, count as f32, 1.0 / SHADOW_SIZE as f32],
+            view: cam.view().to_cols_array_2d(),
+            grade: [atmo.saturation, atmo.contrast, atmo.brightness, atmo.toon],
+            // w — фокусное расстояние в пикселях: радиус затенения в метрах → пиксели.
+            tint: [atmo.tint[0], atmo.tint[1], atmo.tint[2], input.viewport_px[3] / (2.0 * (cam.fov_y * 0.5).tan())],
+            post: [atmo.outline, atmo.occlusion, atmo.vignette, cam.far()],
+            screen: input.viewport_px,
             points,
         }
     }

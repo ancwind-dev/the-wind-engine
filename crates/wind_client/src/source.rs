@@ -4,6 +4,7 @@
 use std::time::Instant;
 use wind_net::{ClientStatus, NetClient};
 use wind_render::{CorpseDraw, PointDraw, SoldierDraw};
+use wind_sim::atmosphere::Atmosphere;
 use wind_sim::map::Map;
 use wind_sim::{Controller, Event, PlayerInput, ProjectileKind, Vec2, World};
 
@@ -70,6 +71,13 @@ impl Source {
     }
 
     /// Ключ карты: при подключении к серверу карта другая.
+    pub fn atmosphere(&self) -> Atmosphere {
+        match self {
+            Source::Local(l) => l.world.atmosphere.clone(),
+            Source::Remote(c) => c.world.as_ref().map(|w| w.atmosphere.clone()).unwrap_or_default(),
+        }
+    }
+
     pub fn map_key(&self) -> u64 {
         match self {
             Source::Local(l) => l.world.seed.wrapping_mul(2) + 1,

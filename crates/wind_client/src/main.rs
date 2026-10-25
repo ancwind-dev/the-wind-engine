@@ -244,6 +244,7 @@ impl Game {
     }
 
     fn read_input(&mut self, ctx: &egui::Context, mouse_world: Option<Vec2>) -> PlayerInput {
+        let (forward, right) = self.camera.screen_axes();
         if let Some(m) = mouse_world {
             self.aim = m;
         }
@@ -262,7 +263,8 @@ impl Game {
                 d.x += 1.0;
             }
             PlayerInput {
-                move_dir: d.normalize_or_zero(),
+                // Камера повёрнута, как в RWR, — WASD идут по экрану, а не по сторонам света.
+                move_dir: (forward * -d.y + right * d.x).normalize_or_zero(),
                 aim: self.aim,
                 fire: i.pointer.primary_down(),
                 grenade: i.key_down(egui::Key::G),
@@ -355,6 +357,8 @@ impl eframe::App for Game {
             }
 
             if let Some(map) = self.source.map() {
+                let ppp = ctx.pixels_per_point();
+                let atmosphere = self.source.atmosphere();
                 let time = self.started.elapsed().as_secs_f32();
                 let input = DrawInput {
                     map,
@@ -369,6 +373,8 @@ impl eframe::App for Game {
                     marker: view.me_pos,
                     rings: &[],
                     corpses: &view.corpses,
+                    atmosphere: &atmosphere,
+                    viewport_px: [rect.left() * ppp, rect.top() * ppp, rect.width() * ppp, rect.height() * ppp],
                     time,
                     dt,
                 };

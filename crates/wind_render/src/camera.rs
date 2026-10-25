@@ -23,8 +23,10 @@ pub struct Camera {
 }
 
 impl Default for Camera {
+    /// Как в RWR (`scene.xml`): 36 м, наклон ≈ 58°, поворот ≈ 17° (улицы идут по диагонали),
+    /// угол обзора 45°.
     fn default() -> Self {
-        Camera { target: Vec2::ZERO, distance: 32.0, pitch: 1.05, yaw: 0.0, fov_y: 0.6, target_height: 0.0 }
+        Camera { target: Vec2::ZERO, distance: 36.0, pitch: 1.02, yaw: -0.29, fov_y: 0.785, target_height: 0.0 }
     }
 }
 
@@ -39,10 +41,22 @@ impl Camera {
         to_3d(self.target, self.target_height) + Vec3::new(sy * cp, sp, cy * cp) * self.distance
     }
 
+    pub fn far(&self) -> f32 {
+        self.distance * 6.0 + 200.0
+    }
+
+    pub fn view(&self) -> Mat4 {
+        view::look_at_mat4(self.eye(), to_3d(self.target, self.target_height), Vec3::Y)
+    }
+
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let proj = proj::perspective(self.fov_y, aspect.max(0.01), 0.5, self.distance * 6.0 + 200.0);
-        let view = view::look_at_mat4(self.eye(), to_3d(self.target, self.target_height), Vec3::Y);
-        proj * view
+        proj::perspective(self.fov_y, aspect.max(0.01), 0.5, self.far()) * self.view()
+    }
+
+    /// «Вверх» и «вправо» экрана на земле — чтобы WASD шли по экрану, а не по сторонам света.
+    pub fn screen_axes(&self) -> (Vec2, Vec2) {
+        let (sy, cy) = self.yaw.sin_cos();
+        (-Vec2::new(sy, cy), Vec2::new(cy, -sy))
     }
 
     /// Точка рельефа под курсором: несколько уточнений — пересекаем луч с плоскостью

@@ -12,6 +12,7 @@ use crate::protocol::{self, Kind, Welcome, dq_angle, q_angle, read_pos, write_po
 use std::collections::VecDeque;
 use wind_sim::map::Map;
 use std::path::Path;
+use wind_sim::atmosphere::Atmosphere;
 use wind_sim::mapfile::MapFile;
 use wind_sim::{Event, Soldier, Vec2, World, mapgen};
 
@@ -570,6 +571,8 @@ pub struct RemoteWorld {
     pub blasts: Vec<(Vec2, f32, f32)>,
     pub kill_feed: VecDeque<KillNote>,
     pub corpses: Vec<Corpse>,
+    /// Атмосфера карты — для картинки.
+    pub atmosphere: Atmosphere,
     /// Время клиента, которое вернул сервер в последнем снимке.
     pub echo_time: u32,
     /// Когда (по часам клиента, с) пришёл последний снимок.
@@ -580,15 +583,16 @@ pub struct RemoteWorld {
 impl RemoteWorld {
     /// Мир по приветствию сервера. Карту из файла ищем в `maps_dir` и сверяем отпечаток.
     pub fn new(welcome: Welcome, maps_dir: &Path) -> Result<Self, String> {
-        let (map, layout) = if welcome.map_name.is_empty() {
-            mapgen::generate(welcome.map_size, welcome.capture_points, welcome.seed)
+        let (map, layout, atmosphere) = if welcome.map_name.is_empty() {
+            let (map, layout) = mapgen::generate(welcome.map_size, welcome.capture_points, welcome.seed);
+            (map, layout, Atmosphere::default())
         } else {
             let name = &welcome.map_name;
             let file = MapFile::load(&maps_dir.join(name)).map_err(|e| format!("нет карты «{name}»: {e}"))?;
             if file.fingerprint() != welcome.map_fingerprint {
                 return Err(format!("карта «{name}» у тебя не такая, как на сервере"));
             }
-            (file.map, file.layout)
+            (file.map, file.layout, file.atmosphere)
         };
         let points = layout
             .capture_points
@@ -609,6 +613,7 @@ impl RemoteWorld {
             blasts: Vec::new(),
             kill_feed: VecDeque::new(),
             corpses: Vec::new(),
+            atmosphere,
             echo_time: 0,
             snapshot_time: 0.0,
             history: (0..HISTORY).map(|_| None).collect(),

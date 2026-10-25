@@ -3,6 +3,7 @@
 
 pub mod camera;
 pub mod character;
+mod decals;
 pub mod mapmesh;
 pub mod models;
 pub mod renderer;
