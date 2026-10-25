@@ -1,21 +1,27 @@
-//! Лаборатория: смотрим и крутим симуляцию в окне.
+//! Лаборатория: смотрим и крутим симуляцию в окне, поднимаем сервер
+//! или подключаемся к серверу и играем за солдата.
 //!
 //! cargo run --release -p wind_lab
 
+mod scene;
 mod theme;
 mod viewport;
 
 use eframe::egui::{self, Color32, RichText};
+use scene::Blast;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
-use viewport::{Blast, Viewport};
-use wind_sim::{Event, SimConfig, TickStats, World};
+use viewport::Viewport;
+use wind_net::{ClientStatus, DEFAULT_PORT, NetClient, NetServer, ReplicationConfig};
+use wind_sim::{Event, PlayerInput, SimConfig, TickStats, Vec2, World};
 
 /// Сколько последних тиков держим для графика.
 const HISTORY: usize = 300;
 /// Больше тиков за кадр не считаем, даже если не успеваем, — иначе окно зависнет.
 const MAX_STEPS_PER_FRAME: u32 = 64;
+/// Как часто клиент шлёт ввод, раз в секунду.
+const INPUT_RATE: f32 = 30.0;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -50,7 +56,21 @@ struct Lab {
     history: VecDeque<TickStats>,
     selected: Option<u32>,
     viewport: Viewport,
+    blasts: Vec<Blast>,
     status: (String, Color32),
+
+    /// Сервер, поднятый прямо в лаборатории поверх локальной симуляции.
+    server: Option<NetServer>,
+    server_port: u16,
+    /// Подключение к чужому (или своему) серверу. Пока оно есть, локальная симуляция стоит.
+    client: Option<NetClient>,
+    connect_addr: String,
+    player_name: String,
+    last_input: Instant,
+    aim: Vec2,
+    net_log: VecDeque<String>,
+    /// Уже написали «в игре» для текущего подключения.
+    announced: bool,
 }
 
 impl Lab {
@@ -68,7 +88,7 @@ impl Lab {
             seed: 1,
         };
         let world = World::new(with_settings(&base_config, &settings), settings.seed);
-        Lab {
+        let mut lab = Lab {
             world,
             config_mtime: mtime(&config_path),
             config_path,
@@ -81,23 +101,103 @@ impl Lab {
             history: VecDeque::with_capacity(HISTORY),
             selected: None,
             viewport: Viewport::new(),
+            blasts: Vec::new(),
             status,
+            server: None,
+            server_port: DEFAULT_PORT,
+            client: None,
+            connect_addr: format!("127.0.0.1:{DEFAULT_PORT}"),
+            player_name: "Игрок".into(),
+            last_input: Instant::now(),
+            aim: Vec2::ZERO,
+            net_log: VecDeque::new(),
+            announced: false,
+        };
+        // wind_lab --connect 127.0.0.1:7777 — сразу в игру; wind_lab --serve — сразу поднять сервер.
+        let mut args = std::env::args().skip(1);
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--connect" => {
+                    if let Some(addr) = args.next() {
+                        lab.connect_addr = addr;
+                    }
+                    lab.connect();
+                }
+                "--serve" => lab.start_server(),
+                _ => {}
+            }
         }
+        lab
+    }
+
+    fn log(&mut self, line: String) {
+        self.status = (line.clone(), theme::TEXT_DIM);
+        self.net_log.push_front(line);
+        self.net_log.truncate(8);
     }
 
     fn restart(&mut self) {
+        // Клиенты сервера держатся за солдат старого мира — сервер тоже перезапускаем.
+        let had_server = self.server.take().is_some();
         self.world = World::new(with_settings(&self.base_config, &self.settings), self.settings.seed);
         self.history.clear();
         self.selected = None;
         self.accumulator = 0.0;
+        self.blasts.clear();
         self.viewport.reset();
+        if had_server {
+            self.start_server();
+        }
+    }
+
+    fn start_server(&mut self) {
+        match NetServer::bind(("0.0.0.0", self.server_port), ReplicationConfig::default()) {
+            Ok(server) => {
+                self.server = Some(server);
+                self.log(format!("Сервер запущен на порту {}", self.server_port));
+            }
+            Err(e) => {
+                self.status = (format!("Не удалось открыть порт {}: {e}", self.server_port), theme::ERROR);
+            }
+        }
+    }
+
+    fn connect(&mut self) {
+        match NetClient::connect(&self.connect_addr, &self.player_name, None) {
+            Ok(client) => {
+                self.log(format!("Подключаюсь к {}…", client.server_addr()));
+                self.client = Some(client);
+                self.announced = false;
+                self.viewport.reset_close(8.0);
+            }
+            Err(e) => self.status = (format!("{}: {e}", self.connect_addr), theme::ERROR),
+        }
+    }
+
+    fn disconnect(&mut self) {
+        if let Some(mut client) = self.client.take() {
+            client.disconnect();
+            self.log("Отключился от сервера".into());
+        }
+        self.viewport.reset();
+        self.viewport.follow = false;
     }
 
     fn step(&mut self) {
+        if let Some(server) = &mut self.server {
+            server.poll(&mut self.world);
+        }
         self.world.step();
+        if let Some(server) = &mut self.server {
+            server.send_snapshots(&self.world);
+        }
+        let lines: Vec<String> = self.server.iter_mut().flat_map(|s| s.log.drain(..)).collect();
+        for line in lines {
+            self.log(line);
+        }
         for event in &self.world.events {
             if let Event::Explosion { pos, radius } = *event {
-                self.viewport.blasts.push(Blast { pos, radius, age: 0.0 });
+                self.blasts.push(Blast { pos, radius, age: 0.0 });
             }
         }
         if self.history.len() == HISTORY {
@@ -107,10 +207,44 @@ impl Lab {
     }
 
     fn advance(&mut self, frame_dt: f32) {
-        for b in &mut self.viewport.blasts {
+        for b in &mut self.blasts {
             b.age += frame_dt;
         }
-        self.viewport.blasts.retain(|b| b.age < 0.6);
+        self.blasts.retain(|b| b.age < 0.6);
+
+        if let Some(client) = &mut self.client {
+            client.poll();
+            if let Some(w) = &mut client.world {
+                w.advance_effects(frame_dt);
+            }
+            match client.status.clone() {
+                ClientStatus::Connected if !self.announced => {
+                    self.announced = true;
+                    if let Some(w) = &client.world {
+                        let line = format!(
+                            "В игре: солдат #{}, команда «{}»",
+                            w.welcome.soldier,
+                            theme::TEAM_NAME[w.welcome.team as usize]
+                        );
+                        self.log(line);
+                    }
+                }
+                ClientStatus::Rejected(why) => {
+                    self.status = (format!("Сервер отказал: {why}"), theme::ERROR);
+                    self.client = None;
+                }
+                ClientStatus::TimedOut => {
+                    self.status = ("Сервер не отвечает — отключился".into(), theme::ERROR);
+                    self.client = None;
+                }
+                _ => {}
+            }
+            // Своя симуляция на паузе, пока играем по сети. Но если мы же и сервер — она идёт.
+            if self.server.is_none() {
+                return;
+            }
+        }
+
         if self.paused {
             return;
         }
@@ -125,6 +259,39 @@ impl Lab {
         if steps == MAX_STEPS_PER_FRAME {
             self.accumulator = 0.0;
         }
+    }
+
+    /// WASD — идти, мышь — прицел, ЛКМ — огонь, G — граната.
+    fn send_player_input(&mut self, ctx: &egui::Context, mouse_world: Option<Vec2>, primary_down: bool) {
+        let Some(client) = &mut self.client else { return };
+        if self.last_input.elapsed().as_secs_f32() < 1.0 / INPUT_RATE {
+            return;
+        }
+        self.last_input = Instant::now();
+        if let Some(m) = mouse_world {
+            self.aim = m;
+        }
+        let typing = ctx.egui_wants_keyboard_input();
+        let (mut move_dir, grenade) = ctx.input(|i| {
+            let mut d = Vec2::ZERO;
+            if !typing {
+                if i.key_down(egui::Key::W) {
+                    d.y -= 1.0;
+                }
+                if i.key_down(egui::Key::S) {
+                    d.y += 1.0;
+                }
+                if i.key_down(egui::Key::A) {
+                    d.x -= 1.0;
+                }
+                if i.key_down(egui::Key::D) {
+                    d.x += 1.0;
+                }
+            }
+            (d, !typing && i.key_down(egui::Key::G))
+        });
+        move_dir = move_dir.normalize_or_zero();
+        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade });
     }
 
     /// Раз в полсекунды смотрим, не изменился ли файл с параметрами.
@@ -195,7 +362,8 @@ impl Lab {
                     });
                     ui.add_space(24.0);
                     // Вкладки рабочих пространств, как Layout / Modeling в Blender.
-                    let _ = ui.selectable_label(true, "Лаборатория");
+                    let _ = ui.selectable_label(self.client.is_none(), "Лаборатория");
+                    let _ = ui.selectable_label(self.client.is_some(), "Игра по сети");
                 });
             });
     }
@@ -207,17 +375,24 @@ impl Lab {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&self.status.0).color(self.status.1).small());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let s = &self.world.stats;
                         let fps = 1.0 / ui.input(|i| i.stable_dt).max(1e-4);
-                        ui.label(RichText::new(format!(
-                            "Тик {} · {:.1} с · {:.2} мс/тик · {:.0} FPS",
-                            self.world.tick,
-                            self.world.tick as f32 * self.world.dt(),
-                            s.total_ms,
-                            fps
-                        ))
-                        .small()
-                        .color(theme::TEXT_DIM));
+                        let text = match &self.client {
+                            Some(c) => format!(
+                                "Сеть: к нам {:.1} КБ/с · от нас {:.2} КБ/с · пинг {:.0} мс · {:.0} FPS",
+                                c.traffic.recv_per_sec / 1024.0,
+                                c.traffic.sent_per_sec / 1024.0,
+                                c.rtt_ms,
+                                fps
+                            ),
+                            None => format!(
+                                "Тик {} · {:.1} с · {:.2} мс/тик · {:.0} FPS",
+                                self.world.tick,
+                                self.world.tick as f32 * self.world.dt(),
+                                self.world.stats.total_ms,
+                                fps
+                            ),
+                        };
+                        ui.label(RichText::new(text).small().color(theme::TEXT_DIM));
                     });
                 });
             });
@@ -232,49 +407,87 @@ impl Lab {
                 ui.label(RichText::new("Сцена").strong());
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for team in 0..2 {
-                        let total = self.world.soldiers.iter().filter(|s| s.team == team as u8).count();
-                        let alive = self.world.stats.alive[team];
-                        let title = RichText::new(format!(
-                            "{}  {alive}/{total} · убийств {}",
-                            theme::TEAM_NAME[team],
-                            self.world.score[team]
-                        ))
-                        .color(theme::TEAM[team]);
-                        egui::CollapsingHeader::new(title).id_salt(("team", team)).default_open(true).show(ui, |ui| {
-                            // Лучшие бойцы команды — клик выделяет.
-                            let mut best: Vec<(usize, u32)> = self
-                                .world
-                                .soldiers
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, s)| s.team == team as u8)
-                                .map(|(i, s)| (i, s.kills))
-                                .collect();
-                            best.sort_by_key(|&(_, kills)| std::cmp::Reverse(kills));
-                            for (i, kills) in best.into_iter().take(8) {
-                                let selected = self.selected == Some(i as u32);
-                                if ui.selectable_label(selected, format!("Солдат #{i} — {kills}")).clicked() {
-                                    self.selected = Some(i as u32);
-                                    self.viewport.focus(self.world.soldiers[i].pos);
-                                }
-                            }
-                        });
+                    if self.client.is_some() {
+                        self.remote_outliner(ui);
+                    } else {
+                        self.local_outliner(ui);
                     }
-                    egui::CollapsingHeader::new("Точки захвата").default_open(true).show(ui, |ui| {
-                        for (i, p) in self.world.points.iter().enumerate() {
-                            let (owner, color) = match p.owner {
-                                Some(t) => (theme::TEAM_NAME[t as usize], theme::TEAM[t as usize]),
-                                None => ("ничья", theme::TEXT_DIM),
-                            };
-                            let letter = (b'A' + i as u8) as char;
-                            if ui.selectable_label(false, RichText::new(format!("Точка {letter} — {owner}")).color(color)).clicked() {
-                                self.viewport.focus(p.pos);
-                            }
-                        }
-                    });
                 });
             });
+    }
+
+    fn local_outliner(&mut self, ui: &mut egui::Ui) {
+        for team in 0..2 {
+            let total = self.world.soldiers.iter().filter(|s| s.team == team as u8).count();
+            let alive = self.world.stats.alive[team];
+            let title = RichText::new(format!(
+                "{}  {alive}/{total} · убийств {}",
+                theme::TEAM_NAME[team],
+                self.world.score[team]
+            ))
+            .color(theme::TEAM[team]);
+            egui::CollapsingHeader::new(title).id_salt(("team", team)).default_open(true).show(ui, |ui| {
+                // Лучшие бойцы команды — клик выделяет.
+                let mut best: Vec<(usize, u32)> = self
+                    .world
+                    .soldiers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.team == team as u8)
+                    .map(|(i, s)| (i, s.kills))
+                    .collect();
+                best.sort_by_key(|&(_, kills)| std::cmp::Reverse(kills));
+                for (i, kills) in best.into_iter().take(8) {
+                    let selected = self.selected == Some(i as u32);
+                    if ui.selectable_label(selected, format!("Солдат #{i} — {kills}")).clicked() {
+                        self.selected = Some(i as u32);
+                        self.viewport.focus(self.world.soldiers[i].pos);
+                    }
+                }
+            });
+        }
+        if let Some(server) = &self.server {
+            egui::CollapsingHeader::new("Игроки на сервере").default_open(true).show(ui, |ui| {
+                if server.clients.is_empty() {
+                    ui.label(RichText::new("пока никого").color(theme::TEXT_DIM));
+                }
+                for c in &server.clients {
+                    let label = RichText::new(format!("{} — солдат #{}", c.name, c.replica.soldier)).color(theme::TEAM[c.team as usize]);
+                    if ui.selectable_label(self.selected == Some(c.replica.soldier), label).clicked() {
+                        self.selected = Some(c.replica.soldier);
+                        self.viewport.focus(self.world.soldiers[c.replica.soldier as usize].pos);
+                    }
+                }
+            });
+        }
+        egui::CollapsingHeader::new("Точки захвата").default_open(true).show(ui, |ui| {
+            for (i, p) in self.world.points.iter().enumerate() {
+                if point_label(ui, i, p.owner).clicked() {
+                    self.viewport.focus(p.pos);
+                }
+            }
+        });
+    }
+
+    fn remote_outliner(&mut self, ui: &mut egui::Ui) {
+        let Some(w) = self.client.as_ref().and_then(|c| c.world.as_ref()) else {
+            ui.label(RichText::new("Ждём ответа сервера…").color(theme::TEXT_DIM));
+            return;
+        };
+        for team in 0..2 {
+            let mine = if w.welcome.team == team as u8 { " (мы)" } else { "" };
+            ui.label(
+                RichText::new(format!("{}{mine} · убийств {}", theme::TEAM_NAME[team], w.score[team]))
+                    .color(theme::TEAM[team]),
+            );
+        }
+        let visible = w.soldiers.iter().flatten().count();
+        ui.label(RichText::new(format!("Видно солдат: {visible}")).color(theme::TEXT_DIM));
+        egui::CollapsingHeader::new("Точки захвата").default_open(true).show(ui, |ui| {
+            for (i, p) in w.points.iter().enumerate() {
+                point_label(ui, i, p.owner);
+            }
+        });
     }
 
     fn properties(&mut self, ui: &mut egui::Ui) {
@@ -284,10 +497,16 @@ impl Lab {
             .frame(egui::Frame::new().fill(theme::REGION).inner_margin(egui::Margin::same(6)))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    theme::panel(ui, "Симуляция", true, |ui| self.simulation_panel(ui));
-                    theme::panel(ui, "Матч", true, |ui| self.match_panel(ui));
-                    theme::panel(ui, "Производительность", true, |ui| self.performance_panel(ui));
-                    theme::panel(ui, "Выделение", true, |ui| self.selection_panel(ui));
+                    if self.client.is_some() {
+                        theme::panel(ui, "Подключение", true, |ui| self.client_panel(ui));
+                        theme::panel(ui, "Управление", true, controls_panel);
+                    } else {
+                        theme::panel(ui, "Симуляция", true, |ui| self.simulation_panel(ui));
+                        theme::panel(ui, "Матч", true, |ui| self.match_panel(ui));
+                        theme::panel(ui, "Сеть", true, |ui| self.network_panel(ui));
+                        theme::panel(ui, "Производительность", true, |ui| self.performance_panel(ui));
+                        theme::panel(ui, "Выделение", true, |ui| self.selection_panel(ui));
+                    }
                 });
             });
     }
@@ -354,6 +573,108 @@ impl Lab {
         let button = egui::Button::new(if changed { "Перезапустить с новыми параметрами" } else { "Перезапустить матч" });
         if ui.add_sized([ui.available_width(), 22.0], button).clicked() {
             self.restart();
+        }
+    }
+
+    fn network_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Свой сервер").strong());
+        match &self.server {
+            None => {
+                theme::props(ui, "server_props", |ui| {
+                    theme::label(ui, "Порт");
+                    ui.add(egui::DragValue::new(&mut self.server_port).range(1024..=65535));
+                    ui.end_row();
+                });
+                if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Запустить сервер")).clicked() {
+                    self.start_server();
+                }
+            }
+            Some(server) => {
+                let down: f32 = server.clients.iter().map(|c| c.traffic.sent_per_sec).sum();
+                let n = server.clients.len();
+                theme::props(ui, "server_stats", |ui| {
+                    theme::label(ui, "Порт");
+                    ui.label(self.server_port.to_string());
+                    ui.end_row();
+                    theme::label(ui, "Игроков");
+                    ui.label(format!("{n} / {}", server.max_clients));
+                    ui.end_row();
+                    theme::label(ui, "На игрока");
+                    ui.label(format!("{:.1} КБ/с", down / n.max(1) as f32 / 1024.0));
+                    ui.end_row();
+                    theme::label(ui, "Отдаёт всего");
+                    ui.label(format!("{:.0} КБ/с", server.traffic.sent_per_sec / 1024.0));
+                    ui.end_row();
+                });
+                if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Остановить сервер")).clicked() {
+                    // Без сервера игроки пропадут — отдаём их солдат обратно ИИ.
+                    for c in &server.clients {
+                        self.world.release_control(c.replica.soldier);
+                    }
+                    self.server = None;
+                    self.log("Сервер остановлен".into());
+                }
+            }
+        }
+        ui.add_space(6.0);
+        ui.label(RichText::new("Подключиться").strong());
+        theme::props(ui, "connect_props", |ui| {
+            theme::label(ui, "Адрес");
+            ui.add(egui::TextEdit::singleline(&mut self.connect_addr).desired_width(150.0));
+            ui.end_row();
+            theme::label(ui, "Имя");
+            ui.add(egui::TextEdit::singleline(&mut self.player_name).desired_width(150.0));
+            ui.end_row();
+        });
+        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Подключиться и играть")).clicked() {
+            self.connect();
+        }
+        for line in &self.net_log {
+            ui.label(RichText::new(line).small().color(theme::TEXT_DIM));
+        }
+    }
+
+    fn client_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(client) = &mut self.client else { return };
+        let status = match &client.status {
+            ClientStatus::Connecting => "подключаюсь…".to_string(),
+            ClientStatus::Connected => "в игре".to_string(),
+            ClientStatus::Rejected(why) => format!("отказ: {why}"),
+            ClientStatus::TimedOut => "сервер не отвечает".to_string(),
+        };
+        theme::props(ui, "client_props", |ui| {
+            theme::label(ui, "Сервер");
+            ui.label(client.server_addr().to_string());
+            ui.end_row();
+            theme::label(ui, "Состояние");
+            ui.label(status);
+            ui.end_row();
+            theme::label(ui, "Пинг");
+            ui.label(format!("{:.0} мс", client.rtt_ms));
+            ui.end_row();
+            theme::label(ui, "К нам");
+            ui.label(format!("{:.1} КБ/с", client.traffic.recv_per_sec / 1024.0));
+            ui.end_row();
+            theme::label(ui, "От нас");
+            ui.label(format!("{:.2} КБ/с", client.traffic.sent_per_sec / 1024.0));
+            ui.end_row();
+            theme::label(ui, "Пакет до");
+            ui.label(format!("{} Б", client.traffic.max_recv_packet));
+            ui.end_row();
+            theme::label(ui, "Не разобрано");
+            ui.label(client.decode_errors.to_string());
+            ui.end_row();
+            theme::label(ui, "Терять пакеты");
+            ui.add(egui::Slider::new(&mut client.simulated_loss, 0.0..=0.5).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            ui.end_row();
+        });
+        ui.label(
+            RichText::new("«Терять пакеты» нарочно выбрасывает часть входящих снимков — проверить, как игра переживает плохую сеть.")
+                .small()
+                .color(theme::TEXT_DIM),
+        );
+        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Отключиться")).clicked() {
+            self.disconnect();
         }
     }
 
@@ -443,6 +764,12 @@ impl Lab {
             theme::label(ui, "Солдат");
             ui.label(RichText::new(format!("#{i} · {}", theme::TEAM_NAME[s.team as usize])).color(theme::TEAM[s.team as usize]));
             ui.end_row();
+            theme::label(ui, "Управляет");
+            ui.label(match s.controller {
+                wind_sim::Controller::Ai => "ИИ",
+                wind_sim::Controller::Player(_) => "игрок по сети",
+            });
+            ui.end_row();
             theme::label(ui, "Состояние");
             if s.alive {
                 ui.label(format!("жив, здоровье {:.0}%", s.health * 100.0));
@@ -477,17 +804,46 @@ impl Lab {
     }
 }
 
+fn controls_panel(ui: &mut egui::Ui) {
+    theme::props(ui, "controls", |ui| {
+        for (key, what) in [
+            ("W A S D", "идти"),
+            ("Мышь", "прицел"),
+            ("ЛКМ", "огонь"),
+            ("G", "граната"),
+            ("Колесо", "масштаб"),
+            ("СКМ / ПКМ", "двигать вид"),
+        ] {
+            theme::label(ui, key);
+            ui.label(what);
+            ui.end_row();
+        }
+    });
+}
+
+fn point_label(ui: &mut egui::Ui, index: usize, owner: Option<u8>) -> egui::Response {
+    let (name, color) = match owner {
+        Some(t) => (theme::TEAM_NAME[t as usize], theme::TEAM[t as usize]),
+        None => ("ничья", theme::TEXT_DIM),
+    };
+    let letter = (b'A' + index as u8) as char;
+    ui.selectable_label(false, RichText::new(format!("Точка {letter} — {name}")).color(color))
+}
+
 impl eframe::App for Lab {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.hot_reload();
+        let typing = ui.ctx().egui_wants_keyboard_input();
         let (frame_dt, space, right) = ui.input(|i| {
             (i.stable_dt, i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::ArrowRight))
         });
-        if space {
-            self.paused = !self.paused;
-        }
-        if right && self.paused {
-            self.step();
+        if self.client.is_none() && !typing {
+            if space {
+                self.paused = !self.paused;
+            }
+            if right && self.paused {
+                self.step();
+            }
         }
         self.advance(frame_dt);
 
@@ -495,9 +851,24 @@ impl eframe::App for Lab {
         self.status_bar(ui);
         self.outliner(ui);
         self.properties(ui);
+        let ctx = ui.ctx().clone();
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            if let Some(pick) = self.viewport.show(ui, &self.world, self.selected) {
+            let playing = self.client.is_some();
+            let scene = match &self.client {
+                Some(client) => scene::remote(client),
+                None => Some(scene::local(&self.world, self.selected, &self.blasts)),
+            };
+            let Some(scene) = scene else {
+                ui.centered_and_justified(|ui| ui.label("Ждём ответа сервера…"));
+                return;
+            };
+            let out = self.viewport.show(ui, &scene, playing);
+            if let Some(pick) = out.picked {
                 self.selected = pick;
+            }
+            if playing {
+                self.viewport.follow = true;
+                self.send_player_input(&ctx, out.mouse_world, out.primary_down);
             }
         });
         ui.ctx().request_repaint();

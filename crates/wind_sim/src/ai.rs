@@ -4,7 +4,7 @@
 //! Сами решения считаются параллельно: каждый поток только читает мир.
 
 use crate::rng::Rng;
-use crate::world::{NO_OBJECTIVE, Projectile, ProjectileKind, World};
+use crate::world::{Controller, NO_OBJECTIVE, World};
 use glam::Vec2;
 use rayon::prelude::*;
 
@@ -25,31 +25,19 @@ pub(crate) fn think(world: &mut World) -> u32 {
     let w: &World = world;
     let decisions: Vec<Decision> = (0..w.soldiers.len())
         .into_par_iter()
-        .filter(|&i| i as u64 % interval == phase && w.soldiers[i].alive)
+        .filter(|&i| {
+            let s = &w.soldiers[i];
+            i as u64 % interval == phase && s.alive && s.controller == Controller::Ai
+        })
         .map(|i| decide(w, i))
         .collect();
 
-    let spec = world.config.grenade.clone();
     for d in &decisions {
         let s = &mut world.soldiers[d.soldier as usize];
         s.target = d.target;
         s.objective = d.objective;
         if let Some(at) = d.grenade_at {
-            s.grenades -= 1;
-            s.grenade_timer = spec.interval;
-            let to = at - s.pos;
-            let distance = to.length();
-            world.projectiles.push(Projectile {
-                pos: s.pos,
-                vel: to / distance * spec.throw_speed,
-                ttl: spec.fuse,
-                team: s.team,
-                shooter: d.soldier,
-                kind: ProjectileKind::Grenade {
-                    fuse: spec.fuse,
-                    flight: distance / spec.throw_speed,
-                },
-            });
+            world.throw_grenade(d.soldier, at);
         }
     }
     decisions.len() as u32

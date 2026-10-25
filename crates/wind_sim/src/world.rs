@@ -17,8 +17,27 @@ pub const NO_OBJECTIVE: u32 = u32::MAX;
 /// Размер клетки пространственной сетки, м.
 const GRID_CELL: f32 = 8.0;
 
+/// Ввод игрока за один тик.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlayerInput {
+    /// Куда идти; длина не больше 1.
+    pub move_dir: Vec2,
+    /// Точка мира, куда смотрит прицел.
+    pub aim: Vec2,
+    pub fire: bool,
+    pub grenade: bool,
+}
+
+/// Кто управляет солдатом.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Controller {
+    Ai,
+    Player(PlayerInput),
+}
+
 #[derive(Clone, Debug)]
 pub struct Soldier {
+    pub controller: Controller,
     pub pos: Vec2,
     pub vel: Vec2,
     /// Куда смотрит, радианы.
@@ -70,6 +89,9 @@ pub enum Event {
     Kill { killer: u32, victim: u32 },
     Explosion { pos: Vec2, radius: f32 },
     PointCaptured { point: u32, team: u8 },
+    /// Выстрел. Пули по сети не передаём — клиенту хватает этого события.
+    Shot { shooter: u32, angle: f32 },
+    GrenadeThrown { shooter: u32, from: Vec2, to: Vec2, fuse: f32 },
 }
 
 /// Сколько миллисекунд заняла каждая фаза тика.
@@ -241,7 +263,13 @@ impl World {
             let mut desired = Vec2::ZERO;
             let mut speed = spec.speed;
 
-            if let Some(target) = s.target.filter(|&t| prev[t as usize].1) {
+            if let Controller::Player(input) = s.controller {
+                desired = input.move_dir.clamp_length_max(1.0);
+                let look = input.aim - s.pos;
+                if look != Vec2::ZERO {
+                    s.facing = look.y.atan2(look.x);
+                }
+            } else if let Some(target) = s.target.filter(|&t| prev[t as usize].1) {
                 // Враг виден: подходим на дистанцию огня и стоим.
                 let to = prev[target as usize].0 - s.pos;
                 let d = to.length();
@@ -362,12 +390,73 @@ impl World {
             spots.extend(self.points.iter().filter(|p| p.owner == Some(team)).map(|p| p.pos));
             let spot = spots[rng.below(spots.len() as u32) as usize];
             let pos = self.find_spawn_spot(spot, 6.0, &mut rng);
-            self.soldiers[i] = self.fresh_soldier(team, pos);
+            let controller = self.soldiers[i].controller;
+            self.soldiers[i] = Soldier { controller, ..self.fresh_soldier(team, pos) };
         }
+    }
+
+    /// Отдаёт игроку солдата команды, которым пока управляет ИИ.
+    /// Живые в приоритете, чтобы игрок сразу оказался в бою.
+    pub fn take_control(&mut self, team: u8) -> Option<u32> {
+        let free = |s: &&Soldier| s.team == team && s.controller == Controller::Ai;
+        let pick = self
+            .soldiers
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| free(s))
+            .max_by_key(|(_, s)| s.alive)
+            .map(|(i, _)| i)?;
+        let s = &mut self.soldiers[pick];
+        s.controller = Controller::Player(PlayerInput { aim: s.pos, ..Default::default() });
+        s.target = None;
+        Some(pick as u32)
+    }
+
+    /// Игрок ушёл — солдат снова под управлением ИИ.
+    pub fn release_control(&mut self, soldier: u32) {
+        if let Some(s) = self.soldiers.get_mut(soldier as usize) {
+            s.controller = Controller::Ai;
+            s.objective = NO_OBJECTIVE;
+        }
+    }
+
+    pub fn set_input(&mut self, soldier: u32, input: PlayerInput) {
+        if let Some(s) = self.soldiers.get_mut(soldier as usize)
+            && let Controller::Player(current) = &mut s.controller
+        {
+            *current = input;
+        }
+    }
+
+    /// Бросок гранаты в точку (не дальше `max_distance`).
+    pub(crate) fn throw_grenade(&mut self, soldier: u32, at: Vec2) {
+        let spec = &self.config.grenade;
+        let s = &mut self.soldiers[soldier as usize];
+        let mut to = at - s.pos;
+        let mut distance = to.length();
+        if distance < 0.5 {
+            return;
+        }
+        if distance > spec.max_distance {
+            to *= spec.max_distance / distance;
+            distance = spec.max_distance;
+        }
+        s.grenades -= 1;
+        s.grenade_timer = spec.interval;
+        self.projectiles.push(Projectile {
+            pos: s.pos,
+            vel: to / distance * spec.throw_speed,
+            ttl: spec.fuse,
+            team: s.team,
+            shooter: soldier,
+            kind: ProjectileKind::Grenade { fuse: spec.fuse, flight: distance / spec.throw_speed },
+        });
+        self.events.push(Event::GrenadeThrown { shooter: soldier, from: s.pos, to: s.pos + to, fuse: spec.fuse });
     }
 
     fn fresh_soldier(&self, team: u8, pos: Vec2) -> Soldier {
         Soldier {
+            controller: Controller::Ai,
             pos,
             vel: Vec2::ZERO,
             facing: if team == 0 { 0.0 } else { std::f32::consts::PI },

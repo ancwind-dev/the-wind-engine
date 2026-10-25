@@ -3885,10 +3885,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind_bots"
+version = "0.1.0"
+dependencies = [
+ "wind_net",
+ "wind_sim",
+]
+
+[[package]]
 name = "wind_lab"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "wind_net",
+ "wind_sim",
+]
+
+[[package]]
+name = "wind_net"
+version = "0.1.0"
+dependencies = [
+ "rayon",
  "wind_sim",
 ]
 
@@ -3897,6 +3914,7 @@ name = "wind_server"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "wind_net",
  "wind_sim",
 ]
 

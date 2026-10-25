@@ -1,9 +1,11 @@
-//! Сервер без окна. Пока что — замер производительности симуляции.
+//! Выделенный сервер.
 //!
-//! cargo run --release -p wind_server -- --soldiers 1000 --ticks 2000
+//! cargo run --release -p wind_server                    — сервер на порту 7777
+//! cargo run --release -p wind_server -- --bench         — замер симуляции без сети
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use wind_net::{DEFAULT_PORT, NetServer, ReplicationConfig};
 use wind_sim::{SimConfig, TickStats, World};
 
 struct Args {
@@ -12,6 +14,9 @@ struct Args {
     map: Option<u32>,
     ticks: u64,
     seed: u64,
+    host: String,
+    port: u16,
+    bench: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -21,6 +26,9 @@ fn parse_args() -> Result<Args, String> {
         map: None,
         ticks: 2000,
         seed: 1,
+        host: "0.0.0.0".into(),
+        port: DEFAULT_PORT,
+        bench: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -31,10 +39,14 @@ fn parse_args() -> Result<Args, String> {
             "--map" => args.map = Some(number(&value()?)?),
             "--ticks" => args.ticks = number(&value()?)?,
             "--seed" => args.seed = number(&value()?)?,
+            "--host" => args.host = value()?,
+            "--port" => args.port = number(&value()?)?,
+            "--bench" => args.bench = true,
             "--help" | "-h" => {
                 println!(
-                    "wind_server [--config data/sim.ron] [--soldiers N на команду] \
-                     [--map сторона, м] [--ticks N] [--seed N]"
+                    "wind_server [--host 0.0.0.0] [--port 7777] [--config data/sim.ron] [--soldiers N на команду] \
+                     [--map сторона, м] [--seed N]\n\
+                     wind_server --bench [--ticks N] ...   — замер симуляции без сети"
                 );
                 std::process::exit(0);
             }
@@ -68,7 +80,77 @@ fn main() {
     if let Some(m) = args.map {
         config.map_size = m;
     }
+    if args.bench {
+        bench(config, &args);
+    } else {
+        serve(config, &args);
+    }
+}
 
+fn serve(config: SimConfig, args: &Args) {
+    let mut world = World::new(config, args.seed);
+    let mut net = NetServer::bind((args.host.as_str(), args.port), ReplicationConfig::default()).unwrap_or_else(|e| {
+        eprintln!("не удалось открыть порт {}: {e}", args.port);
+        std::process::exit(1);
+    });
+    println!(
+        "Сервер слушает порт {}. Карта {1}×{1} м, {2} солдат, {3} Гц. Остановить — Ctrl+C.",
+        args.port,
+        world.config.map_size,
+        world.soldiers.len(),
+        world.config.tick_rate
+    );
+
+    let dt = Duration::from_secs_f32(world.dt());
+    let mut next = Instant::now();
+    let mut last_report = Instant::now();
+    let mut worst_ms = 0.0f32;
+    loop {
+        let started = Instant::now();
+        net.poll(&mut world);
+        world.step();
+        net.send_snapshots(&world);
+        worst_ms = worst_ms.max(started.elapsed().as_secs_f32() * 1000.0);
+        for line in net.log.drain(..) {
+            println!("  {line}");
+        }
+
+        if last_report.elapsed() >= Duration::from_secs(2) {
+            last_report = Instant::now();
+            if net.clients.is_empty() {
+                println!("[тик {}] клиентов нет | тик сим {:.2} мс", world.tick, world.stats.total_ms);
+            } else {
+                let n = net.clients.len() as f32;
+                let down = net.clients.iter().map(|c| c.traffic.sent_per_sec).sum::<f32>() / n;
+                let up = net.clients.iter().map(|c| c.traffic.recv_per_sec).sum::<f32>() / n;
+                let max_packet = net.clients.iter().map(|c| c.traffic.max_sent_packet).max().unwrap_or(0);
+                println!(
+                    "[тик {}] клиентов {} | тик сим {:.2} мс, худший тик с сетью {:.2} мс | \
+                     на клиента: к нему {:.1} КБ/с, от него {:.1} КБ/с, пакет до {} Б | сервер отдаёт {:.0} КБ/с",
+                    world.tick,
+                    net.clients.len(),
+                    world.stats.total_ms,
+                    worst_ms,
+                    down / 1024.0,
+                    up / 1024.0,
+                    max_packet,
+                    net.traffic.sent_per_sec / 1024.0
+                );
+            }
+            worst_ms = 0.0;
+        }
+
+        next += dt;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else if now - next > Duration::from_millis(500) {
+            next = now; // сильно отстали — не пытаемся догонять рывком
+        }
+    }
+}
+
+fn bench(config: SimConfig, args: &Args) {
     println!(
         "Карта {0}×{0} м, {1} солдат ({2} на команду), {3} тиков при {4} Гц, потоков: {5}",
         config.map_size,
@@ -107,15 +189,17 @@ fn main() {
         totals[totals.len() - 1]
     );
     println!("По фазам, среднее:");
-    for (name, f) in [
-        ("сетка", (|s: &TickStats| s.grid_ms) as fn(&TickStats) -> f32),
+    type Phase = (&'static str, fn(&TickStats) -> f32);
+    let phases: [Phase; 7] = [
+        ("сетка", |s| s.grid_ms),
         ("пути", |s| s.nav_ms),
         ("ИИ", |s| s.think_ms),
         ("движение", |s| s.move_ms),
         ("стрельба", |s| s.fire_ms),
         ("снаряды", |s| s.projectiles_ms),
         ("точки", |s| s.capture_ms),
-    ] {
+    ];
+    for (name, f) in phases {
         println!("  {name:<10} {:.3}", avg(f));
     }
     println!();

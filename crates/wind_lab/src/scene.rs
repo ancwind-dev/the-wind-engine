@@ -1,0 +1,118 @@
+//! Сборка сцены для вьюпорта: из локальной симуляции или из мира, пришедшего по сети.
+
+use crate::theme;
+use crate::viewport::{Hud, Scene, ScenePoint, SceneSoldier, SelectedInfo};
+use wind_net::NetClient;
+use wind_sim::{Controller, ProjectileKind, Vec2, World};
+
+/// Вспышка взрыва в локальной симуляции.
+pub struct Blast {
+    pub pos: Vec2,
+    pub radius: f32,
+    pub age: f32,
+}
+
+pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast]) -> Scene<'a> {
+    let soldiers = world
+        .soldiers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.alive)
+        .map(|(i, s)| SceneSoldier {
+            id: i as u32,
+            pos: s.pos,
+            facing: s.facing,
+            team: s.team,
+            player: matches!(s.controller, Controller::Player(_)),
+        })
+        .collect();
+    let mut bullets = Vec::new();
+    let mut grenades = Vec::new();
+    for p in &world.projectiles {
+        match p.kind {
+            ProjectileKind::Bullet => bullets.push((p.pos - p.vel * 0.04, p.pos)),
+            ProjectileKind::Grenade { fuse, .. } => grenades.push((p.pos, fuse)),
+        }
+    }
+    let sel = selected.map(|i| &world.soldiers[i as usize]).filter(|s| s.alive);
+    Scene {
+        title: "Вид сверху · локальная симуляция".into(),
+        map: &world.map,
+        bases: world.bases,
+        points: world
+            .points
+            .iter()
+            .map(|p| ScenePoint { pos: p.pos, owner: p.owner, progress: p.progress })
+            .collect(),
+        capture_radius: world.config.capture.radius,
+        soldier_radius: world.config.soldier.radius,
+        soldiers,
+        bullets,
+        grenades,
+        blasts: blasts.iter().map(|b| (b.pos, b.radius, b.age)).collect(),
+        selected: sel.map(|s| SelectedInfo {
+            pos: s.pos,
+            ranges: Some((world.config.soldier.vision_range, world.config.weapon.range)),
+            target: s.target.map(|t| &world.soldiers[t as usize]).filter(|t| t.alive).map(|t| t.pos),
+        }),
+        flow: sel.and_then(|s| world.flow.get(s.objective as usize)),
+        hud: None,
+        kill_feed: Vec::new(),
+    }
+}
+
+/// `None`, пока сервер не прислал приветствие.
+pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
+    let w = client.world.as_ref()?;
+    let now = client.now();
+    let soldiers: Vec<SceneSoldier> = w
+        .soldiers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let s = s.as_ref()?;
+            Some(SceneSoldier {
+                id: i as u32,
+                pos: w.render_pos(s, now),
+                facing: s.net.facing(),
+                team: s.net.team(),
+                player: s.net.is_player(),
+            })
+        })
+        .collect();
+    let me = w.my_soldier().map(|s| w.render_pos(s, now));
+    let name = |id: u32| if id == w.welcome.soldier { "Ты".to_string() } else { format!("#{id}") };
+    Some(Scene {
+        title: format!("Игра по сети · {}", client.server_addr()),
+        map: &w.map,
+        bases: w.bases,
+        points: w
+            .points
+            .iter()
+            .map(|p| ScenePoint { pos: p.pos, owner: p.owner, progress: p.progress })
+            .collect(),
+        capture_radius: w.welcome.capture_radius,
+        soldier_radius: w.welcome.soldier_radius,
+        soldiers,
+        bullets: w.tracers.iter().map(|t| (t.pos - t.vel * 0.04, t.pos)).collect(),
+        grenades: w.grenades.iter().map(|g| (g.pos, g.fuse)).collect(),
+        blasts: w.blasts.clone(),
+        selected: me.map(|pos| SelectedInfo { pos, ranges: Some((w.welcome.interest_radius, w.welcome.weapon_range)), target: None }),
+        flow: None,
+        hud: Some(Hud {
+            alive: w.me.alive,
+            health: w.me.health,
+            ammo: w.me.ammo,
+            magazine: w.welcome.magazine_size,
+            reloading: w.me.reloading,
+            grenades: w.me.grenades,
+            respawn_in: w.me.respawn_in,
+            kills: w.me.kills,
+        }),
+        kill_feed: w
+            .kill_feed
+            .iter()
+            .map(|k| (format!("{} → {}", name(k.killer), name(k.victim)), theme::TEAM[k.killer_team as usize]))
+            .collect(),
+    })
+}

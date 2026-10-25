@@ -1,7 +1,7 @@
 //! Стрельба, полёт пуль и гранат, взрывы.
 
 use crate::rng::Rng;
-use crate::world::{Event, Projectile, ProjectileKind, World, snapshot};
+use crate::world::{Controller, Event, Projectile, ProjectileKind, World, snapshot};
 use glam::Vec2;
 use rayon::prelude::*;
 
@@ -32,27 +32,43 @@ pub(crate) fn fire(world: &mut World) {
                 }
                 return None;
             }
-            let target = s.target?;
-            let (target_pos, target_alive) = prev[target as usize];
-            if !target_alive {
-                s.target = None;
-                return None;
-            }
-            if s.cooldown > 0.0 {
-                return None;
-            }
-            let to = target_pos - s.pos;
-            if to.length() > weapon.range {
-                return None;
-            }
-            if !map.line_of_sight(s.pos, target_pos) {
-                s.target = None;
+            let to = match s.controller {
+                // Игрок стреляет куда целится, видимость не проверяем.
+                Controller::Player(input) => {
+                    if !input.fire || s.cooldown > 0.0 {
+                        return None;
+                    }
+                    input.aim - s.pos
+                }
+                Controller::Ai => {
+                    let target = s.target?;
+                    let (target_pos, target_alive) = prev[target as usize];
+                    if !target_alive {
+                        s.target = None;
+                        return None;
+                    }
+                    if s.cooldown > 0.0 {
+                        return None;
+                    }
+                    let to = target_pos - s.pos;
+                    if to.length() > weapon.range {
+                        return None;
+                    }
+                    if !map.line_of_sight(s.pos, target_pos) {
+                        s.target = None;
+                        return None;
+                    }
+                    to
+                }
+            };
+            if to == Vec2::ZERO {
                 return None;
             }
             let mut rng = Rng::for_entity(seed ^ 0xF17E, tick, i as u32);
             let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * spread;
             let dir = Vec2::new(angle.cos(), angle.sin());
-            s.cooldown += weapon.retrigger_time;
+            // Кулдаун копится только во время стрельбы, иначе после паузы была бы очередь.
+            s.cooldown = s.cooldown.max(0.0) + weapon.retrigger_time;
             s.ammo = s.ammo.saturating_sub(1);
             if s.ammo == 0 {
                 s.reload_timer = weapon.reload_time;
@@ -67,7 +83,23 @@ pub(crate) fn fire(world: &mut World) {
             })
         })
         .collect();
+    for p in &shots {
+        world.events.push(Event::Shot { shooter: p.shooter, angle: p.vel.y.atan2(p.vel.x) });
+    }
     world.projectiles.extend(shots);
+
+    // Гранаты игроков. ИИ бросает свои в ai::think.
+    for i in 0..world.soldiers.len() {
+        let s = &world.soldiers[i];
+        if let Controller::Player(input) = s.controller
+            && input.grenade
+            && s.alive
+            && s.grenades > 0
+            && s.grenade_timer <= 0.0
+        {
+            world.throw_grenade(i as u32, input.aim);
+        }
+    }
 }
 
 enum Outcome {

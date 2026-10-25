@@ -14,4 +14,7 @@ mod combat;
 
 pub use config::SimConfig;
 pub use glam::Vec2;
-pub use world::{Event, Projectile, ProjectileKind, Soldier, TickStats, World};
+pub use world::{
+    CapturePoint, Controller, Event, PlayerInput, Projectile, ProjectileKind, Soldier, TickStats,
+    World,
+};
