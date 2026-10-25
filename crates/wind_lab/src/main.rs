@@ -114,8 +114,9 @@ impl Lab {
         let mut viewport = Viewport::new();
         let mut editor_view = Viewport::new();
         if let Some(rs) = &cc.wgpu_render_state {
-            let models = config_path.parent().map(|data| data.join("models/soldier"));
-            wind_render::install(rs, MSAA, models.as_deref());
+            let installed = wind_render::install(rs, MSAA, config_path.parent());
+            viewport.set_characters(installed.characters.clone());
+            editor_view.set_characters(installed.characters);
             viewport.has_3d = true;
             editor_view.has_3d = true;
         }

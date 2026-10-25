@@ -3927,6 +3927,8 @@ dependencies = [
  "bytemuck",
  "eframe",
  "glam",
+ "ron",
+ "serde",
  "wind_sim",
 ]
 

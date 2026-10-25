@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 use wind_net::{ClientStatus, NetClient};
-use wind_render::{PointDraw, SoldierDraw};
+use wind_render::{CorpseDraw, PointDraw, SoldierDraw};
 use wind_sim::map::Map;
 use wind_sim::{Controller, Event, PlayerInput, ProjectileKind, Vec2, World};
 
@@ -33,6 +33,7 @@ pub struct View {
     pub me: Me,
     pub score: [u32; 2],
     pub kill_feed: Vec<(String, u8)>,
+    pub corpses: Vec<CorpseDraw>,
     /// Есть свой солдат (иначе мы наблюдатель).
     pub has_me: bool,
 }
@@ -187,6 +188,14 @@ fn local_view(l: &Local) -> View {
         };
     }
     v.kill_feed = l.feed.iter().map(|f| (f.0.clone(), f.1)).collect();
+    let respawn = w.config.soldier.respawn_time;
+    v.corpses = w
+        .soldiers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.alive && s.respawn_timer > 0.0)
+        .map(|(i, s)| CorpseDraw { id: i as u32, pos: s.pos, facing: s.facing, team: s.team, age: respawn - s.respawn_timer })
+        .collect();
     v
 }
 
@@ -227,5 +236,10 @@ fn remote_view(c: &NetClient) -> View {
         },
         score: w.score,
         kill_feed: w.kill_feed.iter().map(|k| (format!("{} → {}", name(k.killer), name(k.victim)), k.killer_team)).collect(),
+        corpses: w
+            .corpses
+            .iter()
+            .map(|c| CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age })
+            .collect(),
     }
 }

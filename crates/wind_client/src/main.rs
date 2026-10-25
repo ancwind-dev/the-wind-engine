@@ -31,13 +31,15 @@ struct Args {
     seed: u64,
     bench: Option<f32>,
     spectate: bool,
+    /// За кем следит наблюдатель с самого начала.
+    follow: u32,
     /// Карта из `data/maps/<имя>`.
     map_file: Option<String>,
     vsync: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { connect: None, name: "Игрок".into(), soldiers: None, map: None, seed: 1, bench: None, spectate: false, map_file: None, vsync: false };
+    let mut a = Args { connect: None, name: "Игрок".into(), soldiers: None, map: None, seed: 1, bench: None, spectate: false, follow: 0, map_file: None, vsync: false };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("после {flag} нужно значение"));
@@ -51,6 +53,10 @@ fn parse_args() -> Result<Args, String> {
             "--bench" => a.bench = Some(num(value()?)? as f32),
             "--vsync" => a.vsync = true,
             "--spectate" => a.spectate = true,
+            "--follow" => {
+                a.spectate = true;
+                a.follow = num(value()?)? as u32;
+            }
             "--map-file" => a.map_file = Some(value()?),
             "--export-models" => {
                 let dir = data_dir().join("models/soldier");
@@ -64,7 +70,7 @@ fn parse_args() -> Result<Args, String> {
                 println!(
                     "wind_client [--connect адрес] [--name имя] [--soldiers N на команду] [--map сторона] [--map-file имя] [--seed N]\n\
                      wind_client --bench секунд [--soldiers N]   — замер FPS, без игрока\n\
-                     wind_client --spectate                     — наблюдать за боем (Tab — следующий солдат)\n\
+                     wind_client --spectate [--follow N]        — наблюдать за боем (Tab — следующий солдат)\n\
                      wind_client --export-models                — выгрузить модели солдата в data/models/soldier/*.vox\n\
                      --vsync — включить вертикальную синхронизацию (по умолчанию выключена, чтобы мерить FPS)"
                 );
@@ -161,10 +167,13 @@ struct Game {
 impl Game {
     fn new(cc: &eframe::CreationContext<'_>, args: Args) -> Self {
         let mut notes = Vec::new();
+        let mut characters = None;
         let render_state = cc.wgpu_render_state.clone();
         match &render_state {
             Some(rs) => {
-                notes.extend(wind_render::install(rs, MSAA, Some(&data_dir().join("models/soldier"))));
+                let installed = wind_render::install(rs, MSAA, Some(&data_dir()));
+                notes.extend(installed.notes);
+                characters = installed.characters;
                 let info = rs.adapter.get_info();
                 notes.push(format!("{} · {:?}", info.name, info.backend));
             }
@@ -220,7 +229,7 @@ impl Game {
 
         Game {
             source,
-            scene: SceneBuilder::default(),
+            scene: SceneBuilder::with_characters(characters),
             camera,
             last_frame: Instant::now(),
             started: Instant::now(),
@@ -228,7 +237,7 @@ impl Game {
             debug: false,
             aim: Vec2::ZERO,
             bench,
-            follow: 0,
+            follow: args.follow,
             notes,
             render_state,
         }
@@ -359,6 +368,7 @@ impl eframe::App for Game {
                     points: &view.points,
                     marker: view.me_pos,
                     rings: &[],
+                    corpses: &view.corpses,
                     time,
                     dt,
                 };

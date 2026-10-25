@@ -7,4 +7,6 @@ edition.workspace = true
 bytemuck = { version = "1.25.2", features = ["derive"] }
 eframe = "0.37.0"
 glam = "0.34.1"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
 wind_sim = { version = "0.1.0", path = "../wind_sim" }

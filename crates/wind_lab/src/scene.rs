@@ -60,6 +60,19 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast]) -> S
         kill_feed: Vec::new(),
         rings: Vec::new(),
         lines: Vec::new(),
+        corpses: world
+            .soldiers
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.alive && s.respawn_timer > 0.0)
+            .map(|(i, s)| wind_render::CorpseDraw {
+                id: i as u32,
+                pos: s.pos,
+                facing: s.facing,
+                team: s.team,
+                age: world.config.soldier.respawn_time - s.respawn_timer,
+            })
+            .collect(),
     }
 }
 
@@ -118,5 +131,6 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
             .collect(),
         rings: Vec::new(),
         lines: Vec::new(),
+        corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age }).collect(),
     })
 }
