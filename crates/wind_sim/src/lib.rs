@@ -4,6 +4,7 @@
 pub mod config;
 pub mod grid;
 pub mod map;
+pub mod mapfile;
 pub mod mapgen;
 pub mod nav;
 pub mod rng;

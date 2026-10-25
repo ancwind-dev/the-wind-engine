@@ -4,7 +4,7 @@
 //! Перестраиваются только чанки, версия которых изменилась (и их соседи —
 //! у них могли открыться боковые грани).
 
-use crate::voxel::Mesh;
+use crate::voxel::{Mesh, Vertex};
 use glam::Vec3;
 use wind_sim::map::{EMPTY, INDESTRUCTIBLE, Map};
 
@@ -42,17 +42,28 @@ fn rgba(c: [f32; 3], shade: f32) -> [u8; 4] {
     [(c[0] * shade) as u8, (c[1] * shade) as u8, (c[2] * shade) as u8, 255]
 }
 
+/// Низ и верх столбика стены в клетке, м. Низ — чуть ниже самого низкого угла
+/// клетки, чтобы на склоне между стеной и землёй не было щели.
+fn column(map: &Map, x: i32, y: i32) -> Option<(f32, f32)> {
+    let hp = map.solid[map.index(x, y)?];
+    let wall = wall_height(hp);
+    if wall == 0.0 {
+        return None;
+    }
+    let corners = [map.corner_height(x, y), map.corner_height(x + 1, y), map.corner_height(x, y + 1), map.corner_height(x + 1, y + 1)];
+    let low = corners.iter().copied().fold(f32::INFINITY, f32::min);
+    let mid = corners.iter().sum::<f32>() / 4.0;
+    Some((low - 0.05, mid + wall))
+}
+
+/// Стены чанка: столбики на рельефе.
 pub fn mesh_chunk(map: &Map, chunk: usize) -> Mesh {
     let mut mesh = Mesh::default();
     let (x0, y0, w, h) = map.chunk_rect(chunk);
-    let height_at = |x: i32, y: i32| map.index(x, y).map_or(0.0, |i| wall_height(map.solid[i]));
     for y in y0 as i32..(y0 + h) as i32 {
         for x in x0 as i32..(x0 + w) as i32 {
+            let Some((base, top)) = column(map, x, y) else { continue };
             let hp = map.solid[map.index(x, y).unwrap()];
-            let top = wall_height(hp);
-            if top == 0.0 {
-                continue;
-            }
             let c = wall_color(hp, x, y);
             let (fx, fz) = (x as f32, y as f32);
             let v = |px: f32, py: f32, pz: f32| Vec3::new(px, py, pz);
@@ -65,11 +76,12 @@ pub fn mesh_chunk(map: &Map, chunk: usize) -> Mesh {
             let sides: [((i32, i32), [i8; 3]); 4] =
                 [((1, 0), [127, 0, 0]), ((-1, 0), [-127, 0, 0]), ((0, 1), [0, 0, 127]), ((0, -1), [0, 0, -127])];
             for ((dx, dy), normal) in sides {
-                let low = height_at(x + dx, y + dy);
+                let neighbor = column(map, x + dx, y + dy);
+                let low = neighbor.map_or(base, |(_, t)| t.max(base));
                 if low >= top {
                     continue;
                 }
-                let bottom = rgba(c, if low == 0.0 { 0.55 } else { 0.8 });
+                let bottom = rgba(c, if neighbor.is_none() { 0.55 } else { 0.8 });
                 let upper = rgba(c, 0.95);
                 let corners = match (dx, dy) {
                     (1, 0) => [v(fx + 1.0, low, fz), v(fx + 1.0, top, fz), v(fx + 1.0, top, fz + 1.0), v(fx + 1.0, low, fz + 1.0)],
@@ -84,6 +96,45 @@ pub fn mesh_chunk(map: &Map, chunk: usize) -> Mesh {
     mesh
 }
 
+/// Земля чанка: сетка по углам клеток, нормали — по соседним высотам.
+pub fn terrain_chunk(map: &Map, chunk: usize) -> Mesh {
+    let mut mesh = Mesh::default();
+    let (x0, y0, w, h) = map.chunk_rect(chunk);
+    let (x0, y0, w, h) = (x0 as i32, y0 as i32, w as i32, h as i32);
+    for y in y0..=y0 + h {
+        for x in x0..=x0 + w {
+            let n = Vec3::new(
+                map.corner_height(x - 1, y) - map.corner_height(x + 1, y),
+                2.0,
+                map.corner_height(x, y - 1) - map.corner_height(x, y + 1),
+            )
+            .normalize();
+            mesh.vertices.push(Vertex {
+                pos: [x as f32, map.corner_height(x, y), y as f32],
+                normal: [(n.x * 127.0) as i8, (n.y * 127.0) as i8, (n.z * 127.0) as i8, 0],
+                color: [255, 255, 255, 255],
+            });
+        }
+    }
+    let row = (w + 1) as u32;
+    for y in 0..h as u32 {
+        for x in 0..w as u32 {
+            let a = y * row + x;
+            let (b, c, d) = (a + row, a + row + 1, a + 1);
+            // Против часовой, если смотреть сверху.
+            mesh.indices.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+    }
+    mesh
+}
+
+/// Меши одного чанка карты.
+pub struct ChunkMeshes {
+    /// `None` — стен в чанке нет.
+    pub walls: Option<Mesh>,
+    pub terrain: Mesh,
+}
+
 /// Помнит, какие версии чанков уже превращены в меши.
 #[derive(Default)]
 pub struct MapMesher {
@@ -95,8 +146,7 @@ pub struct MapMesher {
 pub struct MapUpdate {
     /// Карта другая целиком — старые меши выбросить.
     pub reset: bool,
-    /// (чанк, меш); `None` — чанк теперь пуст.
-    pub chunks: Vec<(u32, Option<Mesh>)>,
+    pub chunks: Vec<(u32, ChunkMeshes)>,
 }
 
 impl MapMesher {
@@ -128,8 +178,9 @@ impl MapMesher {
             .filter(|&c| dirty[c])
             .map(|c| {
                 self.seen[c] = map.chunk_revisions[c];
-                let mesh = mesh_chunk(map, c);
-                (c as u32, (!mesh.indices.is_empty()).then_some(mesh))
+                let walls = mesh_chunk(map, c);
+                let terrain = terrain_chunk(map, c);
+                (c as u32, ChunkMeshes { walls: (!walls.indices.is_empty()).then_some(walls), terrain })
             })
             .collect();
         MapUpdate { reset, chunks }

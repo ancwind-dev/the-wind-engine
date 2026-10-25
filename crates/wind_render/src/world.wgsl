@@ -153,7 +153,7 @@ fn vs_ground(@builtin(vertex_index) i: u32) -> GOut {
     );
     let c = corners[i];
     var out: GOut;
-    out.world = vec3<f32>(c.x, 0.0, c.y);
+    out.world = vec3<f32>(c.x, -0.05, c.y);
     out.clip = g.view_proj * vec4<f32>(out.world, 1.0);
     return out;
 }
@@ -172,22 +172,26 @@ fn noise(p: vec2<f32>) -> f32 {
     return mix(a, b, u.y);
 }
 
-@fragment
-fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
-    let p = in.world.xz;
-    let size = g.params.x;
-    // Трава: лёгкая разница по клеткам (воксельный вид) и плавные пятна сухой травы и земли.
-    var albedo = vec3<f32>(0.42, 0.48, 0.28) * (0.95 + 0.05 * hash2(floor(p)));
-    let dry = smoothstep(0.55, 0.75, noise(p / 9.0));
-    albedo = mix(albedo, vec3<f32>(0.50, 0.48, 0.32), dry * 0.7);
-    let dirt = smoothstep(0.62, 0.80, noise(p / 23.0 + vec2<f32>(17.0, 5.0)));
-    albedo = mix(albedo, vec3<f32>(0.47, 0.41, 0.31), dirt * 0.6);
+// Покрытие земли: номер материала на клетку (см. GROUND_NAMES в wind_sim::map).
+@group(1) @binding(0) var ground_tex: texture_2d<u32>;
 
-    // За краем карты — темнее.
-    let inside = step(0.0, p.x) * step(0.0, p.y) * step(p.x, size) * step(p.y, size);
-    albedo = mix(albedo * 0.45, albedo, inside);
+fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
+    var c: vec3<f32>;
+    switch m {
+        case 1u: { c = vec3<f32>(0.52, 0.50, 0.33); }  // сухая трава
+        case 2u: { c = vec3<f32>(0.47, 0.40, 0.30); }  // земля
+        case 3u: { c = vec3<f32>(0.74, 0.68, 0.50); }  // песок
+        case 4u: { c = vec3<f32>(0.30, 0.30, 0.31); }  // асфальт
+        case 5u: { c = vec3<f32>(0.62, 0.61, 0.58); }  // бетон
+        default: { c = vec3<f32>(0.42, 0.48, 0.28); }  // трава
+    }
+    // Лёгкая разница по клеткам (воксельный вид) и мягкие пятна внутри материала.
+    return c * (0.95 + 0.05 * hash2(floor(p))) * (0.94 + 0.08 * noise(p / 4.0));
+}
 
-    // Зоны захвата и метка своего солдата.
+// Зоны захвата, метка своего солдата, кисть редактора.
+fn zones(albedo_in: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
+    var albedo = albedo_in;
     let count = i32(g.params.z);
     for (var k = 0; k < count; k++) {
         let pt = g.points[k];
@@ -199,7 +203,28 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
         }
         albedo = mix(albedo, pt.color.rgb, ring * 0.9);
     }
+    return albedo;
+}
 
+@fragment
+fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
+    let p = in.world.xz;
+    let size = vec2<i32>(textureDimensions(ground_tex));
+    // Берём материал со сдвигом по шуму — границы получаются неровные, «рисованные».
+    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
+    let cell = clamp(vec2<i32>(floor(p + jitter)), vec2<i32>(0), size - vec2<i32>(1));
+    let m = textureLoad(ground_tex, cell, 0).r;
+    let albedo = zones(material(m, p), p);
+    let c = light(albedo, normalize(in.normal), in.world);
+    return vec4<f32>(fogged(c, in.world), 1.0);
+}
+
+// За краем карты — тёмная подложка; внутри её закрывает рельеф.
+@fragment
+fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
+    let p = in.world.xz;
+    let size = g.params.x;
+    let albedo = vec3<f32>(0.42, 0.48, 0.28) * 0.45 * (0.95 + 0.05 * hash2(floor(p)));
     let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }

@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use wind_net::{DEFAULT_PORT, NetServer, ReplicationConfig};
+use wind_sim::mapfile::MapFile;
 use wind_sim::{SimConfig, TickStats, World};
 
 struct Args {
@@ -17,6 +18,8 @@ struct Args {
     host: String,
     port: u16,
     bench: bool,
+    /// Карта из `data/maps/<имя>`. Без неё — процедурная.
+    map_file: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -29,6 +32,7 @@ fn parse_args() -> Result<Args, String> {
         host: "0.0.0.0".into(),
         port: DEFAULT_PORT,
         bench: false,
+        map_file: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -42,10 +46,11 @@ fn parse_args() -> Result<Args, String> {
             "--host" => args.host = value()?,
             "--port" => args.port = number(&value()?)?,
             "--bench" => args.bench = true,
+            "--map-file" => args.map_file = Some(value()?),
             "--help" | "-h" => {
                 println!(
                     "wind_server [--host 0.0.0.0] [--port 7777] [--config data/sim.ron] [--soldiers N на команду] \
-                     [--map сторона, м] [--seed N]\n\
+                     [--map сторона, м] [--map-file имя из data/maps] [--seed N]\n\
                      wind_server --bench [--ticks N] ...   — замер симуляции без сети"
                 );
                 std::process::exit(0);
@@ -88,7 +93,7 @@ fn main() {
 }
 
 fn serve(config: SimConfig, args: &Args) {
-    let mut world = World::new(config, args.seed);
+    let mut world = make_world(config, args);
     let mut net = NetServer::bind((args.host.as_str(), args.port), ReplicationConfig::default()).unwrap_or_else(|e| {
         eprintln!("не удалось открыть порт {}: {e}", args.port);
         std::process::exit(1);
@@ -162,7 +167,7 @@ fn bench(config: SimConfig, args: &Args) {
     );
 
     let started = Instant::now();
-    let mut world = World::new(config, args.seed);
+    let mut world = make_world(config, args);
     println!("Мир создан за {:.0} мс (карта и поля путей)", started.elapsed().as_secs_f32() * 1000.0);
 
     let mut history: Vec<TickStats> = Vec::with_capacity(args.ticks as usize);
@@ -225,4 +230,20 @@ fn bench(config: SimConfig, args: &Args) {
         })
         .collect();
     println!("Точки: {}", owners.join(", "));
+}
+
+/// Мир на карте из файла (`--map-file`) или на процедурной.
+fn make_world(config: SimConfig, args: &Args) -> World {
+    let Some(name) = &args.map_file else { return World::new(config, args.seed) };
+    let maps = args.config.parent().unwrap_or(std::path::Path::new(".")).join("maps");
+    match MapFile::load(&maps.join(name)) {
+        Ok(file) => {
+            println!("Карта «{}» из {}", file.name, maps.join(name).display());
+            World::from_file(config, args.seed, file)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
 }

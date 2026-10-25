@@ -211,5 +211,7 @@ pub fn welcome_for(world: &World, client_id: u16, soldier: u32, config: &Replica
         interest_radius: config.interest_radius,
         grenade_speed: c.grenade.throw_speed,
         magazine_size: c.weapon.magazine_size,
+        map_name: world.map_file.as_ref().map_or(String::new(), |f| f.0.clone()),
+        map_fingerprint: world.map_file.as_ref().map_or(0, |f| f.1),
     }
 }

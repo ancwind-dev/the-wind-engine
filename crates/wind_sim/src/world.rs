@@ -3,6 +3,7 @@
 use crate::config::SimConfig;
 use crate::grid::SpatialGrid;
 use crate::map::Map;
+use crate::mapfile::MapFile;
 use crate::mapgen::{self, Layout};
 use crate::nav::FlowField;
 use crate::rng::Rng;
@@ -128,13 +129,31 @@ pub struct World {
     /// Убийства за матч по командам.
     pub score: [u32; 2],
     pub stats: TickStats,
+    /// Карта из файла: имя и отпечаток. `None` — карта сгенерирована из seed.
+    pub map_file: Option<(String, u64)>,
     pub(crate) grid: SpatialGrid,
 }
 
 impl World {
+    /// Мир на процедурной карте из `config.map_size` и `seed`.
     pub fn new(config: SimConfig, seed: u64) -> Self {
-        let (map, Layout { bases, capture_points }) =
-            mapgen::generate(config.map_size, config.capture_points, seed);
+        let (map, layout) = mapgen::generate(config.map_size, config.capture_points, seed);
+        Self::with_map(config, seed, map, layout)
+    }
+
+    /// Мир на карте из файла (или из редактора).
+    pub fn from_file(config: SimConfig, seed: u64, file: MapFile) -> Self {
+        let id = (file.name.clone(), file.fingerprint());
+        let mut world = Self::with_map(config, seed, file.map, file.layout);
+        world.map_file = Some(id);
+        world
+    }
+
+    fn with_map(mut config: SimConfig, seed: u64, map: Map, layout: Layout) -> Self {
+        let Layout { bases, capture_points } = layout;
+        // Размер и число точек берём у карты, а не из настроек.
+        config.map_size = map.width;
+        config.capture_points = capture_points.len() as u32;
         let mut flow: Vec<FlowField> = capture_points.iter().map(|&p| FlowField::new(p)).collect();
         flow.par_iter_mut().for_each(|f| f.compute(&map));
 
@@ -142,12 +161,13 @@ impl World {
             .iter()
             .map(|&pos| CapturePoint { pos, owner: None, progress: 0.0 })
             .collect();
-        let grid = SpatialGrid::new(config.map_size as f32, GRID_CELL);
+        let grid = SpatialGrid::new(map.width.max(map.height) as f32, GRID_CELL);
 
         let mut world = World {
             config,
             seed,
             tick: 0,
+            map_file: None,
             map,
             bases,
             points,

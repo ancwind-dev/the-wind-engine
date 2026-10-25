@@ -8,7 +8,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -195,6 +195,9 @@ pub struct Welcome {
     pub interest_radius: f32,
     pub grenade_speed: f32,
     pub magazine_size: u32,
+    /// Карта из файла: имя папки в `data/maps` и отпечаток. Пустое имя — карта из seed.
+    pub map_name: String,
+    pub map_fingerprint: u64,
 }
 
 impl Welcome {
@@ -219,6 +222,8 @@ impl Welcome {
             w.write_f32(v);
         }
         w.write_var(self.magazine_size);
+        w.write_str(&self.map_name, 128);
+        w.write_u64(self.map_fingerprint);
         w.finish()
     }
 
@@ -240,6 +245,8 @@ impl Welcome {
             interest_radius: r.read_f32()?,
             grenade_speed: r.read_f32()?,
             magazine_size: r.read_var()?,
+            map_name: r.read_str(128)?,
+            map_fingerprint: r.read_u64()?,
         })
     }
 }

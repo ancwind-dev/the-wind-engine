@@ -18,11 +18,13 @@ pub struct Camera {
     pub yaw: f32,
     /// Вертикальный угол обзора, рад.
     pub fov_y: f32,
+    /// Высота земли под целью, м — чтобы на холме камера смотрела на холм, а не в него.
+    pub target_height: f32,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Camera { target: Vec2::ZERO, distance: 32.0, pitch: 1.05, yaw: 0.0, fov_y: 0.6 }
+        Camera { target: Vec2::ZERO, distance: 32.0, pitch: 1.05, yaw: 0.0, fov_y: 0.6, target_height: 0.0 }
     }
 }
 
@@ -34,13 +36,23 @@ impl Camera {
     pub fn eye(&self) -> Vec3 {
         let (sp, cp) = self.pitch.sin_cos();
         let (sy, cy) = self.yaw.sin_cos();
-        to_3d(self.target, 0.0) + Vec3::new(sy * cp, sp, cy * cp) * self.distance
+        to_3d(self.target, self.target_height) + Vec3::new(sy * cp, sp, cy * cp) * self.distance
     }
 
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
         let proj = proj::perspective(self.fov_y, aspect.max(0.01), 0.5, self.distance * 6.0 + 200.0);
-        let view = view::look_at_mat4(self.eye(), to_3d(self.target, 0.0), Vec3::Y);
+        let view = view::look_at_mat4(self.eye(), to_3d(self.target, self.target_height), Vec3::Y);
         proj * view
+    }
+
+    /// Точка рельефа под курсором: несколько уточнений — пересекаем луч с плоскостью
+    /// на высоте земли в найденной точке, пока не сойдётся.
+    pub fn pick(&self, ndc: Vec2, aspect: f32, map: &wind_sim::map::Map) -> Option<Vec2> {
+        let mut p = self.ground_point(ndc, aspect, self.target_height)?;
+        for _ in 0..4 {
+            p = self.ground_point(ndc, aspect, map.height_at(p))?;
+        }
+        Some(p)
     }
 
     /// Точка на земле под курсором. `ndc` — координаты экрана от −1 до 1 (Y вверх).

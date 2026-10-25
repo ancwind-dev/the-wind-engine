@@ -9,6 +9,7 @@ use glam::Vec2;
 pub const HOUSE_WALL: u8 = 120;
 pub const FENCE: u8 = 40;
 
+#[derive(Clone, Debug)]
 pub struct Layout {
     /// База каждой команды: там появляются солдаты.
     pub bases: [Vec2; 2],
@@ -104,6 +105,22 @@ pub fn generate(size: u32, capture_points: u32, seed: u64) -> (Map, Layout) {
         }
     }
 
+    // Покрытие земли: пятна сухой травы и земли по плавному шуму.
+    for y in 0..n {
+        for x in 0..n {
+            let dry = value_noise(x as f32 / 9.0, y as f32 / 9.0, seed);
+            let dirt = value_noise(x as f32 / 23.0 + 17.0, y as f32 / 23.0 + 5.0, seed ^ 0xD1);
+            let i = map.index(x, y).unwrap();
+            map.ground[i] = if dirt > 0.68 {
+                2
+            } else if dry > 0.62 {
+                1
+            } else {
+                0
+            };
+        }
+    }
+
     // Край карты.
     for i in 0..n {
         map.set(i, 0, INDESTRUCTIBLE);
@@ -113,6 +130,22 @@ pub fn generate(size: u32, capture_points: u32, seed: u64) -> (Map, Layout) {
     }
 
     (map, Layout { bases, capture_points: points })
+}
+
+/// Плавный шум 0..1: случайные значения в узлах сетки, между ними — сглаженно.
+fn value_noise(x: f32, y: f32, seed: u64) -> f32 {
+    let hash = |ix: i32, iy: i32| {
+        let mut h = (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F) ^ seed;
+        h ^= h >> 29;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        (h >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let (ix, iy) = (x.floor() as i32, y.floor() as i32);
+    let (fx, fy) = (x - ix as f32, y - iy as f32);
+    let (ux, uy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let top = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * ux;
+    let bottom = hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * ux;
+    top + (bottom - top) * uy
 }
 
 fn fill_circle(map: &mut Map, c: Vec2, r: f32, strength: u8) {
