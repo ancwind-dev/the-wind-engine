@@ -25,6 +25,14 @@ struct Globals {
     eye: vec4<f32>,
     // x — размер карты, y — время, z — число точек, w — размер текселя тени в UV.
     params: vec4<f32>,
+    view: mat4x4<f32>,
+    // Насыщенность, контраст, яркость, ступенчатость света.
+    grade: vec4<f32>,
+    tint: vec4<f32>,
+    // Обводка, затенение, виньетка, дальность для глубины.
+    post: vec4<f32>,
+    // Вьюпорт в пикселях кадра: x, y, ширина, высота.
+    screen: vec4<f32>,
     points: array<Point, 32>,
 };
 
@@ -60,10 +68,22 @@ fn shadow(world: vec3<f32>, n: vec3<f32>) -> f32 {
 
 fn light(albedo_srgb: vec3<f32>, n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
     let albedo = to_linear(albedo_srgb);
-    let ndl = max(dot(n, g.sun_dir.xyz), 0.0);
-    let sky = mix(g.ambient_ground.rgb, g.ambient_sky.rgb, n.y * 0.5 + 0.5);
-    let color = albedo * (sky + g.sun_color.rgb * ndl * shadow(world, n));
-    return to_srgb(color);
+    let direct = max(dot(n, g.sun_dir.xyz), 0.0) * shadow(world, n);
+    // Ступени, как в мультфильме: тень — полутень — свет, с узкими мягкими переходами.
+    let stepped = smoothstep(0.05, 0.12, direct) * 0.55 + smoothstep(0.42, 0.52, direct) * 0.45;
+    let d = mix(direct, stepped, g.grade.w);
+    // Тень окрашена цветом тени, а не просто темнее.
+    let ambient = mix(g.ambient_ground.rgb, g.ambient_sky.rgb, n.y * 0.5 + 0.5);
+    return to_srgb(albedo * (ambient + g.sun_color.rgb * d));
+}
+
+// «Плёнка»: оттенок, яркость, насыщенность, контраст.
+fn grade(c: vec3<f32>) -> vec3<f32> {
+    var x = c * g.tint.rgb * g.grade.z;
+    let luma = dot(x, vec3<f32>(0.299, 0.587, 0.114));
+    x = mix(vec3<f32>(luma), x, g.grade.x);
+    x = (x - vec3<f32>(0.5)) * g.grade.y + vec3<f32>(0.5);
+    return clamp(x, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 fn fogged(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
@@ -71,7 +91,7 @@ fn fogged(color: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
     // так он не зависит от того, насколько камера отдалена.
     let d = max(distance(world, g.eye.xyz) - g.ambient_ground.w, 0.0);
     let f = 1.0 - exp(-d * g.fog.w);
-    return mix(color, g.fog.rgb, clamp(f, 0.0, 1.0));
+    return grade(mix(color, g.fog.rgb, clamp(f, 0.0, 1.0)));
 }
 
 // --- Воксельные меши --------------------------------------------------------
@@ -174,6 +194,20 @@ fn noise(p: vec2<f32>) -> f32 {
 
 // Покрытие земли: номер материала на клетку (см. GROUND_NAMES в wind_sim::map).
 @group(1) @binding(0) var ground_tex: texture_2d<u32>;
+// Следы боя на всю карту: r — подпалины, g — кровь.
+@group(1) @binding(2) var decal_tex: texture_2d<f32>;
+@group(1) @binding(3) var decal_sampler: sampler;
+
+fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec3<f32> {
+    let t = textureSample(decal_tex, decal_sampler, p / map_size).rg;
+    // Неровные края и пятнистость — чтобы не было ровных кругов.
+    let n = noise(p * 1.7);
+    let scorch = smoothstep(0.15, 0.6, t.r - (n - 0.5) * 0.35);
+    let blood = smoothstep(0.35, 0.7, t.g - (n - 0.5) * 0.4);
+    var albedo = mix(albedo_in, vec3<f32>(0.13, 0.11, 0.10) * (0.8 + 0.4 * n), scorch * 0.85);
+    albedo = mix(albedo, vec3<f32>(0.22, 0.05, 0.04), blood * 0.6);
+    return albedo;
+}
 
 fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
     var c: vec3<f32>;
@@ -214,7 +248,7 @@ fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
     let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
     let cell = clamp(vec2<i32>(floor(p + jitter)), vec2<i32>(0), size - vec2<i32>(1));
     let m = textureLoad(ground_tex, cell, 0).r;
-    let albedo = zones(material(m, p), p);
+    let albedo = zones(battle_traces(material(m, p), p, vec2<f32>(size)), p);
     let c = light(albedo, normalize(in.normal), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
@@ -280,4 +314,99 @@ fn fs_char(in: COut) -> @location(0) vec4<f32> {
 fn vs_char_shadow(v: CIn) -> @builtin(position) vec4<f32> {
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
     return g.light_view_proj * model * vec4<f32>(v.pos, 1.0);
+}
+
+// --- Нормали и глубина (для обводки) -------------------------------------------------
+// Как у RWR: отдельно рисуем нормали в пространстве камеры и расстояние до камеры,
+// а потом по ним находим края.
+
+@fragment
+fn fs_nd(in: VOut) -> @location(0) vec4<f32> {
+    let n = normalize((g.view * vec4<f32>(normalize(in.normal), 0.0)).xyz);
+    let depth = -(g.view * vec4<f32>(in.world, 1.0)).z;
+    return vec4<f32>(n, depth);
+}
+
+@fragment
+fn fs_nd_char(in: COut) -> @location(0) vec4<f32> {
+    let n = normalize((g.view * vec4<f32>(normalize(in.normal), 0.0)).xyz);
+    let depth = -(g.view * vec4<f32>(in.world, 1.0)).z;
+    return vec4<f32>(n, depth);
+}
+
+// --- Обводка, затенение, виньетка ------------------------------------------------------
+// Полноэкранный треугольник; результат умножается на уже нарисованную картинку.
+
+@group(1) @binding(1) var nd_tex: texture_2d<f32>;
+
+@vertex
+fn vs_post(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(uv * 2.0 - vec2<f32>(1.0), 0.0, 1.0);
+}
+
+fn nd_at(p: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(textureDimensions(nd_tex));
+    return textureLoad(nd_tex, clamp(p, vec2<i32>(0), size - vec2<i32>(1)), 0);
+}
+
+// Точка в пространстве камеры по пикселю вьюпорта и глубине (камера смотрит вдоль −z).
+fn view_pos(p: vec2<i32>, depth: f32) -> vec3<f32> {
+    let half = g.screen.zw * 0.5;
+    let xy = (vec2<f32>(p) + vec2<f32>(0.5) - half) / g.tint.w * depth;
+    return vec3<f32>(xy.x, -xy.y, -depth);
+}
+
+@fragment
+fn fs_post(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let size = vec2<f32>(textureDimensions(nd_tex));
+    let p = vec2<i32>(floor(frag.xy - g.screen.xy));
+    let uv = (vec2<f32>(p) + vec2<f32>(0.5)) / size;
+
+    // Виньетка: края экрана темнее.
+    let aspect = vec2<f32>(1.0, size.y / max(size.x, 1.0));
+    let v = 1.0 - g.post.z * smoothstep(0.35, 0.95, length((uv - vec2<f32>(0.5)) * aspect) * 1.25);
+
+    let c = nd_at(p);
+    if (c.w <= 0.0) {
+        return vec4<f32>(v, v, v, 1.0);
+    }
+
+    // Обводка: соседи крестом. Край — там, где глубина скачет или нормали сильно расходятся.
+    var edge = 0.0;
+    let cross_offsets = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
+    for (var k = 0; k < 4; k++) {
+        let s = nd_at(p + cross_offsets[k]);
+        if (s.w <= 0.0) {
+            edge = 1.0;
+            continue;
+        }
+        let depth_jump = abs(s.w - c.w) / c.w;
+        let bend = 1.0 - dot(s.xyz, c.xyz);
+        edge = max(edge, smoothstep(0.02, 0.06, depth_jump));
+        edge = max(edge, smoothstep(0.35, 0.8, bend) * 0.6);
+    }
+
+    // Затенение в углах: 8 выборок по кругу радиусом ~0,6 м. Затеняет то, что поднимается
+    // над плоскостью поверхности (по нормали) и не слишком далеко — ровный склон сам себя
+    // не затеняет.
+    let radius = clamp(0.6 * g.tint.w / c.w, 2.0, 24.0);
+    let center = view_pos(p, c.w);
+    var occ = 0.0;
+    for (var k = 0; k < 8; k++) {
+        let a = f32(k) * 0.785398;
+        let r = radius * select(1.0, 0.5, k % 2 == 0);
+        let q = p + vec2<i32>(vec2<f32>(cos(a), sin(a)) * r);
+        let s = nd_at(q);
+        if (s.w > 0.0) {
+            let d = view_pos(q, s.w) - center;
+            let dist = length(d);
+            let rise = dot(c.xyz, d) / max(dist, 1e-4);
+            occ += clamp((rise - 0.15) * 2.0, 0.0, 1.0) * (1.0 - clamp(dist / 3.0, 0.0, 1.0));
+        }
+    }
+    let ao = 1.0 - (occ / 8.0) * g.post.y * 0.9;
+    let line = 1.0 - edge * g.post.x * 0.75;
+    let m = line * ao * v;
+    return vec4<f32>(m, m, m, 1.0);
 }

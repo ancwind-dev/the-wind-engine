@@ -37,6 +37,15 @@ pub struct Globals {
     pub fog: [f32; 4],
     pub eye: [f32; 4],
     pub params: [f32; 4],
+    pub view: [[f32; 4]; 4],
+    /// Насыщенность, контраст, яркость, ступенчатость света.
+    pub grade: [f32; 4],
+    /// Оттенок картинки (rgb).
+    pub tint: [f32; 4],
+    /// Обводка, затенение, виньетка, дальность для глубины.
+    pub post: [f32; 4],
+    /// Вьюпорт в пикселях кадра: x, y, ширина, высота.
+    pub screen: [f32; 4],
     pub points: [GroundPoint; MAX_POINTS],
 }
 
@@ -59,6 +68,10 @@ pub struct PendingMap {
     pub chunks: Vec<(u32, ChunkMeshes)>,
     /// Покрытие земли целиком: (ширина, высота, клетки).
     pub ground: Option<(u32, u32, Vec<u8>)>,
+    /// Новая текстура следов боя (ширина, высота) — при смене карты.
+    pub decal_size: Option<(u32, u32)>,
+    /// Изменённые прямоугольники следов: (x, y, ширина, высота) и тексели по 2 байта.
+    pub decal_rects: Vec<([u32; 4], Vec<u8>)>,
 }
 
 /// Всё, что нужно GPU для одного кадра. Собирает [`crate::scene::SceneBuilder`].
@@ -124,6 +137,8 @@ pub struct WorldRenderer {
     terrain: wgpu::RenderPipeline,
     ground_layout: wgpu::BindGroupLayout,
     ground_texture: wgpu::Texture,
+    decal_texture: wgpu::Texture,
+    decal_sampler: wgpu::Sampler,
     ground_bind: wgpu::BindGroup,
     globals: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -143,6 +158,12 @@ pub struct WorldRenderer {
     char_meshes: Vec<GpuMesh>,
     char_bind: wgpu::BindGroup,
     char_batches: Vec<(usize, u32, u32)>,
+    /// Обводка: проходы нормалей и глубины и полноэкранный умножающий проход.
+    nd_voxel: wgpu::RenderPipeline,
+    nd_char: wgpu::RenderPipeline,
+    post: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    nd: Option<NdTarget>,
     pub stats: RenderStats,
 }
 
@@ -274,18 +295,45 @@ impl WorldRenderer {
         // Покрытие земли: номер материала на клетку, читается в шейдере без фильтрации.
         let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Uint,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // Следы боя: подпалины (r) и кровь (g), со сглаживанием.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
-        let (ground_texture, ground_bind) = ground_texture(device, &ground_layout, 1, 1);
+        let ground_texture = layer_texture(device, "ground", wgpu::TextureFormat::R8Uint, 1, 1);
+        let decal_texture = layer_texture(device, "decals", wgpu::TextureFormat::Rg8Unorm, 1, 1);
+        let decal_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("decals"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let ground_bind = ground_bind(device, &ground_layout, &ground_texture, &decal_texture, &decal_sampler);
 
         let main_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world"),
@@ -481,6 +529,74 @@ impl WorldRenderer {
             multiview_mask: None,
             cache: None,
         });
+        // --- Обводка: нормали и глубина в свою текстуру, потом умножающий проход.
+        let nd_target = [Some(wgpu::ColorTargetState { format: ND_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
+        let nd_pipeline = |label: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout<'static>>], vs: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&main_pipeline_layout),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers },
+                primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+                depth_stencil: Some(depth(true, Default::default())),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &nd_target,
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let nd_voxel = nd_pipeline("nd voxel", "fs_nd", &layouts, "vs_voxel");
+        let nd_char = nd_pipeline("nd character", "fs_nd_char", &char_vertex, "vs_char");
+        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("post"),
+            bind_group_layouts: &[Some(&main_layout), Some(&post_layout)],
+            immediate_size: 0,
+        });
+        // Умножение: итог = нарисованное × множитель из шейдера.
+        let multiply = wgpu::BlendState {
+            color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Dst, dst_factor: wgpu::BlendFactor::Zero, operation: wgpu::BlendOperation::Add },
+            alpha: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::Zero, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add },
+        };
+        let post = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("post"),
+            layout: Some(&post_pipeline_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_post"), compilation_options: Default::default(), buffers: &[] },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_post"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: color_format, blend: Some(multiply), write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let char_meshes = characters
             .map(|c| {
                 c.meshes
@@ -506,6 +622,8 @@ impl WorldRenderer {
             terrain,
             ground_layout,
             ground_texture,
+            decal_texture,
+            decal_sampler,
             ground_bind,
             globals,
             bind,
@@ -523,6 +641,11 @@ impl WorldRenderer {
             char_meshes,
             char_bind,
             char_batches: Vec::new(),
+            nd_voxel,
+            nd_char,
+            post,
+            post_layout,
+            nd: None,
             stats: RenderStats::default(),
         }
     }
@@ -541,7 +664,8 @@ impl WorldRenderer {
             if let Some((w, h, cells)) = pending.ground.take() {
                 let size = self.ground_texture.size();
                 if size.width != w || size.height != h {
-                    (self.ground_texture, self.ground_bind) = ground_texture(device, &self.ground_layout, w, h);
+                    self.ground_texture = layer_texture(device, "ground", wgpu::TextureFormat::R8Uint, w, h);
+                    self.rebind_ground(device);
                 }
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -552,6 +676,23 @@ impl WorldRenderer {
                     },
                     &cells,
                     wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+            }
+            if let Some((w, h)) = pending.decal_size.take() {
+                self.decal_texture = layer_texture(device, "decals", wgpu::TextureFormat::Rg8Unorm, w, h);
+                self.rebind_ground(device);
+            }
+            for ([x, y, w, h], texels) in pending.decal_rects.drain(..) {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.decal_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &texels,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
                     wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 );
             }
@@ -587,6 +728,42 @@ impl WorldRenderer {
         self.draw_characters(&mut pass);
         drop(pass);
 
+        // Проход нормалей и глубины — для обводки и затенения.
+        let size = [frame.globals.screen[2].max(1.0) as u32, frame.globals.screen[3].max(1.0) as u32];
+        if self.nd.as_ref().is_none_or(|t| t.size != size) {
+            self.nd = Some(NdTarget::new(device, &self.post_layout, size));
+        }
+        let nd = self.nd.as_ref().unwrap();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("normal-depth pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &nd.color,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &nd.depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_pipeline(&self.nd_voxel);
+        pass.set_vertex_buffer(1, self.identity.slice(..));
+        for chunk in &self.visible {
+            if let Some((_, terrain)) = self.chunks.get(chunk) {
+                terrain.draw(&mut pass, 0..1);
+            }
+        }
+        self.draw_geometry(&mut pass);
+        pass.set_pipeline(&self.nd_char);
+        self.draw_characters(&mut pass);
+        drop(pass);
+
         self.stats = RenderStats {
             chunks: self.chunks.len(),
             chunks_drawn: self.visible.iter().filter(|c| self.chunks.contains_key(c)).count(),
@@ -613,6 +790,15 @@ impl WorldRenderer {
         pass.set_pipeline(&self.character);
         pass.set_bind_group(2, &self.char_bind, &[]);
         self.draw_characters(pass);
+        if let Some(nd) = &self.nd {
+            pass.set_pipeline(&self.post);
+            pass.set_bind_group(1, &nd.bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    fn rebind_ground(&mut self, device: &wgpu::Device) {
+        self.ground_bind = ground_bind(device, &self.ground_layout, &self.ground_texture, &self.decal_texture, &self.decal_sampler);
     }
 
     fn draw_characters(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -641,24 +827,37 @@ impl WorldRenderer {
     }
 }
 
-fn ground_texture(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, w: u32, h: u32) -> (wgpu::Texture, wgpu::BindGroup) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("ground"),
+fn layer_texture(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, w: u32, h: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
         size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::R8Uint,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    })
+}
+
+fn ground_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    ground: &wgpu::Texture,
+    decals: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let ground = ground.create_view(&wgpu::TextureViewDescriptor::default());
+    let decals = decals.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ground"),
         layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
-    });
-    (texture, bind)
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ground) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&decals) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
 }
 
 fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -746,5 +945,43 @@ impl CallbackTrait for WorldPaint {
         if let Some(r) = resources.get::<WorldRenderer>() {
             r.paint(pass);
         }
+    }
+}
+
+/// Формат текстуры нормалей и глубины: xyz — нормаль в пространстве камеры, w — расстояние.
+const ND_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+
+/// Текстура нормалей и глубины размером с вьюпорт.
+struct NdTarget {
+    size: [u32; 2],
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+}
+
+impl NdTarget {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: [u32; 2]) -> Self {
+        let make = |label: &str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+            device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let color = make("normal-depth", ND_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let depth = make("normal-depth depth", DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("post"),
+            layout,
+            entries: &[wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&color) }],
+        });
+        NdTarget { size, color, depth, bind }
     }
 }

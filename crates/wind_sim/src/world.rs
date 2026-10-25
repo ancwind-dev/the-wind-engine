@@ -3,6 +3,7 @@
 use crate::config::SimConfig;
 use crate::grid::SpatialGrid;
 use crate::map::Map;
+use crate::atmosphere::Atmosphere;
 use crate::mapfile::MapFile;
 use crate::mapgen::{self, Layout};
 use crate::nav::FlowField;
@@ -131,6 +132,8 @@ pub struct World {
     pub stats: TickStats,
     /// Карта из файла: имя и отпечаток. `None` — карта сгенерирована из seed.
     pub map_file: Option<(String, u64)>,
+    /// Атмосфера карты — только для картинки.
+    pub atmosphere: Atmosphere,
     pub(crate) grid: SpatialGrid,
 }
 
@@ -144,8 +147,10 @@ impl World {
     /// Мир на карте из файла (или из редактора).
     pub fn from_file(config: SimConfig, seed: u64, file: MapFile) -> Self {
         let id = (file.name.clone(), file.fingerprint());
+        let atmosphere = file.atmosphere;
         let mut world = Self::with_map(config, seed, file.map, file.layout);
         world.map_file = Some(id);
+        world.atmosphere = atmosphere;
         world
     }
 
@@ -168,6 +173,7 @@ impl World {
             seed,
             tick: 0,
             map_file: None,
+            atmosphere: Atmosphere::default(),
             map,
             bases,
             points,

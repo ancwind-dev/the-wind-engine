@@ -71,6 +71,8 @@ pub struct Scene<'a> {
     pub lines: Vec<(Vec2, Vec2)>,
     /// Убитые (для 3D): лежат, пока не возродятся.
     pub corpses: Vec<wind_render::CorpseDraw>,
+    /// Атмосфера карты (для 3D).
+    pub atmosphere: wind_sim::atmosphere::Atmosphere,
 }
 
 pub struct ViewportOutput {
@@ -286,6 +288,11 @@ impl Viewport {
             marker: scene.selected.as_ref().map(|s| s.pos),
             rings: &scene.rings,
             corpses: &scene.corpses,
+            atmosphere: &scene.atmosphere,
+            viewport_px: {
+                let ppp = ui.ctx().pixels_per_point();
+                [rect.left() * ppp, rect.top() * ppp, rect.width() * ppp, rect.height() * ppp]
+            },
             time: 0.0,
             dt,
         };

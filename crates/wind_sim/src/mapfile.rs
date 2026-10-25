@@ -8,6 +8,7 @@
 //! Слои — обычные картинки, их можно посмотреть и поправить любым графическим редактором,
 //! как карты RWR.
 
+use crate::atmosphere::Atmosphere;
 use crate::map::Map;
 use crate::mapgen::{self, Layout};
 use glam::Vec2;
@@ -22,6 +23,8 @@ struct Meta {
     height: u32,
     bases: [(f32, f32); 2],
     capture_points: Vec<(f32, f32)>,
+    #[serde(default)]
+    atmosphere: Atmosphere,
 }
 
 #[derive(Clone)]
@@ -29,13 +32,14 @@ pub struct MapFile {
     pub name: String,
     pub map: Map,
     pub layout: Layout,
+    pub atmosphere: Atmosphere,
 }
 
 impl MapFile {
     /// Процедурная карта — как раньше генерировал `World::new`.
     pub fn generated(name: &str, size: u32, capture_points: u32, seed: u64) -> Self {
         let (map, layout) = mapgen::generate(size, capture_points, seed);
-        MapFile { name: name.to_owned(), map, layout }
+        MapFile { name: name.to_owned(), map, layout, atmosphere: Atmosphere::default() }
     }
 
     pub fn load(dir: &Path) -> Result<Self, String> {
@@ -56,6 +60,7 @@ impl MapFile {
                 bases: [v(meta.bases[0]), v(meta.bases[1])],
                 capture_points: meta.capture_points.into_iter().map(v).collect(),
             },
+            atmosphere: meta.atmosphere,
         })
     }
 
@@ -70,6 +75,7 @@ impl MapFile {
             height: h,
             bases: [p(self.layout.bases[0]), p(self.layout.bases[1])],
             capture_points: self.layout.capture_points.iter().copied().map(p).collect(),
+            atmosphere: self.atmosphere.clone(),
         };
         let text = ron::ser::to_string_pretty(&meta, ron::ser::PrettyConfig::default()).map_err(|e| err("map.ron", &e))?;
         std::fs::write(dir.join("map.ron"), text).map_err(|e| err("map.ron", &e))?;

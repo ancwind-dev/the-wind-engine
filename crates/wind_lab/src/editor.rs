@@ -149,6 +149,7 @@ impl MapEditor {
                 bases: [Vec2::new(margin, s * 0.5), Vec2::new(s - margin, s * 0.5)],
                 capture_points: vec![Vec2::splat(s * 0.5)],
             },
+            atmosphere: Default::default(),
         }
     }
 
