@@ -1,0 +1,8 @@
+[package]
+name = "wind_bots"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wind_net = { version = "0.1.0", path = "../wind_net" }
+wind_sim = { version = "0.1.0", path = "../wind_sim" }

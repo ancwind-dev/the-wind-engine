@@ -20,17 +20,68 @@ pub struct Map {
     /// Растёт, только когда клетка стала пустой (стену пробило насквозь).
     /// Поиску пути важно только это, а не каждая царапина.
     pub topology_revision: u64,
+    /// Версия каждого чанка CHUNK×CHUNK: растёт, когда в нём что-то повредили.
+    /// 0 — чанк такой же, как после генерации. Сеть досылает клиентам чанки
+    /// с версией новее, чем те подтвердили.
+    pub chunk_revisions: Vec<u32>,
 }
+
+/// Сторона чанка в клетках.
+pub const CHUNK: u32 = 32;
 
 impl Map {
     pub fn new(width: u32, height: u32) -> Self {
+        let chunks = width.div_ceil(CHUNK) * height.div_ceil(CHUNK);
         Map {
             width,
             height,
             solid: vec![EMPTY; (width * height) as usize],
             revision: 0,
             topology_revision: 0,
+            chunk_revisions: vec![0; chunks as usize],
         }
+    }
+
+    pub fn chunks_x(&self) -> u32 {
+        self.width.div_ceil(CHUNK)
+    }
+
+    fn chunk_of_cell(&self, x: i32, y: i32) -> usize {
+        (y as u32 / CHUNK * self.chunks_x() + x as u32 / CHUNK) as usize
+    }
+
+    /// Клетки чанка построчно (у края карты чанк может быть неполным).
+    pub fn chunk_cells(&self, chunk: usize) -> Vec<u8> {
+        let (x0, y0, w, h) = self.chunk_rect(chunk);
+        let mut out = Vec::with_capacity((w * h) as usize);
+        for y in y0..y0 + h {
+            let row = (y * self.width + x0) as usize;
+            out.extend_from_slice(&self.solid[row..row + w as usize]);
+        }
+        out
+    }
+
+    /// Записывает чанк целиком, как его прислал сервер.
+    pub fn set_chunk_cells(&mut self, chunk: usize, cells: &[u8], revision: u32) {
+        let (x0, y0, w, h) = self.chunk_rect(chunk);
+        if cells.len() != (w * h) as usize {
+            return;
+        }
+        for (dy, line) in cells.chunks(w as usize).enumerate() {
+            let row = ((y0 + dy as u32) * self.width + x0) as usize;
+            self.solid[row..row + w as usize].copy_from_slice(line);
+        }
+        self.chunk_revisions[chunk] = revision;
+        self.revision += 1;
+        self.topology_revision += 1;
+    }
+
+    /// (x, y, ширина, высота) чанка в клетках.
+    pub fn chunk_rect(&self, chunk: usize) -> (u32, u32, u32, u32) {
+        let cx = chunk as u32 % self.chunks_x();
+        let cy = chunk as u32 / self.chunks_x();
+        let (x0, y0) = (cx * CHUNK, cy * CHUNK);
+        (x0, y0, CHUNK.min(self.width - x0), CHUNK.min(self.height - y0))
     }
 
     #[inline]
@@ -164,6 +215,8 @@ impl Map {
                     continue;
                 }
                 self.solid[i] = hp.saturating_sub(hit);
+                let chunk = self.chunk_of_cell(x, y);
+                self.chunk_revisions[chunk] += 1;
                 changed = true;
                 if self.solid[i] == EMPTY {
                     destroyed += 1;
