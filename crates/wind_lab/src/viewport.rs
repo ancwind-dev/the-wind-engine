@@ -4,6 +4,7 @@
 //! Вьюпорт ничего не знает про то, откуда мир: локальная симуляция или сервер.
 //! Ему каждый кадр собирают [`Scene`].
 
+use crate::editor_ui::GROUND_2D;
 use crate::theme;
 use eframe::egui::{
     self, Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, Stroke, TextureHandle,
@@ -64,6 +65,10 @@ pub struct Scene<'a> {
     pub flow: Option<&'a FlowField>,
     pub hud: Option<Hud>,
     pub kill_feed: Vec<(String, Color32)>,
+    /// Кольца на земле (центр, радиус, цвет sRGB 0..1): кисть редактора и т.п.
+    pub rings: Vec<(Vec2, f32, [f32; 3])>,
+    /// Отрезки на земле (только 2D): превью линии или дома в редакторе.
+    pub lines: Vec<(Vec2, Vec2)>,
 }
 
 pub struct ViewportOutput {
@@ -73,6 +78,10 @@ pub struct ViewportOutput {
     pub mouse_world: Option<Vec2>,
     /// Зажата левая кнопка над вьюпортом.
     pub primary_down: bool,
+    /// Левую кнопку нажали над вьюпортом в этом кадре.
+    pub primary_pressed: bool,
+    /// Левую кнопку отпустили (где угодно).
+    pub primary_released: bool,
 }
 
 pub struct Camera {
@@ -122,7 +131,7 @@ pub struct Viewport {
     last_frame: std::time::Instant,
     texture: Option<TextureHandle>,
     /// Карта, нарисованная в текстуре: адрес в памяти и ревизия.
-    texture_key: (usize, u64),
+    texture_key: (usize, u64, u64),
     framed: bool,
 }
 
@@ -141,7 +150,7 @@ impl Viewport {
             generation: 0,
             last_frame: std::time::Instant::now(),
             texture: None,
-            texture_key: (0, u64::MAX),
+            texture_key: (0, u64::MAX, 0),
             framed: false,
         }
     }
@@ -149,7 +158,14 @@ impl Viewport {
     /// Новый мир — заново подгоняем вид и перерисовываем карту.
     pub fn reset(&mut self) {
         self.framed = false;
-        self.texture_key = (0, u64::MAX);
+        self.texture_key = (0, u64::MAX, 0);
+        self.generation += 1;
+    }
+
+    /// Перестроить карту (2D-текстуру и 3D-меши), не трогая камеру.
+    /// 3D-отрисовщик один на всё окно и помнит только последнюю показанную карту.
+    pub fn refresh_map(&mut self) {
+        self.texture_key = (0, u64::MAX, 0);
         self.generation += 1;
     }
 
@@ -230,11 +246,12 @@ impl Viewport {
             cam.target += (s.pos - cam.target) * (1.0 - (-dt * 8.0).exp());
         }
 
+        cam.target_height = scene.map.height_at(cam.target);
         let aspect = rect.width() / rect.height().max(1.0);
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
         let mouse_world = pointer.and_then(|p| {
             let ndc = Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0);
-            cam.ground_point(ndc, aspect, 0.0)
+            cam.pick(ndc, aspect, scene.map)
         });
 
         let soldiers: Vec<wind_render::SoldierDraw> = scene
@@ -260,6 +277,7 @@ impl Viewport {
             blasts: &scene.blasts,
             points: &points,
             marker: scene.selected.as_ref().map(|s| s.pos),
+            rings: &scene.rings,
             time: 0.0,
             dt,
         };
@@ -282,8 +300,10 @@ impl Viewport {
         }
 
         let primary_down = pointer.is_some() && ui.input(|i| i.pointer.primary_down());
+        let primary_pressed = pointer.is_some() && ui.input(|i| i.pointer.primary_pressed());
+        let primary_released = ui.input(|i| i.pointer.primary_released());
         let picked = self.pick(&response, play, mouse_world, scene, 1.0);
-        (ViewportOutput { picked, mouse_world, primary_down }, rect)
+        (ViewportOutput { picked, mouse_world, primary_down, primary_pressed, primary_released }, rect)
     }
 
     /// Клик левой кнопкой — ближайший солдат в радиусе `radius` метров.
@@ -451,6 +471,15 @@ impl Viewport {
             painter.circle_stroke(c, (r * cam.zoom).max(3.0) + 2.0, Stroke::new(2.0, theme::SELECTED));
         }
 
+        // Кисть и превью редактора.
+        for &(c, r, color) in &scene.rings {
+            let col = Color32::from_rgb((color[0] * 255.0) as u8, (color[1] * 255.0) as u8, (color[2] * 255.0) as u8);
+            painter.circle_stroke(cam.to_screen(rect, c), (r * cam.zoom).max(2.0), Stroke::new(1.5, col));
+        }
+        for &(a, b) in &scene.lines {
+            painter.line_segment([cam.to_screen(rect, a), cam.to_screen(rect, b)], Stroke::new(2.0, theme::SELECTED));
+        }
+
         // Взрывы.
         for &(pos, radius, age) in &scene.blasts {
             let t = (age / 0.6).min(1.0);
@@ -468,9 +497,11 @@ impl Viewport {
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
         let mouse_world = pointer.map(|p| cam.to_world(rect, p));
         let primary_down = pointer.is_some() && ui.input(|i| i.pointer.primary_down());
+        let primary_pressed = pointer.is_some() && ui.input(|i| i.pointer.primary_pressed());
+        let primary_released = ui.input(|i| i.pointer.primary_released());
 
         let picked = self.pick(&response, play, mouse_world, scene, (12.0 / cam.zoom).max(r * 2.0));
-        (ViewportOutput { picked, mouse_world, primary_down }, rect)
+        (ViewportOutput { picked, mouse_world, primary_down, primary_pressed, primary_released }, rect)
     }
 
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response, rect: Rect, size: f32) {
@@ -497,7 +528,7 @@ impl Viewport {
     }
 
     fn update_texture(&mut self, ctx: &egui::Context, map: &Map) {
-        let key = (map as *const Map as usize, map.revision);
+        let key = (map as *const Map as usize, map.revision, map.ground_revision);
         if self.texture.is_some() && self.texture_key == key {
             return;
         }
@@ -510,14 +541,30 @@ impl Viewport {
     }
 }
 
+/// Карта для 2D: покрытие земли цветом, рельеф — тенью от света с северо-запада, стены сверху.
 fn map_image(map: &Map) -> ColorImage {
-    let ground = Color32::from_rgb(0x48, 0x4a, 0x46);
     let rock = Color32::from_rgb(0x26, 0x26, 0x26);
-    let pixels = map
-        .solid
-        .iter()
-        .map(|&hp| match hp {
-            EMPTY => ground,
+    let w = map.width as i32;
+    let mut pixels = Vec::with_capacity(map.solid.len());
+    for (i, &hp) in map.solid.iter().enumerate() {
+        let (x, y) = (i as i32 % w, i as i32 / w);
+        let color = match hp {
+            EMPTY => {
+                let base = GROUND_2D[(map.ground[i] as usize).min(GROUND_2D.len() - 1)];
+                // Наклон по углам клетки: склоны к свету светлее, от света — темнее.
+                let dx = (map.corner_height(x + 1, y) + map.corner_height(x + 1, y + 1))
+                    - (map.corner_height(x, y) + map.corner_height(x, y + 1));
+                let dy = (map.corner_height(x, y + 1) + map.corner_height(x + 1, y + 1))
+                    - (map.corner_height(x, y) + map.corner_height(x + 1, y));
+                let shade = (1.0 - (dx + dy) * 0.35).clamp(0.55, 1.45);
+                let lift = 1.0 + map.corner_height(x, y) * 0.004;
+                let k = shade * lift;
+                Color32::from_rgb(
+                    (base.r() as f32 * k).min(255.0) as u8,
+                    (base.g() as f32 * k).min(255.0) as u8,
+                    (base.b() as f32 * k).min(255.0) as u8,
+                )
+            }
             INDESTRUCTIBLE => rock,
             // Чем меньше прочность, тем темнее и коричневее стена.
             hp => {
@@ -525,8 +572,9 @@ fn map_image(map: &Map) -> ColorImage {
                 let lerp = |a: f32, b: f32| (a + (b - a) * t) as u8;
                 Color32::from_rgb(lerp(110.0, 172.0), lerp(92.0, 172.0), lerp(70.0, 168.0))
             }
-        })
-        .collect();
+        };
+        pixels.push(color);
+    }
     ColorImage::new([map.width as usize, map.height as usize], pixels)
 }
 

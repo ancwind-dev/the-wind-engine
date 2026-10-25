@@ -58,6 +58,8 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast]) -> S
         flow: sel.and_then(|s| world.flow.get(s.objective as usize)),
         hud: None,
         kill_feed: Vec::new(),
+        rings: Vec::new(),
+        lines: Vec::new(),
     }
 }
 
@@ -114,5 +116,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
             .iter()
             .map(|k| (format!("{} → {}", name(k.killer), name(k.victim)), theme::TEAM[k.killer_team as usize]))
             .collect(),
+        rings: Vec::new(),
+        lines: Vec::new(),
     })
 }

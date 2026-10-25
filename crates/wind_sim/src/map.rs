@@ -9,6 +9,7 @@ pub const EMPTY: u8 = 0;
 /// Неразрушаемая клетка (край карты, скалы).
 pub const INDESTRUCTIBLE: u8 = 255;
 
+#[derive(Clone)]
 pub struct Map {
     pub width: u32,
     pub height: u32,
@@ -24,10 +25,21 @@ pub struct Map {
     /// 0 — чанк такой же, как после генерации. Сеть досылает клиентам чанки
     /// с версией новее, чем те подтвердили.
     pub chunk_revisions: Vec<u32>,
+    /// Высота земли в углах клеток: (width + 1) × (height + 1), в 1/[`HEIGHT_SCALE`] м.
+    /// Пока только для картинки — симуляция считает мир плоским.
+    pub heights: Vec<u16>,
+    /// Покрытие земли в каждой клетке — номер из [`GROUND_NAMES`].
+    pub ground: Vec<u8>,
+    /// Растёт при изменении покрытия земли.
+    pub ground_revision: u64,
 }
 
 /// Сторона чанка в клетках.
 pub const CHUNK: u32 = 32;
+/// Единиц высоты в метре: u16 покрывает 0..256 м с шагом 4 мм.
+pub const HEIGHT_SCALE: f32 = 256.0;
+/// Виды покрытия земли. Номер в слое `ground` — индекс в этом списке.
+pub const GROUND_NAMES: [&str; 6] = ["Трава", "Сухая трава", "Земля", "Песок", "Асфальт", "Бетон"];
 
 impl Map {
     pub fn new(width: u32, height: u32) -> Self {
@@ -39,6 +51,9 @@ impl Map {
             revision: 0,
             topology_revision: 0,
             chunk_revisions: vec![0; chunks as usize],
+            heights: vec![0; ((width + 1) * (height + 1)) as usize],
+            ground: vec![0; (width * height) as usize],
+            ground_revision: 0,
         }
     }
 
@@ -46,8 +61,58 @@ impl Map {
         self.width.div_ceil(CHUNK)
     }
 
-    fn chunk_of_cell(&self, x: i32, y: i32) -> usize {
+    pub fn chunk_of_cell(&self, x: i32, y: i32) -> usize {
         (y as u32 / CHUNK * self.chunks_x() + x as u32 / CHUNK) as usize
+    }
+
+    /// Отмечает, что клетка изменилась (для перерисовки, сети и навигации).
+    pub fn touch(&mut self, x: i32, y: i32, topology: bool) {
+        if self.index(x, y).is_none() {
+            return;
+        }
+        let chunk = self.chunk_of_cell(x, y);
+        self.chunk_revisions[chunk] += 1;
+        self.revision += 1;
+        if topology {
+            self.topology_revision += 1;
+        }
+    }
+
+    // --- Рельеф ---------------------------------------------------------------
+
+    pub fn corner_index(&self, x: i32, y: i32) -> Option<usize> {
+        if x < 0 || y < 0 || x > self.width as i32 || y > self.height as i32 {
+            None
+        } else {
+            Some(y as usize * (self.width as usize + 1) + x as usize)
+        }
+    }
+
+    /// Высота угла клетки, м. За краем карты — высота ближайшего угла.
+    pub fn corner_height(&self, x: i32, y: i32) -> f32 {
+        let x = x.clamp(0, self.width as i32);
+        let y = y.clamp(0, self.height as i32);
+        self.heights[self.corner_index(x, y).unwrap()] as f32 / HEIGHT_SCALE
+    }
+
+    pub fn set_corner_height(&mut self, x: i32, y: i32, meters: f32) {
+        if let Some(i) = self.corner_index(x, y) {
+            self.heights[i] = (meters * HEIGHT_SCALE).round().clamp(0.0, u16::MAX as f32) as u16;
+        }
+    }
+
+    /// Высота земли в точке, м (между углами — линейно).
+    pub fn height_at(&self, pos: Vec2) -> f32 {
+        let p = pos.clamp(Vec2::ZERO, Vec2::new(self.width as f32, self.height as f32));
+        let (x, y) = (p.x.floor() as i32, p.y.floor() as i32);
+        let (fx, fy) = (p.x - x as f32, p.y - y as f32);
+        let h00 = self.corner_height(x, y);
+        let h10 = self.corner_height(x + 1, y);
+        let h01 = self.corner_height(x, y + 1);
+        let h11 = self.corner_height(x + 1, y + 1);
+        let top = h00 + (h10 - h00) * fx;
+        let bottom = h01 + (h11 - h01) * fx;
+        top + (bottom - top) * fy
     }
 
     /// Клетки чанка построчно (у края карты чанк может быть неполным).

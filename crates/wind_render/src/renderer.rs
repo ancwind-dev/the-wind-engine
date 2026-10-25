@@ -1,6 +1,7 @@
 ﻿//! GPU-часть: конвейеры, буферы, карта теней. Живёт в ресурсах egui-wgpu
 //! и вызывается из paint callback (см. [`WorldPaint`]).
 
+use crate::mapmesh::ChunkMeshes;
 use crate::models::{self, MESH_COUNT};
 use crate::voxel::{Mesh, Vertex};
 use bytemuck::{Pod, Zeroable};
@@ -54,8 +55,9 @@ pub struct Instance {
 pub struct PendingMap {
     /// Карта сменилась целиком — выбросить все чанки.
     pub reset: bool,
-    /// (чанк, меш); `None` — чанк теперь пуст.
-    pub chunks: Vec<(u32, Option<Mesh>)>,
+    pub chunks: Vec<(u32, ChunkMeshes)>,
+    /// Покрытие земли целиком: (ширина, высота, клетки).
+    pub ground: Option<(u32, u32, Vec<u8>)>,
 }
 
 /// Всё, что нужно GPU для одного кадра. Собирает [`crate::scene::SceneBuilder`].
@@ -112,6 +114,10 @@ pub struct WorldRenderer {
     voxel: wgpu::RenderPipeline,
     shadow: wgpu::RenderPipeline,
     ground: wgpu::RenderPipeline,
+    terrain: wgpu::RenderPipeline,
+    ground_layout: wgpu::BindGroupLayout,
+    ground_texture: wgpu::Texture,
+    ground_bind: wgpu::BindGroup,
     globals: wgpu::Buffer,
     bind: wgpu::BindGroup,
     shadow_bind: wgpu::BindGroup,
@@ -120,7 +126,8 @@ pub struct WorldRenderer {
     instances: wgpu::Buffer,
     capacity: usize,
     identity: wgpu::Buffer,
-    chunks: HashMap<u32, GpuMesh>,
+    /// Чанк карты: стены (если есть) и земля.
+    chunks: HashMap<u32, (Option<GpuMesh>, GpuMesh)>,
     batches: Vec<(usize, u32, u32)>,
     visible: Vec<u32>,
     pub stats: RenderStats,
@@ -230,6 +237,22 @@ impl WorldRenderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
         });
 
+        // Покрытие земли: номер материала на клетку, читается в шейдере без фильтрации.
+        let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ground"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let (ground_texture, ground_bind) = ground_texture(device, &ground_layout, 1, 1);
+
         let main_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world"),
             bind_group_layouts: &[Some(&main_layout)],
@@ -315,6 +338,33 @@ impl WorldRenderer {
             cache: None,
         });
 
+        let terrain_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terrain"),
+            bind_group_layouts: &[Some(&main_layout), Some(&ground_layout)],
+            immediate_size: 0,
+        });
+        let terrain = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terrain"),
+            layout: Some(&terrain_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_voxel"),
+                compilation_options: Default::default(),
+                buffers: &layouts,
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(depth(true, Default::default())),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_terrain"),
+                compilation_options: Default::default(),
+                targets: &color_target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("identity instance"),
             contents: bytemuck::bytes_of(&Instance {
@@ -328,6 +378,10 @@ impl WorldRenderer {
             voxel,
             shadow,
             ground,
+            terrain,
+            ground_layout,
+            ground_texture,
+            ground_bind,
             globals,
             bind,
             shadow_bind,
@@ -349,15 +403,27 @@ impl WorldRenderer {
             if std::mem::take(&mut pending.reset) {
                 self.chunks.clear();
             }
-            for (chunk, mesh) in pending.chunks.drain(..) {
-                match mesh {
-                    Some(m) => {
-                        self.chunks.insert(chunk, GpuMesh::new(device, &m, "map chunk"));
-                    }
-                    None => {
-                        self.chunks.remove(&chunk);
-                    }
+            for (chunk, meshes) in pending.chunks.drain(..) {
+                let walls = meshes.walls.map(|m| GpuMesh::new(device, &m, "map walls"));
+                let terrain = GpuMesh::new(device, &meshes.terrain, "map terrain");
+                self.chunks.insert(chunk, (walls, terrain));
+            }
+            if let Some((w, h, cells)) = pending.ground.take() {
+                let size = self.ground_texture.size();
+                if size.width != w || size.height != h {
+                    (self.ground_texture, self.ground_bind) = ground_texture(device, &self.ground_layout, w, h);
                 }
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.ground_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &cells,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
             }
         }
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&frame.globals));
@@ -401,15 +467,24 @@ impl WorldRenderer {
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_pipeline(&self.ground);
         pass.draw(0..6, 0..1);
+        pass.set_pipeline(&self.terrain);
+        pass.set_bind_group(1, &self.ground_bind, &[]);
+        pass.set_vertex_buffer(1, self.identity.slice(..));
+        for chunk in &self.visible {
+            if let Some((_, terrain)) = self.chunks.get(chunk) {
+                terrain.draw(pass, 0..1);
+            }
+        }
         pass.set_pipeline(&self.voxel);
         self.draw_geometry(pass);
     }
 
+    /// Стены и экземпляры: и в проходе теней, и в основном. Земля тени не отбрасывает.
     fn draw_geometry(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_vertex_buffer(1, self.identity.slice(..));
         for chunk in &self.visible {
-            if let Some(mesh) = self.chunks.get(chunk) {
-                mesh.draw(pass, 0..1);
+            if let Some((Some(walls), _)) = self.chunks.get(chunk) {
+                walls.draw(pass, 0..1);
             }
         }
         pass.set_vertex_buffer(1, self.instances.slice(..));
@@ -419,6 +494,26 @@ impl WorldRenderer {
             }
         }
     }
+}
+
+fn ground_texture(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, w: u32, h: u32) -> (wgpu::Texture, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ground"),
+        size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R8Uint,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("ground"),
+        layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
+    });
+    (texture, bind)
 }
 
 fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

@@ -3944,6 +3944,7 @@ name = "wind_sim"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "png",
  "rayon",
  "ron",
  "serde",

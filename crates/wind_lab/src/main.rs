@@ -3,6 +3,8 @@
 //!
 //! cargo run --release -p wind_lab
 
+mod editor;
+mod editor_ui;
 mod scene;
 mod theme;
 mod viewport;
@@ -12,7 +14,9 @@ use scene::Blast;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
+use editor_ui::MapWorkspace;
 use viewport::Viewport;
+use wind_sim::mapfile::MapFile;
 use wind_net::{ClientStatus, DEFAULT_PORT, NetClient, NetServer, ReplicationConfig};
 use wind_sim::{Event, PlayerInput, SimConfig, TickStats, Vec2, World};
 
@@ -76,6 +80,20 @@ struct Lab {
     net_log: VecDeque<String>,
     /// Уже написали «в игре» для текущего подключения.
     announced: bool,
+
+    workspace: Workspace,
+    map_ws: MapWorkspace,
+    /// Свой вьюпорт у редактора — камера не прыгает при переключении вкладок.
+    editor_view: Viewport,
+    map_generation: u64,
+    /// Карта из файла (или из редактора), на которой идёт симуляция. `None` — процедурная.
+    map_file: Option<MapFile>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Workspace {
+    Simulation,
+    Map,
 }
 
 impl Lab {
@@ -94,11 +112,15 @@ impl Lab {
         };
         let world = World::new(with_settings(&base_config, &settings), settings.seed);
         let mut viewport = Viewport::new();
+        let mut editor_view = Viewport::new();
         if let Some(rs) = &cc.wgpu_render_state {
             let models = config_path.parent().map(|data| data.join("models/soldier"));
             wind_render::install(rs, MSAA, models.as_deref());
             viewport.has_3d = true;
+            editor_view.has_3d = true;
         }
+        let maps_dir = config_path.parent().map_or_else(|| PathBuf::from("data/maps"), |data| data.join("maps"));
+        let map_ws = MapWorkspace::new(maps_dir, &base_config);
         let mut lab = Lab {
             world,
             config_mtime: mtime(&config_path),
@@ -123,6 +145,11 @@ impl Lab {
             aim: Vec2::ZERO,
             net_log: VecDeque::new(),
             announced: false,
+            workspace: Workspace::Simulation,
+            map_ws,
+            editor_view,
+            map_generation: 0,
+            map_file: None,
         };
         // wind_lab --connect 127.0.0.1:7777 — сразу в игру; wind_lab --serve — сразу поднять сервер.
         let mut args = std::env::args().skip(1);
@@ -135,7 +162,17 @@ impl Lab {
                     lab.connect();
                 }
                 "--serve" => lab.start_server(),
-                "--3d" => lab.viewport.mode_3d = lab.viewport.has_3d,
+                "--3d" => {
+                    lab.viewport.mode_3d = lab.viewport.has_3d;
+                    lab.editor_view.mode_3d = lab.editor_view.has_3d;
+                }
+                "--open" => {
+                    if let Some(name) = args.next() {
+                        lab.map_ws.open(&name);
+                        lab.set_workspace(Workspace::Map);
+                    }
+                }
+                "--editor" => lab.set_workspace(Workspace::Map),
                 _ => {}
             }
         }
@@ -151,7 +188,11 @@ impl Lab {
     fn restart(&mut self) {
         // Клиенты сервера держатся за солдат старого мира — сервер тоже перезапускаем.
         let had_server = self.server.take().is_some();
-        self.world = World::new(with_settings(&self.base_config, &self.settings), self.settings.seed);
+        let config = with_settings(&self.base_config, &self.settings);
+        self.world = match &self.map_file {
+            Some(file) => World::from_file(config, self.settings.seed, file.clone()),
+            None => World::new(config, self.settings.seed),
+        };
         self.history.clear();
         self.selected = None;
         self.accumulator = 0.0;
@@ -176,7 +217,8 @@ impl Lab {
 
     fn connect(&mut self) {
         match NetClient::connect(&self.connect_addr, &self.player_name, None) {
-            Ok(client) => {
+            Ok(mut client) => {
+                client.maps_dir = self.map_ws.maps_dir().to_path_buf();
                 self.log(format!("Подключаюсь к {}…", client.server_addr()));
                 self.client = Some(client);
                 self.announced = false;
@@ -257,7 +299,9 @@ impl Lab {
             }
         }
 
-        if self.paused {
+        // В редакторе симуляция стоит — если только на ней не играют по сети.
+        let editing = self.workspace == Workspace::Map && self.server.is_none();
+        if self.paused || editing {
             return;
         }
         let dt = self.world.dt();
@@ -377,8 +421,16 @@ impl Lab {
                     });
                     ui.add_space(24.0);
                     // Вкладки рабочих пространств, как Layout / Modeling в Blender.
-                    let _ = ui.selectable_label(self.client.is_none(), "Лаборатория");
-                    let _ = ui.selectable_label(self.client.is_some(), "Игра по сети");
+                    if self.client.is_some() {
+                        let _ = ui.selectable_label(true, "Игра по сети");
+                    } else {
+                        if ui.selectable_label(self.workspace == Workspace::Simulation, "Лаборатория").clicked() {
+                            self.set_workspace(Workspace::Simulation);
+                        }
+                        if ui.selectable_label(self.workspace == Workspace::Map, "Редактор карт").clicked() {
+                            self.set_workspace(Workspace::Map);
+                        }
+                    }
                 });
             });
     }
@@ -388,6 +440,14 @@ impl Lab {
             .frame(egui::Frame::new().fill(theme::TOPBAR).inner_margin(egui::Margin::same(4)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if self.client.is_none() && self.workspace == Workspace::Map {
+                        // В редакторе внизу — подсказки по инструменту, как в строке состояния Blender.
+                        ui.label(RichText::new(self.map_ws.hint()).small().color(theme::TEXT_DIM));
+                        if !self.map_ws.message.0.is_empty() {
+                            ui.label(RichText::new(format!("· {}", self.map_ws.message.0)).small().color(self.map_ws.message.1));
+                        }
+                        return;
+                    }
                     ui.label(RichText::new(&self.status.0).color(self.status.1).small());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let fps = 1.0 / ui.input(|i| i.stable_dt).max(1e-4);
@@ -561,29 +621,43 @@ impl Lab {
     }
 
     fn match_panel(&mut self, ui: &mut egui::Ui) {
+        let from_file = self.map_file.as_ref().map(|f| f.name.clone());
         theme::props(ui, "match_props", |ui| {
-            theme::label(ui, "Размер карты");
-            egui::ComboBox::from_id_salt("map_size")
-                .selected_text(format!("{0}×{0} м", self.settings.map_size))
-                .show_ui(ui, |ui| {
-                    for m in [256, 512, 1024, 2048] {
-                        ui.selectable_value(&mut self.settings.map_size, m, format!("{m}×{m} м"));
-                    }
-                });
+            theme::label(ui, "Карта");
+            match &from_file {
+                Some(name) => ui.label(format!("«{name}» из редактора")),
+                None => ui.label("процедурная"),
+            };
             ui.end_row();
+            if from_file.is_none() {
+                theme::label(ui, "Размер карты");
+                egui::ComboBox::from_id_salt("map_size")
+                    .selected_text(format!("{0}×{0} м", self.settings.map_size))
+                    .show_ui(ui, |ui| {
+                        for m in [256, 512, 1024, 2048] {
+                            ui.selectable_value(&mut self.settings.map_size, m, format!("{m}×{m} м"));
+                        }
+                    });
+                ui.end_row();
+                theme::label(ui, "Точек захвата");
+                ui.add(egui::DragValue::new(&mut self.settings.capture_points).range(1..=26));
+                ui.end_row();
+            }
             theme::label(ui, "Солдат в команде");
             ui.add(egui::DragValue::new(&mut self.settings.soldiers_per_team).range(1..=10_000).speed(10));
-            ui.end_row();
-            theme::label(ui, "Точек захвата");
-            ui.add(egui::DragValue::new(&mut self.settings.capture_points).range(1..=26));
             ui.end_row();
             theme::label(ui, "Seed");
             ui.add(egui::DragValue::new(&mut self.settings.seed));
             ui.end_row();
         });
-        let changed = self.settings.map_size != self.world.config.map_size
+        if from_file.is_some() && ui.button("Вернуться к процедурной карте").clicked() {
+            self.map_file = None;
+            self.restart();
+        }
+        let changed = (from_file.is_none()
+            && (self.settings.map_size != self.world.config.map_size
+                || self.settings.capture_points != self.world.config.capture_points))
             || self.settings.soldiers_per_team != self.world.config.soldiers_per_team
-            || self.settings.capture_points != self.world.config.capture_points
             || self.settings.seed != self.world.seed;
         let button = egui::Button::new(if changed { "Перезапустить с новыми параметрами" } else { "Перезапустить матч" });
         if ui.add_sized([ui.available_width(), 22.0], button).clicked() {
@@ -852,7 +926,8 @@ impl eframe::App for Lab {
         let (frame_dt, space, right) = ui.input(|i| {
             (i.stable_dt, i.key_pressed(egui::Key::Space), i.key_pressed(egui::Key::ArrowRight))
         });
-        if self.client.is_none() && !typing {
+        let editing = self.client.is_none() && self.workspace == Workspace::Map;
+        if self.client.is_none() && !editing && !typing {
             if space {
                 self.paused = !self.paused;
             }
@@ -864,6 +939,11 @@ impl eframe::App for Lab {
 
         self.top_bar(ui);
         self.status_bar(ui);
+        if editing {
+            self.map_workspace(ui);
+            ui.ctx().request_repaint();
+            return;
+        }
         self.outliner(ui);
         self.properties(ui);
         let ctx = ui.ctx().clone();
@@ -887,6 +967,57 @@ impl eframe::App for Lab {
             }
         });
         ui.ctx().request_repaint();
+    }
+}
+
+impl Lab {
+    /// Рабочее пространство «Редактор карт».
+    fn map_workspace(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.map_ws.shortcuts(&ctx);
+        if self.map_ws.generation != self.map_generation {
+            // Открыли или создали другую карту — подгоняем вид заново.
+            self.map_generation = self.map_ws.generation;
+            self.editor_view.reset();
+        }
+        let focus = egui::Panel::left("map_tools")
+            .resizable(true)
+            .default_size(200.0)
+            .frame(egui::Frame::new().fill(theme::OUTLINER).inner_margin(egui::Margin::same(6)))
+            .show(ui, |ui| self.map_ws.tool_shelf(ui))
+            .inner;
+        if let Some(pos) = focus {
+            self.editor_view.focus(pos);
+        }
+        let request = egui::Panel::right("map_properties")
+            .resizable(true)
+            .default_size(320.0)
+            .frame(egui::Frame::new().fill(theme::REGION).inner_margin(egui::Margin::same(6)))
+            .show(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.map_ws.properties(ui)).inner)
+            .inner;
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let scene = self.map_ws.scene(&self.base_config);
+            let out = self.editor_view.show(ui, &scene, true);
+            drop(scene);
+            self.map_ws.handle(&ctx, &out);
+        });
+        if let Some(editor_ui::Request::Play(file)) = request {
+            self.log(format!("Играем на карте «{}»", file.name));
+            self.map_file = Some(file);
+            self.restart();
+            self.set_workspace(Workspace::Simulation);
+        }
+    }
+
+    fn set_workspace(&mut self, workspace: Workspace) {
+        if self.workspace != workspace {
+            self.workspace = workspace;
+            // 3D-отрисовщик помнит одну карту — показываемый вьюпорт должен её прислать заново.
+            match workspace {
+                Workspace::Simulation => self.viewport.refresh_map(),
+                Workspace::Map => self.editor_view.refresh_map(),
+            }
+        }
     }
 }
 

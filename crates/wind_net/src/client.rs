@@ -5,6 +5,7 @@ use crate::replication::{RemoteWorld, SnapshotError};
 use crate::traffic::Traffic;
 use std::io::{self, ErrorKind};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use wind_sim::PlayerInput;
 use wind_sim::rng::Rng;
@@ -34,6 +35,8 @@ pub struct NetClient {
     pub simulated_loss: f32,
     /// Снимки, которые не удалось разобрать (нет базы или битые).
     pub decode_errors: u32,
+    /// Где искать карты, которые сервер называет по имени.
+    pub maps_dir: PathBuf,
     started: Instant,
     last_hello: Option<Instant>,
     last_heard: Instant,
@@ -63,6 +66,7 @@ impl NetClient {
             rtt_ms: 0.0,
             simulated_loss: 0.0,
             decode_errors: 0,
+            maps_dir: PathBuf::from("data/maps"),
             started: Instant::now(),
             last_hello: None,
             last_heard: Instant::now(),
@@ -123,8 +127,18 @@ impl NetClient {
                 if self.world.is_none()
                     && let Ok(welcome) = Welcome::decode(data)
                 {
-                    self.world = Some(RemoteWorld::new(welcome));
-                    self.status = ClientStatus::Connected;
+                    match RemoteWorld::new(welcome, &self.maps_dir) {
+                        Ok(world) => {
+                            self.world = Some(world);
+                            self.status = ClientStatus::Connected;
+                        }
+                        Err(e) => {
+                            // Без своей копии карты играть нельзя — уходим сразу.
+                            let bye = protocol::bye();
+                            self.send(&bye);
+                            self.status = ClientStatus::Rejected(e);
+                        }
+                    }
                 }
             }
             Kind::Snapshot => {

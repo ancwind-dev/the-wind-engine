@@ -26,7 +26,7 @@ impl Link {
         let welcome = welcome_for(&world, 1, soldier, &config);
         Link {
             replica: ServerReplica::new(soldier, &world),
-            client: RemoteWorld::new(welcome),
+            client: RemoteWorld::new(welcome, std::path::Path::new(".")).unwrap(),
             world,
             soldier,
             config,
@@ -143,4 +143,29 @@ fn tight_budget_keeps_everyone_fresh() {
     assert!(missing * 20 <= server.len(), "слишком многие солдаты не доехали до клиента");
     assert!(worst < 3.0, "кто-то сильно отстал: {worst} м");
     assert!(max <= 1200 + 1100, "пакет вышел далеко за бюджет: {max}");
+}
+
+#[test]
+fn file_map_is_loaded_and_checked() {
+    use wind_sim::mapfile::MapFile;
+    let dir = std::env::temp_dir().join(format!("wind_net_maps_{}", std::process::id()));
+    let mut file = MapFile::generated("испытание", 128, 2, 9);
+    file.save(&dir.join("испытание")).unwrap();
+
+    let mut world = World::from_file(SimConfig { soldiers_per_team: 10, ..Default::default() }, 1, file.clone());
+    let soldier = world.take_control(0).unwrap();
+    let welcome = welcome_for(&world, 1, soldier, &ReplicationConfig::default());
+    assert_eq!(welcome.map_name, "испытание");
+    let client = RemoteWorld::new(welcome.clone(), &dir).expect("карта должна найтись");
+    assert!(client.map.solid == world.map.solid);
+
+    // У клиента карта другая — отказ с понятной причиной.
+    file.map.solid[300] = 77;
+    file.save(&dir.join("испытание")).unwrap();
+    let err = RemoteWorld::new(welcome.clone(), &dir).err().unwrap();
+    assert!(err.contains("не такая"), "{err}");
+    // А карты нет совсем.
+    let missing = RemoteWorld::new(welcome, &dir.join("нет")).err().unwrap();
+    assert!(missing.contains("нет карты"), "{missing}");
+    std::fs::remove_dir_all(&dir).ok();
 }

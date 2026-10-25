@@ -11,6 +11,8 @@ use crate::bits::{BitReader, BitWriter, Truncated};
 use crate::protocol::{self, Kind, Welcome, dq_angle, q_angle, read_pos, write_pos};
 use std::collections::VecDeque;
 use wind_sim::map::Map;
+use std::path::Path;
+use wind_sim::mapfile::MapFile;
 use wind_sim::{Event, Soldier, Vec2, World, mapgen};
 
 /// Сколько отправленных снимков помнит сервер и сколько полученных — клиент.
@@ -562,14 +564,24 @@ pub struct RemoteWorld {
 }
 
 impl RemoteWorld {
-    pub fn new(welcome: Welcome) -> Self {
-        let (map, layout) = mapgen::generate(welcome.map_size, welcome.capture_points, welcome.seed);
+    /// Мир по приветствию сервера. Карту из файла ищем в `maps_dir` и сверяем отпечаток.
+    pub fn new(welcome: Welcome, maps_dir: &Path) -> Result<Self, String> {
+        let (map, layout) = if welcome.map_name.is_empty() {
+            mapgen::generate(welcome.map_size, welcome.capture_points, welcome.seed)
+        } else {
+            let name = &welcome.map_name;
+            let file = MapFile::load(&maps_dir.join(name)).map_err(|e| format!("нет карты «{name}»: {e}"))?;
+            if file.fingerprint() != welcome.map_fingerprint {
+                return Err(format!("карта «{name}» у тебя не такая, как на сервере"));
+            }
+            (file.map, file.layout)
+        };
         let points = layout
             .capture_points
             .iter()
             .map(|&pos| RemotePoint { pos, owner: None, progress: 0.0 })
             .collect();
-        RemoteWorld {
+        Ok(RemoteWorld {
             soldiers: vec![None; welcome.soldiers_total as usize],
             welcome,
             map,
@@ -585,7 +597,7 @@ impl RemoteWorld {
             echo_time: 0,
             snapshot_time: 0.0,
             history: (0..HISTORY).map(|_| None).collect(),
-        }
+        })
     }
 
     pub fn dt(&self) -> f32 {

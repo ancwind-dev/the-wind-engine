@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use wind_net::NetClient;
 use wind_render::{Camera, DrawInput, SceneBuilder, WorldPaint};
+use wind_sim::mapfile::MapFile;
 use wind_sim::{PlayerInput, SimConfig, Vec2, World};
 
 /// MSAA. Должно совпадать в NativeOptions и в wind_render::install.
@@ -30,11 +31,13 @@ struct Args {
     seed: u64,
     bench: Option<f32>,
     spectate: bool,
+    /// Карта из `data/maps/<имя>`.
+    map_file: Option<String>,
     vsync: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { connect: None, name: "Игрок".into(), soldiers: None, map: None, seed: 1, bench: None, spectate: false, vsync: false };
+    let mut a = Args { connect: None, name: "Игрок".into(), soldiers: None, map: None, seed: 1, bench: None, spectate: false, map_file: None, vsync: false };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("после {flag} нужно значение"));
@@ -48,6 +51,7 @@ fn parse_args() -> Result<Args, String> {
             "--bench" => a.bench = Some(num(value()?)? as f32),
             "--vsync" => a.vsync = true,
             "--spectate" => a.spectate = true,
+            "--map-file" => a.map_file = Some(value()?),
             "--export-models" => {
                 let dir = data_dir().join("models/soldier");
                 match wind_render::models::export(&dir) {
@@ -58,7 +62,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "wind_client [--connect адрес] [--name имя] [--soldiers N на команду] [--map сторона] [--seed N]\n\
+                    "wind_client [--connect адрес] [--name имя] [--soldiers N на команду] [--map сторона] [--map-file имя] [--seed N]\n\
                      wind_client --bench секунд [--soldiers N]   — замер FPS, без игрока\n\
                      wind_client --spectate                     — наблюдать за боем (Tab — следующий солдат)\n\
                      wind_client --export-models                — выгрузить модели солдата в data/models/soldier/*.vox\n\
@@ -169,7 +173,10 @@ impl Game {
 
         let source = match &args.connect {
             Some(addr) => match NetClient::connect(addr, &args.name, None) {
-                Ok(c) => Source::Remote(c),
+                Ok(mut c) => {
+                    c.maps_dir = data_dir().join("maps");
+                    Source::Remote(c)
+                }
                 Err(e) => {
                     eprintln!("{addr}: {e}");
                     std::process::exit(1);
@@ -186,7 +193,17 @@ impl Game {
                 if let Some(m) = args.map {
                     config.map_size = m;
                 }
-                Source::Local(Local::new(World::new(config, args.seed), args.bench.is_none() && !args.spectate))
+                let world = match &args.map_file {
+                    Some(name) => match MapFile::load(&data_dir().join("maps").join(name)) {
+                        Ok(file) => World::from_file(config, args.seed, file),
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(2);
+                        }
+                    },
+                    None => World::new(config, args.seed),
+                };
+                Source::Local(Local::new(world, args.bench.is_none() && !args.spectate))
             }
         };
 
@@ -296,7 +313,10 @@ impl eframe::App for Game {
             }
             let mouse_world = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)).and_then(|p| {
                 let ndc = Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0);
-                self.camera.ground_point(ndc, aspect, 0.0)
+                match self.source.map() {
+                    Some(map) => self.camera.pick(ndc, aspect, map),
+                    None => self.camera.ground_point(ndc, aspect, 0.0),
+                }
             });
 
             let input = if self.bench.is_some() { PlayerInput::default() } else { self.read_input(&ctx, mouse_world) };
@@ -319,6 +339,10 @@ impl eframe::App for Game {
             if let Some(me) = focus {
                 let k = 1.0 - (-dt * 8.0).exp();
                 self.camera.target += (me - self.camera.target) * k;
+                if let Some(map) = self.source.map() {
+                    let h = map.height_at(self.camera.target);
+                    self.camera.target_height += (h - self.camera.target_height) * k;
+                }
             }
 
             if let Some(map) = self.source.map() {
@@ -334,6 +358,7 @@ impl eframe::App for Game {
                     blasts: &view.blasts,
                     points: &view.points,
                     marker: view.me_pos,
+                    rings: &[],
                     time,
                     dt,
                 };

@@ -38,6 +38,8 @@ pub struct DrawInput<'a> {
     pub points: &'a [PointDraw],
     /// Кольцо под своим солдатом.
     pub marker: Option<Vec2>,
+    /// Дополнительные кольца на земле: (центр, радиус, цвет sRGB) — например, кисть редактора.
+    pub rings: &'a [(Vec2, f32, [f32; 3])],
     pub time: f32,
     /// Время с прошлого кадра, с — для анимации шага.
     pub dt: f32,
@@ -55,6 +57,8 @@ pub struct SceneBuilder {
     mesher: MapMesher,
     /// Меши карты, которые ждут отправки на GPU.
     pending: Arc<Mutex<PendingMap>>,
+    /// Для какой карты и версии покрытия земли уже отправлена текстура.
+    ground_key: Option<(u64, u64)>,
     anim: Vec<Anim>,
     /// Цвета команд (sRGB 0..1).
     pub team_colors: [[f32; 3]; 2],
@@ -65,6 +69,7 @@ impl Default for SceneBuilder {
         SceneBuilder {
             mesher: MapMesher::default(),
             pending: Arc::default(),
+            ground_key: None,
             anim: Vec::new(),
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
         }
@@ -84,13 +89,19 @@ impl SceneBuilder {
 
         // --- Карта.
         let update = self.mesher.update(input.map, input.map_key);
-        if update.reset || !update.chunks.is_empty() {
+        let ground_key = (input.map_key, input.map.ground_revision);
+        let ground_changed = update.reset || self.ground_key != Some(ground_key);
+        if update.reset || !update.chunks.is_empty() || ground_changed {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if update.reset {
                 pending.reset = true;
                 pending.chunks.clear();
             }
             pending.chunks.extend(update.chunks);
+            if ground_changed {
+                self.ground_key = Some(ground_key);
+                pending.ground = Some((input.map.width, input.map.height, input.map.ground.clone()));
+            }
         }
         let cx = input.map.chunks_x();
         let half = CHUNK as f32 * 0.5;
@@ -116,7 +127,7 @@ impl SceneBuilder {
             };
             let swing = a.phase.sin() * 0.7 * (speed / 4.5).min(1.0);
             let bob = (a.phase * 2.0).sin().abs() * 0.5 * v * (speed / 4.5).min(1.0);
-            let root = Mat4::from_translation(to_3d(s.pos, bob)) * Mat4::from_rotation_y(-s.facing);
+            let root = Mat4::from_translation(to_3d(s.pos, input.map.height_at(s.pos) + bob)) * Mat4::from_rotation_y(-s.facing);
             let part = |offset: Vec3, rot_z: f32| {
                 let m = root * Mat4::from_translation(offset * v) * Mat4::from_rotation_z(rot_z);
                 Instance { model: m.to_cols_array_2d(), tint }
@@ -138,13 +149,13 @@ impl SceneBuilder {
             }
             let dir = vel.normalize_or_zero();
             let angle = dir.y.atan2(dir.x);
-            let m = Mat4::from_translation(to_3d(head - dir * 0.9, 1.25))
+            let m = Mat4::from_translation(to_3d(head - dir * 0.9, input.map.height_at(head) + 1.25))
                 * Mat4::from_rotation_y(-angle)
                 * Mat4::from_scale(Vec3::new(1.8, 0.05, 0.05));
             cube.push(Instance { model: m.to_cols_array_2d(), tint: [1.0, 0.86, 0.45, 1.0] });
         }
         for &p in input.grenades {
-            let m = Mat4::from_translation(to_3d(p, 0.12)) * Mat4::from_scale(Vec3::splat(0.24));
+            let m = Mat4::from_translation(to_3d(p, input.map.height_at(p) + 0.12)) * Mat4::from_scale(Vec3::splat(0.24));
             cube.push(Instance { model: m.to_cols_array_2d(), tint: [0.30, 0.36, 0.22, 0.5] });
         }
         for &(p, radius, age) in input.blasts {
@@ -154,7 +165,7 @@ impl SceneBuilder {
             if size <= 0.01 {
                 continue;
             }
-            let m = Mat4::from_translation(to_3d(p, size * 0.3)) * Mat4::from_scale(Vec3::new(size, size * 0.6, size));
+            let m = Mat4::from_translation(to_3d(p, input.map.height_at(p) + size * 0.3)) * Mat4::from_scale(Vec3::new(size, size * 0.6, size));
             cube.push(Instance { model: m.to_cols_array_2d(), tint: [1.0, 0.55 + 0.35 * (1.0 - t), 0.2, 1.0] });
         }
 
@@ -197,7 +208,7 @@ impl SceneBuilder {
     fn globals(&self, input: &DrawInput) -> Globals {
         let cam = input.camera;
         let sun = Vec3::new(0.35, 0.85, 0.40).normalize();
-        let center = to_3d(cam.target, 0.0);
+        let center = to_3d(cam.target, cam.target_height);
 
         // Камера теней: ортографическая, вокруг центра экрана. Сдвиг кратен
         // текселю — иначе края теней дрожат при движении камеры.
@@ -210,7 +221,7 @@ impl SceneBuilder {
 
         let mut points = [GroundPoint { center_radius: [0.0; 4], color: [0.0; 4] }; MAX_POINTS];
         let mut count = 0;
-        for p in input.points.iter().take(MAX_POINTS - 1) {
+        for p in input.points.iter().take(MAX_POINTS - 1 - input.rings.len().min(MAX_POINTS - 1)) {
             let color = p.owner.map_or([0.85, 0.85, 0.82], |t| self.team_colors[t as usize & 1]);
             points[count] = GroundPoint {
                 center_radius: [p.pos.x, p.pos.y, p.radius, 0.0],
@@ -220,6 +231,13 @@ impl SceneBuilder {
         }
         if let Some(m) = input.marker {
             points[count] = GroundPoint { center_radius: [m.x, m.y, 0.75, 0.0], color: [1.0, 0.63, 0.16, 0.0] };
+            count += 1;
+        }
+        for &(c, r, color) in input.rings {
+            if count == MAX_POINTS {
+                break;
+            }
+            points[count] = GroundPoint { center_radius: [c.x, c.y, r, 0.0], color: [color[0], color[1], color[2], 0.0] };
             count += 1;
         }
 
