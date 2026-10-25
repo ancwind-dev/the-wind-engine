@@ -1,0 +1,23 @@
+// Кто воюет за какую команду. Пути — от data/models, без расширения .xml.
+// weight — как часто встречается (по умолчанию 1).
+(
+    teams: [
+        (
+            name: "USMC",
+            soldiers: [
+                (model: "soldiers/usmc/rifleman", weapon: "weapons/m4", weight: 4),
+                (model: "soldiers/usmc/rifleman_mask", weapon: "weapons/m4", weight: 1),
+                (model: "soldiers/usmc/grenadier", weapon: "weapons/m4", weight: 1),
+                (model: "soldiers/usmc/platoon_sergeant", weapon: "weapons/m4", weight: 1),
+                (model: "soldiers/usmc/radio_operator", weapon: "weapons/m4", weight: 1),
+            ],
+        ),
+        (
+            name: "VLM",
+            soldiers: [
+                (model: "soldiers/vlm/rifleman", weapon: "weapons/ak74", weight: 3),
+                (model: "soldiers/vlm/rifleman", weapon: "weapons/aks74u", weight: 1),
+            ],
+        ),
+    ],
+)

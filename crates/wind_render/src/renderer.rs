@@ -1,6 +1,7 @@
 ﻿//! GPU-часть: конвейеры, буферы, карта теней. Живёт в ресурсах egui-wgpu
 //! и вызывается из paint callback (см. [`WorldPaint`]).
 
+use crate::character::{CharVertex, CharacterSet};
 use crate::mapmesh::ChunkMeshes;
 use crate::models::{self, MESH_COUNT};
 use crate::voxel::{Mesh, Vertex};
@@ -67,6 +68,8 @@ pub struct FrameData {
     pub instances: Vec<Instance>,
     /// (меш, первый экземпляр, сколько).
     pub batches: Vec<(usize, u32, u32)>,
+    /// То же для своих солдат и оружия: (меш персонажа, первый экземпляр, сколько).
+    pub char_batches: Vec<(usize, u32, u32)>,
     pub map: Arc<Mutex<PendingMap>>,
     /// Чанки, которые стоит рисовать в этом кадре.
     pub visible_chunks: Vec<u32>,
@@ -80,18 +83,22 @@ struct GpuMesh {
 
 impl GpuMesh {
     fn new(device: &wgpu::Device, mesh: &Mesh, label: &str) -> Self {
+        Self::raw(device, bytemuck::cast_slice(&mesh.vertices), &mesh.indices, label)
+    }
+
+    fn raw(device: &wgpu::Device, vertices: &[u8], indices: &[u32], label: &str) -> Self {
         GpuMesh {
             vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
-                contents: bytemuck::cast_slice(&mesh.vertices),
+                contents: vertices,
                 usage: wgpu::BufferUsages::VERTEX,
             }),
             indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some(label),
-                contents: bytemuck::cast_slice(&mesh.indices),
+                contents: bytemuck::cast_slice(indices),
                 usage: wgpu::BufferUsages::INDEX,
             }),
-            count: mesh.indices.len() as u32,
+            count: indices.len() as u32,
         }
     }
 
@@ -130,11 +137,31 @@ pub struct WorldRenderer {
     chunks: HashMap<u32, (Option<GpuMesh>, GpuMesh)>,
     batches: Vec<(usize, u32, u32)>,
     visible: Vec<u32>,
+    /// Свои солдаты и оружие: конвейеры, меши, атлас цветов.
+    character: wgpu::RenderPipeline,
+    character_shadow: wgpu::RenderPipeline,
+    char_meshes: Vec<GpuMesh>,
+    char_bind: wgpu::BindGroup,
+    char_batches: Vec<(usize, u32, u32)>,
     pub stats: RenderStats,
 }
 
 const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Unorm8x4];
+const CHAR_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Uint16x4];
+
+fn char_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
+    let [_, instances] = vertex_layouts();
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<CharVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &CHAR_ATTRS,
+        }),
+        instances,
+    ]
+}
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] =
     wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4];
 
@@ -154,7 +181,14 @@ fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
 }
 
 impl WorldRenderer {
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, msaa: u32, meshes: &[Mesh]) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        msaa: u32,
+        meshes: &[Mesh],
+        characters: Option<&CharacterSet>,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("world.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("world.wgsl").into()),
@@ -365,6 +399,97 @@ impl WorldRenderer {
             cache: None,
         });
 
+        // Свои солдаты: цвет каждого вокселя — из 3D-атласа (группа 2).
+        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("character atlas"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let (atlas_size, atlas_data) = match characters {
+            Some(c) => (c.atlas_size, c.atlas.clone()),
+            None => ([1, 1, 1], vec![255; 4]),
+        };
+        let atlas = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("character atlas"),
+                size: wgpu::Extent3d { width: atlas_size[0], height: atlas_size[1], depth_or_array_layers: atlas_size[2] },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &atlas_data,
+        );
+        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let char_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("character atlas"),
+            layout: &atlas_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas_view) }],
+        });
+        let char_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("character"),
+            bind_group_layouts: &[Some(&main_layout), None, Some(&atlas_layout)],
+            immediate_size: 0,
+        });
+        let char_vertex = char_layouts();
+        let character = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("character"),
+            layout: Some(&char_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_char"),
+                compilation_options: Default::default(),
+                buffers: &char_vertex,
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(depth(true, Default::default())),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_char"),
+                compilation_options: Default::default(),
+                targets: &color_target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let character_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("character shadow"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_char_shadow"),
+                compilation_options: Default::default(),
+                buffers: &char_vertex,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(depth(true, wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 })),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+        let char_meshes = characters
+            .map(|c| {
+                c.meshes
+                    .iter()
+                    .map(|m| GpuMesh::raw(device, bytemuck::cast_slice(&m.vertices), &m.indices, "character part"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let identity = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("identity instance"),
             contents: bytemuck::bytes_of(&Instance {
@@ -393,6 +518,11 @@ impl WorldRenderer {
             chunks: HashMap::new(),
             batches: Vec::new(),
             visible: Vec::new(),
+            character,
+            character_shadow,
+            char_meshes,
+            char_bind,
+            char_batches: Vec::new(),
             stats: RenderStats::default(),
         }
     }
@@ -435,6 +565,7 @@ impl WorldRenderer {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&frame.instances));
         }
         self.batches.clone_from(&frame.batches);
+        self.char_batches.clone_from(&frame.char_batches);
         self.visible.clone_from(&frame.visible_chunks);
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -452,6 +583,8 @@ impl WorldRenderer {
         pass.set_pipeline(&self.shadow);
         pass.set_bind_group(0, &self.shadow_bind, &[]);
         self.draw_geometry(&mut pass);
+        pass.set_pipeline(&self.character_shadow);
+        self.draw_characters(&mut pass);
         drop(pass);
 
         self.stats = RenderStats {
@@ -477,6 +610,18 @@ impl WorldRenderer {
         }
         pass.set_pipeline(&self.voxel);
         self.draw_geometry(pass);
+        pass.set_pipeline(&self.character);
+        pass.set_bind_group(2, &self.char_bind, &[]);
+        self.draw_characters(pass);
+    }
+
+    fn draw_characters(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+        for &(mesh, first, count) in &self.char_batches {
+            if count > 0 {
+                self.char_meshes[mesh].draw(pass, first..first + count);
+            }
+        }
     }
 
     /// Стены и экземпляры: и в проходе теней, и в основном. Земля тени не отбрасывает.
@@ -528,12 +673,44 @@ fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
 /// Создаёт отрисовщик мира и кладёт его в ресурсы egui-wgpu.
 /// `msaa` должен совпадать с `NativeOptions::multisampling`, а в `NativeOptions`
 /// должен быть `depth_buffer: 32`. Возвращает заметки о загруженных моделях.
-pub fn install(render_state: &egui_wgpu::RenderState, msaa: u32, models_dir: Option<&Path>) -> Vec<String> {
-    let (meshes, notes) = models::build_meshes(models_dir);
+pub fn install(render_state: &egui_wgpu::RenderState, msaa: u32, data_dir: Option<&Path>) -> Installed {
+    let (meshes, mut notes) = models::build_meshes(data_dir.map(|d| d.join("models/soldier")).as_deref());
     debug_assert_eq!(meshes.len(), MESH_COUNT);
-    let renderer = WorldRenderer::new(&render_state.device, render_state.target_format, msaa, &meshes);
+    let characters = match data_dir.map(CharacterSet::load) {
+        Some(Ok(set)) => {
+            notes.push(format!(
+                "Солдаты: {} моделей, {} видов оружия, атлас {}×{}×{}",
+                set.models.len(),
+                set.weapons.len(),
+                set.atlas_size[0],
+                set.atlas_size[1],
+                set.atlas_size[2]
+            ));
+            Some(Arc::new(set))
+        }
+        Some(Err(e)) => {
+            notes.push(format!("{e} — рисую встроенных солдат"));
+            None
+        }
+        None => None,
+    };
+    let renderer = WorldRenderer::new(
+        &render_state.device,
+        &render_state.queue,
+        render_state.target_format,
+        msaa,
+        &meshes,
+        characters.as_deref(),
+    );
     render_state.renderer.write().callback_resources.insert(renderer);
-    notes
+    Installed { notes, characters }
+}
+
+/// Что получилось при установке отрисовщика.
+pub struct Installed {
+    pub notes: Vec<String>,
+    /// Свои солдаты из `data/factions.ron`. Их нужно отдать каждому [`crate::SceneBuilder`].
+    pub characters: Option<Arc<CharacterSet>>,
 }
 
 /// Статистика последнего кадра.

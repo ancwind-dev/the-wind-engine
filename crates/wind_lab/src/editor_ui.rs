@@ -227,6 +227,7 @@ impl MapWorkspace {
             kill_feed: Vec::new(),
             rings,
             lines: lines.unwrap_or_default(),
+            corpses: Vec::new(),
         }
     }
 

@@ -519,6 +519,19 @@ pub struct RemoteGrenade {
     pub fuse: f32,
 }
 
+/// Убитый солдат: где упал. Тело лежит, пока солдат не возродится.
+#[derive(Clone, Debug)]
+pub struct Corpse {
+    pub id: u32,
+    pub pos: Vec2,
+    pub facing: f32,
+    pub team: u8,
+    pub age: f32,
+}
+
+/// Сколько лежит тело у клиента: столько же, сколько солдат ждёт возрождения.
+const CORPSE_TIME: f32 = 6.0;
+
 #[derive(Clone, Debug)]
 pub struct KillNote {
     pub killer: u32,
@@ -556,6 +569,7 @@ pub struct RemoteWorld {
     /// Взрывы: позиция, радиус, сколько секунд назад.
     pub blasts: Vec<(Vec2, f32, f32)>,
     pub kill_feed: VecDeque<KillNote>,
+    pub corpses: Vec<Corpse>,
     /// Время клиента, которое вернул сервер в последнем снимке.
     pub echo_time: u32,
     /// Когда (по часам клиента, с) пришёл последний снимок.
@@ -594,6 +608,7 @@ impl RemoteWorld {
             grenades: Vec::new(),
             blasts: Vec::new(),
             kill_feed: VecDeque::new(),
+            corpses: Vec::new(),
             echo_time: 0,
             snapshot_time: 0.0,
             history: (0..HISTORY).map(|_| None).collect(),
@@ -710,6 +725,14 @@ impl RemoteWorld {
         }
 
         // Снимок разобран целиком — применяем.
+        // Сначала тела: убитый пропадёт из вида, а нам нужно его последнее место.
+        for fx in &effects {
+            if let Fx::Kill(_, victim, _) = *fx
+                && let Some(Some(s)) = self.soldiers.get(victim as usize)
+            {
+                self.corpses.push(Corpse { id: victim, pos: s.pos, facing: s.net.facing(), team: s.net.team(), age: 0.0 });
+            }
+        }
         let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
         for (id, s) in &view {
             let slot = &mut self.soldiers[*id as usize];
@@ -811,6 +834,10 @@ impl RemoteWorld {
         for k in &mut self.kill_feed {
             k.age += dt;
         }
+        for c in &mut self.corpses {
+            c.age += dt;
+        }
+        self.corpses.retain(|c| c.age < CORPSE_TIME);
         while self.kill_feed.back().is_some_and(|k| k.age > 8.0) {
             self.kill_feed.pop_back();
         }

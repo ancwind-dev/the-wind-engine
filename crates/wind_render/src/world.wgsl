@@ -228,3 +228,56 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
     let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
+
+// --- Свои солдаты ------------------------------------------------------------
+// Цвет вокселя — из 3D-атласа: вершина несёт координату угла вокселя в атласе,
+// а фрагмент берёт воксель «за» гранью (сдвиг на полвокселя против нормали).
+
+@group(2) @binding(0) var char_atlas: texture_3d<f32>;
+
+struct CIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) atlas: vec4<u32>,
+    @location(3) m0: vec4<f32>,
+    @location(4) m1: vec4<f32>,
+    @location(5) m2: vec4<f32>,
+    @location(6) m3: vec4<f32>,
+    @location(7) tint: vec4<f32>,
+};
+
+struct COut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    // centroid — иначе при сглаживании точка выборки может выйти за грань.
+    @location(2) @interpolate(perspective, centroid) atlas: vec3<f32>,
+    @location(3) @interpolate(flat) local_normal: vec3<f32>,
+};
+
+@vertex
+fn vs_char(v: CIn) -> COut {
+    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
+    let world = model * vec4<f32>(v.pos, 1.0);
+    var out: COut;
+    out.clip = g.view_proj * world;
+    out.world = world.xyz;
+    out.normal = normalize((model * vec4<f32>(v.normal.xyz, 0.0)).xyz);
+    out.atlas = vec3<f32>(v.atlas.xyz);
+    out.local_normal = v.normal.xyz;
+    return out;
+}
+
+@fragment
+fn fs_char(in: COut) -> @location(0) vec4<f32> {
+    let cell = vec3<i32>(floor(in.atlas - in.local_normal * 0.5));
+    let albedo = textureLoad(char_atlas, cell, 0).rgb;
+    let c = light(albedo, normalize(in.normal), in.world);
+    return vec4<f32>(fogged(c, in.world), 1.0);
+}
+
+@vertex
+fn vs_char_shadow(v: CIn) -> @builtin(position) vec4<f32> {
+    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
+    return g.light_view_proj * model * vec4<f32>(v.pos, 1.0);
+}

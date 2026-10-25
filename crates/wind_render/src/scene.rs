@@ -2,6 +2,7 @@
 //! Источник данных (локальная симуляция или сеть) не важен — на входе простые списки.
 
 use crate::camera::{Camera, to_3d};
+use crate::character::{CharacterSet, Motion};
 use crate::mapmesh::MapMesher;
 use crate::models::{MeshId, SOLDIER_VOXEL};
 use crate::renderer::{FrameData, Globals, GroundPoint, Instance, MAX_POINTS, PendingMap, SHADOW_SIZE};
@@ -15,6 +16,16 @@ pub struct SoldierDraw {
     pub pos: Vec2,
     pub facing: f32,
     pub team: u8,
+}
+
+/// Убитый солдат: лежит, пока не возродится.
+pub struct CorpseDraw {
+    pub id: u32,
+    pub pos: Vec2,
+    pub facing: f32,
+    pub team: u8,
+    /// Сколько секунд прошло со смерти — для падения.
+    pub age: f32,
 }
 
 pub struct PointDraw {
@@ -40,6 +51,7 @@ pub struct DrawInput<'a> {
     pub marker: Option<Vec2>,
     /// Дополнительные кольца на земле: (центр, радиус, цвет sRGB) — например, кисть редактора.
     pub rings: &'a [(Vec2, f32, [f32; 3])],
+    pub corpses: &'a [CorpseDraw],
     pub time: f32,
     /// Время с прошлого кадра, с — для анимации шага.
     pub dt: f32,
@@ -62,6 +74,8 @@ pub struct SceneBuilder {
     anim: Vec<Anim>,
     /// Цвета команд (sRGB 0..1).
     pub team_colors: [[f32; 3]; 2],
+    /// Свои солдаты (из `install`). Без них рисуются встроенные болванчики.
+    pub characters: Option<Arc<CharacterSet>>,
 }
 
 impl Default for SceneBuilder {
@@ -72,6 +86,7 @@ impl Default for SceneBuilder {
             ground_key: None,
             anim: Vec::new(),
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
+            characters: None,
         }
     }
 }
@@ -82,6 +97,10 @@ fn view_radius(camera: &Camera) -> f32 {
 }
 
 impl SceneBuilder {
+    pub fn with_characters(characters: Option<Arc<CharacterSet>>) -> Self {
+        SceneBuilder { characters, ..Default::default() }
+    }
+
     pub fn build(&mut self, input: &DrawInput) -> FrameData {
         let cam = input.camera;
         let reach = view_radius(cam);
@@ -114,6 +133,9 @@ impl SceneBuilder {
 
         // --- Экземпляры, по мешам.
         let mut by_mesh: [Vec<Instance>; crate::models::MESH_COUNT] = Default::default();
+        let characters = self.characters.clone();
+        let mut by_char: Vec<Vec<Instance>> = vec![Vec::new(); characters.as_ref().map_or(0, |c| c.meshes.len())];
+        let plain = |m: Mat4| Instance { model: m.to_cols_array_2d(), tint: [1.0, 1.0, 1.0, 0.0] };
         let v = SOLDIER_VOXEL;
         for s in input.soldiers {
             let speed = self.animate(s, input.dt);
@@ -121,6 +143,19 @@ impl SceneBuilder {
                 continue;
             }
             let a = self.anim[s.id as usize];
+            // Свои модели: поза по скелету, оружие в правой руке.
+            if let Some(set) = &characters
+                && let Some((model, weapon)) = set.pick(s.team, s.id)
+            {
+                let model = &set.models[model];
+                let pose = model.pose(Motion { speed, phase: a.phase * 2.0 });
+                let root = Mat4::from_translation(to_3d(s.pos, input.map.height_at(s.pos))) * Mat4::from_rotation_y(-s.facing);
+                model.parts(&pose, &mut |mesh, m| by_char[mesh].push(plain(root * m)));
+                if let Some(grip) = model.weapon_frame(&pose) {
+                    by_char[set.weapons[weapon].mesh].push(plain(root * grip));
+                }
+                continue;
+            }
             let tint = {
                 let c = self.team_colors[s.team as usize & 1];
                 [c[0], c[1], c[2], 0.0]
@@ -169,17 +204,40 @@ impl SceneBuilder {
             cube.push(Instance { model: m.to_cols_array_2d(), tint: [1.0, 0.55 + 0.35 * (1.0 - t), 0.2, 1.0] });
         }
 
+        // Убитые: падают и лежат, пока солдат не возродится.
+        if let Some(set) = &characters {
+            for c in input.corpses {
+                if c.pos.distance_squared(cam.target) > reach2 {
+                    continue;
+                }
+                let Some((model, _)) = set.pick(c.team, c.id) else { continue };
+                let model = &set.models[model];
+                let forward = c.id.wrapping_mul(0x9E37_79B9) >> 31 == 1;
+                let pose = model.corpse(c.age, forward);
+                let root = Mat4::from_translation(to_3d(c.pos, input.map.height_at(c.pos))) * Mat4::from_rotation_y(-c.facing);
+                model.parts(&pose, &mut |mesh, m| by_char[mesh].push(plain(root * m)));
+            }
+        }
+
         let mut instances = Vec::new();
         let mut batches = Vec::new();
         for (mesh, list) in by_mesh.iter().enumerate() {
             batches.push((mesh, instances.len() as u32, list.len() as u32));
             instances.extend_from_slice(list);
         }
+        let mut char_batches = Vec::new();
+        for (mesh, list) in by_char.iter().enumerate() {
+            if !list.is_empty() {
+                char_batches.push((mesh, instances.len() as u32, list.len() as u32));
+                instances.extend_from_slice(list);
+            }
+        }
 
         FrameData {
             globals: self.globals(input),
             instances,
             batches,
+            char_batches,
             map: self.pending.clone(),
             visible_chunks,
         }

@@ -69,6 +69,8 @@ pub struct Scene<'a> {
     pub rings: Vec<(Vec2, f32, [f32; 3])>,
     /// Отрезки на земле (только 2D): превью линии или дома в редакторе.
     pub lines: Vec<(Vec2, Vec2)>,
+    /// Убитые (для 3D): лежат, пока не возродятся.
+    pub corpses: Vec<wind_render::CorpseDraw>,
 }
 
 pub struct ViewportOutput {
@@ -160,6 +162,11 @@ impl Viewport {
         self.framed = false;
         self.texture_key = (0, u64::MAX, 0);
         self.generation += 1;
+    }
+
+    /// Свои солдаты для 3D (из `wind_render::install`).
+    pub fn set_characters(&mut self, characters: Option<std::sync::Arc<wind_render::character::CharacterSet>>) {
+        self.scene_3d = wind_render::SceneBuilder::with_characters(characters);
     }
 
     /// Перестроить карту (2D-текстуру и 3D-меши), не трогая камеру.
@@ -278,6 +285,7 @@ impl Viewport {
             points: &points,
             marker: scene.selected.as_ref().map(|s| s.pos),
             rings: &scene.rings,
+            corpses: &scene.corpses,
             time: 0.0,
             dt,
         };
