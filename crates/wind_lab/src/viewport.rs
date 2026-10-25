@@ -111,11 +111,22 @@ pub struct Viewport {
     pub overlays: Overlays,
     /// Камера следует за выделенным солдатом.
     pub follow: bool,
+    /// Рисовать в 3D (тем же `wind_render`, что и игра).
+    pub mode_3d: bool,
+    /// 3D доступно: отрисовщик мира установлен в wgpu.
+    pub has_3d: bool,
+    camera_3d: wind_render::Camera,
+    scene_3d: wind_render::SceneBuilder,
+    /// Растёт при смене мира — чтобы 3D перестроило меши карты.
+    generation: u64,
+    last_frame: std::time::Instant,
     texture: Option<TextureHandle>,
     /// Карта, нарисованная в текстуре: адрес в памяти и ревизия.
     texture_key: (usize, u64),
     framed: bool,
 }
+
+const SKY_3D: Color32 = Color32::from_rgb(158, 173, 184);
 
 impl Viewport {
     pub fn new() -> Self {
@@ -123,6 +134,12 @@ impl Viewport {
             camera: Camera { center: Vec2::ZERO, zoom: 1.0 },
             overlays: Overlays { grid: true, bullets: true, flow: false, vision: true },
             follow: false,
+            mode_3d: false,
+            has_3d: false,
+            camera_3d: wind_render::Camera::default(),
+            scene_3d: wind_render::SceneBuilder::default(),
+            generation: 0,
+            last_frame: std::time::Instant::now(),
             texture: None,
             texture_key: (0, u64::MAX),
             framed: false,
@@ -133,6 +150,7 @@ impl Viewport {
     pub fn reset(&mut self) {
         self.framed = false;
         self.texture_key = (0, u64::MAX);
+        self.generation += 1;
     }
 
     /// Новый мир, но вид не подгоняем под всю карту: сразу крупно за своим солдатом.
@@ -141,15 +159,151 @@ impl Viewport {
         self.framed = true;
         self.follow = true;
         self.camera.zoom = zoom;
+        self.camera_3d.distance = 30.0;
     }
 
     pub fn focus(&mut self, pos: Vec2) {
         self.camera.center = pos;
         self.camera.zoom = self.camera.zoom.max(6.0);
+        self.camera_3d.target = pos;
+        self.camera_3d.distance = self.camera_3d.distance.min(60.0);
     }
 
     /// `play` — режим игры: левая кнопка стреляет, а не выделяет.
     pub fn show(&mut self, ui: &mut egui::Ui, scene: &Scene, play: bool) -> ViewportOutput {
+        let (out, rect) = if self.mode_3d && self.has_3d { self.show_3d(ui, scene, play) } else { self.show_2d(ui, scene, play) };
+        // Переключатель 2D / 3D в правом верхнем углу, как кнопки шапки вьюпорта в Blender.
+        if self.has_3d {
+            let r = Rect::from_min_size(rect.right_top() + vec2(-92.0, 8.0), vec2(40.0, 20.0));
+            if ui.put(r, egui::Button::selectable(!self.mode_3d, "2D")).clicked() {
+                self.mode_3d = false;
+            }
+            if ui.put(r.translate(vec2(44.0, 0.0)), egui::Button::selectable(self.mode_3d, "3D")).clicked() {
+                self.mode_3d = true;
+            }
+        }
+        out
+    }
+
+    /// 3D: средняя кнопка — вращать, Shift + средняя или правая — двигать, колесо — масштаб.
+    fn show_3d(&mut self, ui: &mut egui::Ui, scene: &Scene, play: bool) -> (ViewportOutput, Rect) {
+        let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
+        let rect = response.rect;
+        painter.rect_filled(rect, 0, SKY_3D);
+        let size = scene.map.width as f32;
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        self.last_frame = now;
+
+        let cam = &mut self.camera_3d;
+        if !self.framed {
+            cam.target = Vec2::splat(size * 0.5);
+            cam.distance = size * 0.9;
+            self.framed = true;
+        }
+        let shift = ui.input(|i| i.modifiers.shift);
+        let d = response.drag_delta();
+        let pan = response.dragged_by(egui::PointerButton::Secondary)
+            || (shift && response.dragged_by(egui::PointerButton::Middle));
+        if pan {
+            let (sy, cy) = cam.yaw.sin_cos();
+            let right = Vec2::new(cy, -sy);
+            let forward = -Vec2::new(sy, cy);
+            cam.target -= (right * d.x - forward * d.y) * cam.distance * 0.0015;
+            self.follow = false;
+        } else if response.dragged_by(egui::PointerButton::Middle) {
+            cam.yaw -= d.x * 0.008;
+            cam.pitch = (cam.pitch + d.y * 0.008).clamp(0.15, 1.55);
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            cam.distance = (cam.distance * (-scroll * 0.0015).exp()).clamp(5.0, 1500.0);
+            if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+                cam.target = Vec2::splat(size * 0.5);
+                cam.distance = size * 0.9;
+                self.follow = false;
+            }
+        }
+        if self.follow
+            && let Some(s) = &scene.selected
+        {
+            cam.target += (s.pos - cam.target) * (1.0 - (-dt * 8.0).exp());
+        }
+
+        let aspect = rect.width() / rect.height().max(1.0);
+        let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+        let mouse_world = pointer.and_then(|p| {
+            let ndc = Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0);
+            cam.ground_point(ndc, aspect, 0.0)
+        });
+
+        let soldiers: Vec<wind_render::SoldierDraw> = scene
+            .soldiers
+            .iter()
+            .map(|s| wind_render::SoldierDraw { id: s.id, pos: s.pos, facing: s.facing, team: s.team })
+            .collect();
+        let bullets: Vec<(Vec2, Vec2)> = scene.bullets.iter().map(|&(tail, head)| (head, head - tail)).collect();
+        let grenades: Vec<Vec2> = scene.grenades.iter().map(|g| g.0).collect();
+        let points: Vec<wind_render::PointDraw> = scene
+            .points
+            .iter()
+            .map(|p| wind_render::PointDraw { pos: p.pos, radius: scene.capture_radius, owner: p.owner })
+            .collect();
+        let input = wind_render::DrawInput {
+            map: scene.map,
+            map_key: (scene.map as *const Map as u64) ^ (self.generation << 48),
+            camera: cam,
+            aspect,
+            soldiers: &soldiers,
+            bullets: &bullets,
+            grenades: &grenades,
+            blasts: &scene.blasts,
+            points: &points,
+            marker: scene.selected.as_ref().map(|s| s.pos),
+            time: 0.0,
+            dt,
+        };
+        let frame = self.scene_3d.build(&input);
+        painter.add(eframe::egui_wgpu::Callback::new_paint_callback(rect, wind_render::WorldPaint(std::sync::Arc::new(frame))));
+
+        let font = FontId::proportional(12.0);
+        let at = rect.min + vec2(12.0, 10.0);
+        painter.text(at, Align2::LEFT_TOP, &scene.title, font.clone(), Color32::from_gray(30));
+        painter.text(
+            at + vec2(0.0, 16.0),
+            Align2::LEFT_TOP,
+            format!("3D · {:.0} м до цели · СКМ — вращать, Shift+СКМ — двигать", cam.distance),
+            font,
+            Color32::from_gray(60),
+        );
+        draw_kill_feed(&painter, rect, &scene.kill_feed);
+        if let Some(hud) = &scene.hud {
+            draw_hud(&painter, rect, hud);
+        }
+
+        let primary_down = pointer.is_some() && ui.input(|i| i.pointer.primary_down());
+        let picked = self.pick(&response, play, mouse_world, scene, 1.0);
+        (ViewportOutput { picked, mouse_world, primary_down }, rect)
+    }
+
+    /// Клик левой кнопкой — ближайший солдат в радиусе `radius` метров.
+    fn pick(&self, response: &egui::Response, play: bool, at: Option<Vec2>, scene: &Scene, radius: f32) -> Option<Option<u32>> {
+        if play || !response.clicked_by(egui::PointerButton::Primary) {
+            return None;
+        }
+        let at = at?;
+        Some(
+            scene
+                .soldiers
+                .iter()
+                .map(|s| (s.id, s.pos.distance(at)))
+                .filter(|&(_, d)| d < radius)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(id, _)| id),
+        )
+    }
+
+    fn show_2d(&mut self, ui: &mut egui::Ui, scene: &Scene, play: bool) -> (ViewportOutput, Rect) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
         painter.rect_filled(rect, 0, theme::VIEWPORT);
@@ -315,24 +469,8 @@ impl Viewport {
         let mouse_world = pointer.map(|p| cam.to_world(rect, p));
         let primary_down = pointer.is_some() && ui.input(|i| i.pointer.primary_down());
 
-        // Клик левой кнопкой — выделить ближайшего солдата.
-        let mut picked = None;
-        if !play
-            && response.clicked_by(egui::PointerButton::Primary)
-            && let Some(at) = mouse_world
-        {
-            let pick = (12.0 / cam.zoom).max(r * 2.0);
-            picked = Some(
-                scene
-                    .soldiers
-                    .iter()
-                    .map(|s| (s.id, s.pos.distance(at)))
-                    .filter(|&(_, d)| d < pick)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(id, _)| id),
-            );
-        }
-        ViewportOutput { picked, mouse_world, primary_down }
+        let picked = self.pick(&response, play, mouse_world, scene, (12.0 / cam.zoom).max(r * 2.0));
+        (ViewportOutput { picked, mouse_world, primary_down }, rect)
     }
 
     fn navigate(&mut self, ui: &egui::Ui, response: &egui::Response, rect: Rect, size: f32) {
@@ -426,7 +564,7 @@ fn draw_header(painter: &egui::Painter, rect: Rect, cam: &Camera, scene: &Scene)
 
 fn draw_kill_feed(painter: &egui::Painter, rect: Rect, feed: &[(String, Color32)]) {
     for (i, (text, color)) in feed.iter().enumerate() {
-        let at = rect.right_top() + vec2(-12.0, 10.0 + i as f32 * 16.0);
+        let at = rect.right_top() + vec2(-12.0, 36.0 + i as f32 * 16.0);
         painter.text(at, Align2::RIGHT_TOP, text, FontId::proportional(12.0), *color);
     }
 }

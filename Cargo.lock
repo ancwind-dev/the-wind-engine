@@ -3893,11 +3893,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wind_client"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "wind_net",
+ "wind_render",
+ "wind_sim",
+]
+
+[[package]]
 name = "wind_lab"
 version = "0.1.0"
 dependencies = [
  "eframe",
  "wind_net",
+ "wind_render",
  "wind_sim",
 ]
 
@@ -3906,6 +3917,16 @@ name = "wind_net"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "wind_sim",
+]
+
+[[package]]
+name = "wind_render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "eframe",
+ "glam",
  "wind_sim",
 ]
 

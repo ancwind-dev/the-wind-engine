@@ -22,12 +22,17 @@ const HISTORY: usize = 300;
 const MAX_STEPS_PER_FRAME: u32 = 64;
 /// Как часто клиент шлёт ввод, раз в секунду.
 const INPUT_RATE: f32 = 30.0;
+/// MSAA для 3D-вида. Совпадает в NativeOptions и в wind_render::install.
+const MSAA: u32 = 4;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("The Wind Engine — Лаборатория")
             .with_inner_size([1600.0, 950.0]),
+        // Для 3D-вида: буфер глубины и сглаживание, как в игре.
+        depth_buffer: 32,
+        multisampling: MSAA as u16,
         ..Default::default()
     };
     eframe::run_native("wind_lab", options, Box::new(|cc| Ok(Box::new(Lab::new(cc)))))
@@ -88,6 +93,12 @@ impl Lab {
             seed: 1,
         };
         let world = World::new(with_settings(&base_config, &settings), settings.seed);
+        let mut viewport = Viewport::new();
+        if let Some(rs) = &cc.wgpu_render_state {
+            let models = config_path.parent().map(|data| data.join("models/soldier"));
+            wind_render::install(rs, MSAA, models.as_deref());
+            viewport.has_3d = true;
+        }
         let mut lab = Lab {
             world,
             config_mtime: mtime(&config_path),
@@ -100,7 +111,7 @@ impl Lab {
             accumulator: 0.0,
             history: VecDeque::with_capacity(HISTORY),
             selected: None,
-            viewport: Viewport::new(),
+            viewport,
             blasts: Vec::new(),
             status,
             server: None,
@@ -124,6 +135,7 @@ impl Lab {
                     lab.connect();
                 }
                 "--serve" => lab.start_server(),
+                "--3d" => lab.viewport.mode_3d = lab.viewport.has_3d,
                 _ => {}
             }
         }
@@ -353,6 +365,9 @@ impl Lab {
                         }
                     });
                     ui.menu_button("Вид", |ui| {
+                        if self.viewport.has_3d {
+                            ui.checkbox(&mut self.viewport.mode_3d, "3D-вид");
+                        }
                         let o = &mut self.viewport.overlays;
                         ui.checkbox(&mut o.grid, "Сетка");
                         ui.checkbox(&mut o.bullets, "Пули и гранаты");
