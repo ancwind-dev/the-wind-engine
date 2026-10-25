@@ -1,0 +1,8 @@
+[package]
+name = "wind_lab"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eframe = "0.37.0"
+wind_sim = { version = "0.1.0", path = "../wind_sim" }

@@ -1,0 +1,51 @@
+// Параметры симуляции. Лаборатория (wind_lab) подхватывает изменения файла на лету.
+// map_size, soldiers_per_team и capture_points применяются после перезапуска матча.
+(
+    map_size: 512,
+    soldiers_per_team: 300,
+    capture_points: 5,
+    tick_rate: 20,
+    think_interval: 5,
+    // Солдат на своей точке при каждом «обдумывании» (4 раза в секунду) остаётся
+    // с этой вероятностью. 0.97 — в среднем уходит дальше примерно через 8 секунд.
+    defend_probability: 0.97,
+
+    soldier: (
+        speed: 4.5,
+        radius: 0.35,
+        vision_range: 55.0,
+        vision_candidates: 4,
+        respawn_time: 6.0,
+    ),
+
+    // Названия полей — как в .weapon-файлах RWR.
+    weapon: (
+        retrigger_time: 0.15,
+        magazine_size: 30,
+        reload_time: 2.5,
+        projectile_speed: 90.0,
+        range: 50.0,
+        spread_deg: 4.0,
+        kill_probability: 0.6,
+        wound_damage: 0.4,
+    ),
+
+    grenade: (
+        count: 2,
+        throw_speed: 14.0,
+        fuse: 2.0,
+        blast_radius: 6.0,
+        kill_probability: 0.9,
+        wall_damage: 160.0,
+        wall_damage_radius: 3.0,
+        min_distance: 8.0,
+        max_distance: 30.0,
+        min_enemies: 3,
+        interval: 15.0,
+    ),
+
+    capture: (
+        radius: 10.0,
+        time: 12.0,
+    ),
+)

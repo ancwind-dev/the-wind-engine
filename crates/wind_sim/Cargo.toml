@@ -1,0 +1,10 @@
+[package]
+name = "wind_sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = "0.34.1"
+rayon = "1.12.0"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
