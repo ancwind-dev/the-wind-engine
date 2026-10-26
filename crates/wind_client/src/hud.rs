@@ -1,7 +1,7 @@
 //! HUD поверх 3D: состояние солдата, счёт и точки, лента убийств, прицел, FPS.
 
 use crate::source::View;
-use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, pos2, vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, pos2, vec2};
 
 const TEAM: [Color32; 2] = [Color32::from_rgb(0x5d, 0xa2, 0xe8), Color32::from_rgb(0xe8, 0x62, 0x58)];
 const PANEL: Color32 = Color32::from_black_alpha(150);
@@ -70,10 +70,23 @@ pub fn draw(painter: &Painter, rect: Rect, view: &View, status: Option<String>, 
     }
 }
 
-pub fn crosshair(painter: &Painter, at: Pos2) {
-    let stroke = Stroke::new(1.5, Color32::from_white_alpha(220));
-    for (a, b) in [(vec2(-10.0, 0.0), vec2(-4.0, 0.0)), (vec2(4.0, 0.0), vec2(10.0, 0.0)), (vec2(0.0, -10.0), vec2(0.0, -4.0)), (vec2(0.0, 4.0), vec2(0.0, 10.0))] {
-        painter.line_segment([at + a, at + b], stroke);
+/// Прицел: штрихи стоят на краю разброса (`gap` — его радиус в пикселях), так что
+/// видно, куда лягут пули. Во время перезарядки по кругу бежит дуга.
+pub fn crosshair(painter: &Painter, at: Pos2, gap: f32, reloading: bool, time: f32) {
+    let shadow = Stroke::new(3.0, Color32::from_black_alpha(90));
+    let stroke = Stroke::new(1.5, Color32::from_white_alpha(230));
+    let len = 7.0;
+    for dir in [vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0)] {
+        let seg = [at + dir * gap, at + dir * (gap + len)];
+        painter.line_segment(seg, shadow);
+        painter.line_segment(seg, stroke);
+    }
+    painter.circle_filled(at, 1.5, Color32::from_white_alpha(230));
+    if reloading {
+        let r = gap + len + 5.0;
+        let start = time * 6.0;
+        let points: Vec<Pos2> = (0..=16).map(|i| start + i as f32 / 16.0 * 4.0).map(|a| at + vec2(a.cos(), a.sin()) * r).collect();
+        painter.add(egui::Shape::line(points, Stroke::new(2.0, Color32::from_rgb(255, 190, 80))));
     }
 }
 

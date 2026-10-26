@@ -80,8 +80,9 @@ impl Bot {
                 aim: e + Vec2::new(self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0)),
                 fire: true,
                 grenade: e.distance(pos) > 10.0 && self.rng.chance(0.01),
+                pos: None,
             },
-            None => PlayerInput { move_dir, aim: pos + to * 10.0, fire: false, grenade: false },
+            None => PlayerInput { move_dir, aim: pos + to * 10.0, fire: false, grenade: false, pos: None },
         }
     }
 }

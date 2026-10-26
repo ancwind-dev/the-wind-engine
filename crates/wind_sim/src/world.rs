@@ -28,6 +28,32 @@ pub struct PlayerInput {
     pub aim: Vec2,
     pub fire: bool,
     pub grenade: bool,
+    /// Где своего солдата видит клиент. Клиент двигает его сам, без задержки на пинг,
+    /// а сервер подтягивает солдата туда, но не быстрее `CLAIM_CATCH_UP` скоростей
+    /// и не сквозь стены. `None` — двигать по `move_dir`, как раньше (боты, лаборатория).
+    pub pos: Option<Vec2>,
+}
+
+/// Во сколько раз быстрее обычного шага сервер может догонять позицию клиента:
+/// пакеты с вводом приходят неровно, и солдат должен успевать.
+pub const CLAIM_CATCH_UP: f32 = 1.5;
+/// Если клиент дальше этого от сервера (возрождение, застрял, подделка), его позицию
+/// не слушаем — клиент сам вернёт солдата на место сервера.
+pub const CLAIM_MAX_GAP: f32 = 2.0;
+
+/// Шаг солдата со скольжением вдоль стен: по осям отдельно. Один и тот же на сервере
+/// и на клиенте — иначе клиент и сервер разойдутся у стен.
+pub fn walk(map: &Map, pos: Vec2, step: Vec2, radius: f32) -> Vec2 {
+    let mut pos = pos;
+    let nx = pos + Vec2::new(step.x, 0.0);
+    if !map.circle_hits_solid(nx, radius) {
+        pos = nx;
+    }
+    let ny = pos + Vec2::new(0.0, step.y);
+    if !map.circle_hits_solid(ny, radius) {
+        pos = ny;
+    }
+    pos
 }
 
 /// Кто управляет солдатом.
@@ -299,11 +325,18 @@ impl World {
             let mut speed = spec.speed;
 
             if let Controller::Player(input) = s.controller {
-                desired = input.move_dir.clamp_length_max(1.0);
                 let look = input.aim - s.pos;
                 if look != Vec2::ZERO {
                     s.facing = look.y.atan2(look.x);
                 }
+                if let Some(claim) = input.pos.filter(|c| c.distance(s.pos) < CLAIM_MAX_GAP) {
+                    // Клиент ведёт своего солдата сам — догоняем его заявку.
+                    let step = (claim - s.pos).clamp_length_max(spec.speed * CLAIM_CATCH_UP * dt);
+                    s.vel = step / dt;
+                    s.pos = walk(map, s.pos, step, radius);
+                    return;
+                }
+                desired = input.move_dir.clamp_length_max(1.0);
             } else if let Some(target) = s.target.filter(|&t| prev[t as usize].1) {
                 // Враг виден: подходим на дистанцию огня и стоим.
                 let to = prev[target as usize].0 - s.pos;
@@ -349,16 +382,7 @@ impl World {
             });
 
             s.vel = desired * speed + push * 4.0;
-            let step = s.vel * dt;
-            // Двигаемся по осям отдельно — так солдат скользит вдоль стены.
-            let nx = s.pos + Vec2::new(step.x, 0.0);
-            if !map.circle_hits_solid(nx, radius) {
-                s.pos = nx;
-            }
-            let ny = s.pos + Vec2::new(0.0, step.y);
-            if !map.circle_hits_solid(ny, radius) {
-                s.pos = ny;
-            }
+            s.pos = walk(map, s.pos, s.vel * dt, radius);
         });
     }
 

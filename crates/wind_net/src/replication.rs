@@ -577,6 +577,11 @@ pub struct RemoteWorld {
     pub echo_time: u32,
     /// Когда (по часам клиента, с) пришёл последний снимок.
     pub snapshot_time: f64,
+    /// Где свой солдат на экране (клиент ведёт его сам, см. `Pilot`) — оттуда
+    /// и вылетают его трассеры.
+    pub own_pos: Option<Vec2>,
+    /// Сколько своих выстрелов пришло — для отдачи прицела.
+    pub own_shots: u32,
     history: Vec<Option<(u32, View)>>,
 }
 
@@ -616,6 +621,8 @@ impl RemoteWorld {
             atmosphere,
             echo_time: 0,
             snapshot_time: 0.0,
+            own_pos: None,
+            own_shots: 0,
             history: (0..HISTORY).map(|_| None).collect(),
         })
     }
@@ -761,9 +768,17 @@ impl RemoteWorld {
         for fx in effects {
             match fx {
                 Fx::Shot(shooter, angle) => {
-                    if let Some(Some(s)) = self.soldiers.get(shooter as usize) {
+                    let own = shooter == self.welcome.soldier;
+                    if own {
+                        self.own_shots += 1;
+                    }
+                    let from = match self.soldiers.get(shooter as usize) {
+                        Some(Some(s)) => Some(if own { self.own_pos.unwrap_or(s.pos) } else { s.pos }),
+                        _ => None,
+                    };
+                    if let Some(from) = from {
                         let dir = Vec2::new(angle.cos(), angle.sin());
-                        self.tracers.push(Tracer { pos: s.pos + dir * (radius + 0.05), vel: dir * speed, ttl });
+                        self.tracers.push(Tracer { pos: from + dir * (radius + 0.05), vel: dir * speed, ttl });
                     }
                 }
                 Fx::Grenade(from, to, fuse) => {

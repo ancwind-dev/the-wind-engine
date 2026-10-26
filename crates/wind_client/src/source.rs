@@ -53,12 +53,14 @@ pub struct Local {
     /// Лента убийств: (текст, команда убийцы, возраст).
     feed: Vec<(String, u8, f32)>,
     pub sim_ms: f32,
+    /// Сколько раз выстрелил свой солдат — для отдачи прицела.
+    own_shots: u32,
 }
 
 impl Local {
     pub fn new(mut world: World, play: bool) -> Self {
         let me = if play { world.take_control(0) } else { None };
-        Local { world, me, accumulator: 0.0, blasts: Vec::new(), feed: Vec::new(), sim_ms: 0.0 }
+        Local { world, me, accumulator: 0.0, blasts: Vec::new(), feed: Vec::new(), sim_ms: 0.0, own_shots: 0 }
     }
 }
 
@@ -102,6 +104,7 @@ impl Source {
                     for e in &w.events {
                         match *e {
                             Event::Explosion { pos, radius } => l.blasts.push((pos, radius, 0.0)),
+                            Event::Shot { shooter, .. } if Some(shooter) == l.me => l.own_shots += 1,
                             // Только убийства с участием игроков — иначе ленту не прочитать.
                             Event::Kill { killer, victim } => {
                                 let player = |i: u32| matches!(w.soldiers[i as usize].controller, Controller::Player(_));
@@ -132,6 +135,55 @@ impl Source {
                 }
                 client.send_input(input);
             }
+        }
+    }
+
+    /// Свой солдат по серверу (или по своей симуляции), если он жив.
+    pub fn own_server_pos(&self) -> Option<Vec2> {
+        match self {
+            Source::Local(l) => l.me.map(|i| &l.world.soldiers[i as usize]).filter(|s| s.alive).map(|s| s.pos),
+            Source::Remote(c) => {
+                let w = c.world.as_ref()?;
+                w.my_soldier().filter(|_| w.me.alive).map(|s| s.pos)
+            }
+        }
+    }
+
+    pub fn own_id(&self) -> Option<u32> {
+        match self {
+            Source::Local(l) => l.me,
+            Source::Remote(c) => c.world.as_ref().map(|w| w.welcome.soldier),
+        }
+    }
+
+    /// Скорость шага и радиус солдата, разброс оружия в градусах.
+    pub fn soldier_spec(&self) -> (f32, f32, f32) {
+        match self {
+            Source::Local(l) => {
+                let c = &l.world.config;
+                (c.soldier.speed, c.soldier.radius, c.weapon.spread_deg)
+            }
+            Source::Remote(c) => c
+                .world
+                .as_ref()
+                .map_or((0.0, 0.4, 0.0), |w| (w.welcome.soldier_speed, w.welcome.soldier_radius, w.welcome.spread_deg)),
+        }
+    }
+
+    /// Сколько раз выстрелил свой солдат.
+    pub fn own_shots(&self) -> u32 {
+        match self {
+            Source::Local(l) => l.own_shots,
+            Source::Remote(c) => c.world.as_ref().map_or(0, |w| w.own_shots),
+        }
+    }
+
+    /// Где свой солдат на экране — оттуда вылетают его трассеры.
+    pub fn set_own_pos(&mut self, pos: Option<Vec2>) {
+        if let Source::Remote(c) = self
+            && let Some(w) = &mut c.world
+        {
+            w.own_pos = pos;
         }
     }
 

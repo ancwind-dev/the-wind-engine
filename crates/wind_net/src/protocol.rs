@@ -8,7 +8,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -149,6 +149,10 @@ impl InputPacket {
         write_pos(&mut w, self.input.aim);
         w.write_bool(self.input.fire);
         w.write_bool(self.input.grenade);
+        w.write_bool(self.input.pos.is_some());
+        if let Some(p) = self.input.pos {
+            write_pos(&mut w, p);
+        }
         w.finish()
     }
 
@@ -162,11 +166,12 @@ impl InputPacket {
         let aim = read_pos(&mut r)?;
         let fire = r.read_bool()?;
         let grenade = r.read_bool()?;
+        let pos = if r.read_bool()? { Some(read_pos(&mut r)?) } else { None };
         Ok(InputPacket {
             seq,
             ack_tick,
             time_ms,
-            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade },
+            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, pos },
         })
     }
 }
@@ -194,6 +199,11 @@ pub struct Welcome {
     pub soldier_radius: f32,
     pub interest_radius: f32,
     pub grenade_speed: f32,
+    /// Скорость шага солдата, м/с — клиент двигает своего солдата сам.
+    pub soldier_speed: f32,
+    /// Сколько секунд между выстрелами и разброс, градусы, — для прицела.
+    pub retrigger_time: f32,
+    pub spread_deg: f32,
     pub magazine_size: u32,
     /// Карта из файла: имя папки в `data/maps` и отпечаток. Пустое имя — карта из seed.
     pub map_name: String,
@@ -218,6 +228,9 @@ impl Welcome {
             self.soldier_radius,
             self.interest_radius,
             self.grenade_speed,
+            self.soldier_speed,
+            self.retrigger_time,
+            self.spread_deg,
         ] {
             w.write_f32(v);
         }
@@ -244,6 +257,9 @@ impl Welcome {
             soldier_radius: r.read_f32()?,
             interest_radius: r.read_f32()?,
             grenade_speed: r.read_f32()?,
+            soldier_speed: r.read_f32()?,
+            retrigger_time: r.read_f32()?,
+            spread_deg: r.read_f32()?,
             magazine_size: r.read_var()?,
             map_name: r.read_str(128)?,
             map_fingerprint: r.read_u64()?,
@@ -276,6 +292,7 @@ mod tests {
                 aim: Vec2::new(100.5, 200.25),
                 fire: true,
                 grenade: false,
+                pos: Some(Vec2::new(12.0, 34.5)),
             },
         };
         let bytes = p.encode();
@@ -287,6 +304,7 @@ mod tests {
         assert_eq!(back.input.aim, Vec2::new(100.5, 200.25));
         assert!(back.input.fire && !back.input.grenade);
         assert!((back.input.move_dir.x - 1.0).abs() < 0.01);
+        assert_eq!(back.input.pos, Some(Vec2::new(12.0, 34.5)));
     }
 
     #[test]

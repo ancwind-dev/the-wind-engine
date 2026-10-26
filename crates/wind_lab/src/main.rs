@@ -366,7 +366,7 @@ impl Lab {
             (d, !typing && i.key_down(egui::Key::G))
         });
         move_dir = move_dir.normalize_or_zero();
-        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade });
+        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade, pos: None });
     }
 
     /// Раз в полсекунды смотрим, не изменился ли файл с параметрами.

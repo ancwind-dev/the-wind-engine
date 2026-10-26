@@ -47,6 +47,7 @@ impl Link {
                 aim: me + Vec2::new(10.0, 0.0),
                 fire: true,
                 grenade: false,
+                pos: None,
             },
         );
         self.world.step();
