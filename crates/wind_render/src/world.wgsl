@@ -204,9 +204,9 @@ fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec
     let t = textureSample(decal_tex, decal_sampler, p / map_size).rg;
     // Неровные края и пятнистость — чтобы не было ровных кругов.
     let n = noise(p * 1.7);
-    let scorch = smoothstep(0.15, 0.6, t.r - (n - 0.5) * 0.35);
+    let scorch = smoothstep(0.05, 0.85, t.r - (n - 0.5) * 0.35);
     let blood = smoothstep(0.35, 0.7, t.g - (n - 0.5) * 0.4);
-    var albedo = mix(albedo_in, vec3<f32>(0.13, 0.11, 0.10) * (0.8 + 0.4 * n), scorch * 0.85);
+    var albedo = mix(albedo_in, vec3<f32>(0.13, 0.11, 0.10) * (0.8 + 0.4 * n), scorch * 0.75);
     albedo = mix(albedo, vec3<f32>(0.22, 0.05, 0.04), blood * 0.6);
     return albedo;
 }
@@ -404,6 +404,59 @@ fn fs_point_outline(in: POut) -> @location(0) vec4<f32> {
 fn fs_point_ghost(in: POut) -> @location(0) vec4<f32> {
     let c = to_linear(in.color) * 0.6 + g.ambient_sky.rgb * 0.5;
     return vec4<f32>(to_srgb(c), 1.0);
+}
+
+// --- Пыль и дым -------------------------------------------------------------
+// Мягкий круг, повёрнутый к камере. Свет — небо и немного солнца, туман — как у всех.
+
+struct ParticleIn {
+    @builtin(vertex_index) i: u32,
+    @location(0) pos: vec3<f32>,
+    @location(1) size: f32,
+    @location(2) color: vec4<f32>,
+};
+
+struct ParticleOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) world: vec3<f32>,
+};
+
+@vertex
+fn vs_particle(v: ParticleIn) -> ParticleOut {
+    // Оси камеры в мире — строки поворота матрицы вида.
+    let right = vec3<f32>(g.view[0][0], g.view[1][0], g.view[2][0]);
+    let up = vec3<f32>(g.view[0][1], g.view[1][1], g.view[2][1]);
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    );
+    let c = corners[v.i];
+    // Ближе к камере на полразмера: плоский клуб не врезается в землю и стены
+    // (иначе край обрезается ступеньками по клеткам).
+    let to_eye = normalize(g.eye.xyz - v.pos);
+    let world = v.pos + to_eye * v.size * 0.5 + (right * c.x + up * c.y) * v.size * 0.5;
+    var out: ParticleOut;
+    out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.uv = c;
+    out.color = v.color;
+    out.world = world;
+    return out;
+}
+
+@fragment
+fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
+    let d = length(in.uv);
+    // Край неровный: клуб, а не диск.
+    let wobble = 0.12 * sin(atan2(in.uv.y, in.uv.x) * 5.0 + in.color.r * 40.0);
+    let a = in.color.a * (1.0 - smoothstep(0.35, 1.0 + wobble, d));
+    if (a <= 0.003) {
+        discard;
+    }
+    let l = g.ambient_sky.rgb + g.sun_color.rgb * 0.45;
+    let c = to_srgb(to_linear(in.color.rgb) * l);
+    return vec4<f32>(fogged(c, in.world), a);
 }
 
 // --- Нормали и глубина (для обводки) -------------------------------------------------

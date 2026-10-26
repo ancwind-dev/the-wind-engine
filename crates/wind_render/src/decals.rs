@@ -6,7 +6,7 @@ use glam::Vec2;
 use std::collections::HashMap;
 
 /// Сколько текселей на метр, если карта не слишком большая.
-const TEXELS_PER_METER: f32 = 2.0;
+const TEXELS_PER_METER: f32 = 4.0;
 /// Предел стороны текстуры — для огромных карт следы становятся крупнее.
 const MAX_SIDE: f32 = 4096.0;
 
@@ -104,12 +104,12 @@ mod tests {
     #[test]
     fn blast_stamps_once() {
         let mut d = Decals::default();
-        assert_eq!(d.reset(100, 50), (200, 100));
+        assert_eq!(d.reset(100, 50), (400, 200));
         let rect = d.blast(Vec2::new(10.0, 10.0), 4.0, 0.0).unwrap();
         assert!(d.blast(Vec2::new(10.0, 10.0), 4.0, 0.1).is_none());
         assert_eq!(d.rect(rect).len(), (rect[2] * rect[3] * 2) as usize);
         // Центр пятна закрашен полностью, кровь не тронута.
-        let i = ((20 * 200 + 20) * 2) as usize;
+        let i = ((40 * 400 + 40) * 2) as usize;
         assert_eq!((d.texels[i], d.texels[i + 1]), (255, 0));
     }
 
@@ -118,7 +118,7 @@ mod tests {
         let mut d = Decals::default();
         d.reset(10, 10);
         let [x, y, w, h] = d.corpse(1, Vec2::new(0.1, 9.9)).unwrap();
-        assert!(x == 0 && x + w <= 20 && y + h <= 20);
+        assert!(x == 0 && x + w <= 40 && y + h <= 40);
         assert!(d.corpse(1, Vec2::new(0.2, 9.9)).is_none());
     }
 }

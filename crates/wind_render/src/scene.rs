@@ -4,6 +4,7 @@
 use crate::camera::{Camera, to_3d};
 use crate::character::{CharacterSet, LODS, Motion};
 use crate::decals::Decals;
+use crate::effects::Effects;
 use wind_sim::atmosphere::Atmosphere;
 use crate::mapmesh::MapMesher;
 use crate::models::{MeshId, SOLDIER_VOXEL};
@@ -92,6 +93,8 @@ pub struct SceneBuilder {
     ground_key: Option<(u64, u64)>,
     /// Следы боя и для какой карты они.
     decals: Decals,
+    /// Обломки, пыль и дым.
+    effects: Effects,
     decals_key: Option<u64>,
     anim: Vec<Anim>,
     /// Цвета команд (sRGB 0..1).
@@ -112,6 +115,7 @@ impl Default for SceneBuilder {
             pending: Arc::default(),
             ground_key: None,
             decals: Decals::default(),
+            effects: Effects::default(),
             decals_key: None,
             anim: Vec::new(),
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
@@ -143,6 +147,10 @@ impl SceneBuilder {
 
         // --- Карта.
         let update = self.mesher.update(input.map, input.map_key);
+        if update.reset {
+            self.effects.reset();
+        }
+        self.effects.update(input.map, input.dt.min(0.1), input.blasts, &update.broken);
         let ground_key = (input.map_key, input.map.ground_revision);
         let ground_changed = update.reset || self.ground_key != Some(ground_key);
         if update.reset || !update.chunks.is_empty() || ground_changed {
@@ -269,6 +277,8 @@ impl SceneBuilder {
             cube.push(Instance { model: m.to_cols_array_2d(), tint: [1.0, 0.55 + 0.35 * (1.0 - t), 0.2, 1.0] });
         }
 
+        self.effects.debris_instances(&mut by_mesh[MeshId::Cube as usize]);
+
         // Убитые: падают и лежат, пока солдат не возродится.
         if let Some(set) = &characters {
             for c in input.corpses {
@@ -308,6 +318,7 @@ impl SceneBuilder {
             char_batches,
             skins,
             bones,
+            particles: self.effects.particles(cam.eye()),
             map: self.pending.clone(),
             visible_chunks,
         }
