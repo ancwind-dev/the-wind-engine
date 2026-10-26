@@ -264,56 +264,123 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
 }
 
 // --- Свои солдаты ------------------------------------------------------------
-// Цвет вокселя — из 3D-атласа: вершина несёт координату угла вокселя в атласе,
-// а фрагмент берёт воксель «за» гранью (сдвиг на полвокселя против нормали).
+// Как у RWR: каждый воксель — квадратик постоянного размера на экране. Свет без
+// направления и без теней — цвет вокселя чуть ярче, а нижняя половина каждой точки
+// чуть темнее (отсюда «пиксельная» фактура). Обводка — те же точки, крупнее и чёрные,
+// чуть дальше от камеры. Где солдата закрывает стена — силуэт цвета команды.
 
-@group(2) @binding(0) var char_atlas: texture_3d<f32>;
-
+// Меш для теней: только позиции.
 struct CIn {
     @location(0) pos: vec3<f32>,
-    @location(1) normal: vec4<f32>,
-    @location(2) atlas: vec4<u32>,
     @location(3) m0: vec4<f32>,
     @location(4) m1: vec4<f32>,
     @location(5) m2: vec4<f32>,
     @location(6) m3: vec4<f32>,
-    @location(7) tint: vec4<f32>,
 };
-
-struct COut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) world: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    // centroid — иначе при сглаживании точка выборки может выйти за грань.
-    @location(2) @interpolate(perspective, centroid) atlas: vec3<f32>,
-    @location(3) @interpolate(flat) local_normal: vec3<f32>,
-};
-
-@vertex
-fn vs_char(v: CIn) -> COut {
-    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
-    let world = model * vec4<f32>(v.pos, 1.0);
-    var out: COut;
-    out.clip = g.view_proj * world;
-    out.world = world.xyz;
-    out.normal = normalize((model * vec4<f32>(v.normal.xyz, 0.0)).xyz);
-    out.atlas = vec3<f32>(v.atlas.xyz);
-    out.local_normal = v.normal.xyz;
-    return out;
-}
-
-@fragment
-fn fs_char(in: COut) -> @location(0) vec4<f32> {
-    let cell = vec3<i32>(floor(in.atlas - in.local_normal * 0.5));
-    let albedo = textureLoad(char_atlas, cell, 0).rgb;
-    let c = light(albedo, normalize(in.normal), in.world);
-    return vec4<f32>(fogged(c, in.world), 1.0);
-}
 
 @vertex
 fn vs_char_shadow(v: CIn) -> @builtin(position) vec4<f32> {
     let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
     return g.light_view_proj * model * vec4<f32>(v.pos, 1.0);
+}
+
+struct PIn {
+    // Центр вокселя.
+    @location(0) pos: vec3<f32>,
+    // rgb — цвет (sRGB 0..255), a — угол квадратика 0..3 и уровень детализации (биты 2..3).
+    @location(1) color: vec4<u32>,
+    @location(3) m0: vec4<f32>,
+    @location(4) m1: vec4<f32>,
+    @location(5) m2: vec4<f32>,
+    @location(6) m3: vec4<f32>,
+    // rgb — цвет команды (sRGB), a: 0 — солдат, 1 — оружие.
+    @location(7) tint: vec4<f32>,
+};
+
+struct POut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) @interpolate(flat) color: vec3<f32>,
+    // Положение внутри квадратика: −1..1, y вверх.
+    @location(2) corner: vec2<f32>,
+    @location(3) @interpolate(flat) weapon: f32,
+};
+
+// Размер вокселя модели, м.
+const CHAR_VOXEL: f32 = 1.0 / 32.0;
+
+// `scale` — множитель размера точки, `extra` — сколько пикселей добавить (при 1080p),
+// `push` — сдвиг к камере, м (минус — от камеры).
+fn point_out(v: PIn, scale: f32, extra: f32, push: f32) -> POut {
+    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
+    let world = (model * vec4<f32>(v.pos, 1.0)).xyz;
+    let to_eye = normalize(g.eye.xyz - world);
+    var clip = g.view_proj * vec4<f32>(world + to_eye * push, 1.0);
+    // У RWR точка — 2,6 пикселя при 1080p и не зависит от расстояния. Вблизи мы не
+    // даём ей стать меньше полутора вокселей, иначе между точками появятся щели.
+    let res = g.screen.w / 1080.0;
+    let voxel_px = CHAR_VOXEL * g.tint.w / max(clip.w, 0.01);
+    // На уровне детализации n точка заменяет кубик 2ⁿ вокселей.
+    let lod = f32(1u << (v.color.a >> 2u));
+    // Вдали солдат — несколько пикселей, и обводка съела бы его целиком: убираем её
+    // плавно, пока воксель меньше 0,6 пикселя (при 1080p).
+    let far = smoothstep(0.2, 0.6, voxel_px / res);
+    let size = max(voxel_px * lod * 1.5, 2.6 * res) * scale + extra * far * res;
+    let corners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0));
+    let c = corners[v.color.a & 3u];
+    clip = vec4<f32>(clip.xy + c * size / g.screen.zw * clip.w, clip.zw);
+    var out: POut;
+    out.clip = clip;
+    out.world = world;
+    out.color = vec3<f32>(v.color.rgb) / 255.0;
+    out.corner = c;
+    out.weapon = v.tint.a;
+    return out;
+}
+
+@vertex
+fn vs_point(v: PIn) -> POut {
+    // У RWR точки оружия чуть крупнее (3,0 против 2,6).
+    return point_out(v, select(1.0, 1.15, v.tint.a > 0.5), 0.0, 0.0);
+}
+
+@vertex
+fn vs_point_outline(v: PIn) -> POut {
+    // У оружия обводки нет: квадратик нулевого размера ничего не рисует.
+    if (v.tint.a > 0.5) {
+        return point_out(v, 0.0, 0.0, 0.0);
+    }
+    return point_out(v, 1.0, 1.6, -0.08);
+}
+
+@vertex
+fn vs_point_ghost(v: PIn) -> POut {
+    // Ближе к камере на полметра — чтобы земля под ногами не считалась «стеной».
+    var out = point_out(v, 1.0, 0.0, 0.5);
+    out.color = v.tint.rgb;
+    return out;
+}
+
+@fragment
+fn fs_point(in: POut) -> @location(0) vec4<f32> {
+    // Свет сверху без направления: небо + доля солнца.
+    let l = g.ambient_sky.rgb + g.sun_color.rgb * 0.7;
+    var c = to_srgb(to_linear(in.color) * l);
+    // Нижняя половина точки темнее; у оружия — сильнее.
+    let shade = select(0.85, 0.6, in.weapon > 0.5);
+    c *= select(1.0, shade, in.corner.y < 0.0);
+    return vec4<f32>(fogged(c, in.world), 1.0);
+}
+
+@fragment
+fn fs_point_outline(in: POut) -> @location(0) vec4<f32> {
+    return vec4<f32>(fogged(vec3<f32>(0.0), in.world), 1.0);
+}
+
+@fragment
+fn fs_point_ghost(in: POut) -> @location(0) vec4<f32> {
+    let c = to_linear(in.color) * 0.6 + g.ambient_sky.rgb * 0.5;
+    return vec4<f32>(to_srgb(c), 1.0);
 }
 
 // --- Нормали и глубина (для обводки) -------------------------------------------------
@@ -327,11 +394,11 @@ fn fs_nd(in: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(n, depth);
 }
 
+// Солдат: нормаль «на камеру», как у RWR, — обводка не рисует линий внутри фигуры.
 @fragment
-fn fs_nd_char(in: COut) -> @location(0) vec4<f32> {
-    let n = normalize((g.view * vec4<f32>(normalize(in.normal), 0.0)).xyz);
+fn fs_point_nd(in: POut) -> @location(0) vec4<f32> {
     let depth = -(g.view * vec4<f32>(in.world, 1.0)).z;
-    return vec4<f32>(n, depth);
+    return vec4<f32>(0.0, 0.0, 1.0, depth);
 }
 
 // --- Обводка, затенение, виньетка ------------------------------------------------------

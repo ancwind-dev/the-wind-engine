@@ -1,7 +1,7 @@
 ﻿//! GPU-часть: конвейеры, буферы, карта теней. Живёт в ресурсах egui-wgpu
 //! и вызывается из paint callback (см. [`WorldPaint`]).
 
-use crate::character::{CharVertex, CharacterSet};
+use crate::character::{CharVertex, CharacterSet, LODS, PointVertex};
 use crate::mapmesh::ChunkMeshes;
 use crate::models::{self, MESH_COUNT};
 use crate::voxel::{Mesh, Vertex};
@@ -82,7 +82,8 @@ pub struct FrameData {
     /// (меш, первый экземпляр, сколько).
     pub batches: Vec<(usize, u32, u32)>,
     /// То же для своих солдат и оружия: (меш персонажа, первый экземпляр, сколько).
-    pub char_batches: Vec<(usize, u32, u32)>,
+    /// Солдаты и оружие: (меш, уровень детализации, первый экземпляр, сколько).
+    pub char_batches: Vec<(usize, usize, u32, u32)>,
     pub map: Arc<Mutex<PendingMap>>,
     /// Чанки, которые стоит рисовать в этом кадре.
     pub visible_chunks: Vec<u32>,
@@ -152,12 +153,15 @@ pub struct WorldRenderer {
     chunks: HashMap<u32, (Option<GpuMesh>, GpuMesh)>,
     batches: Vec<(usize, u32, u32)>,
     visible: Vec<u32>,
-    /// Свои солдаты и оружие: конвейеры, меши, атлас цветов.
-    character: wgpu::RenderPipeline,
+    /// Свои солдаты и оружие: тени — гранями, картинка — точками, как у RWR.
     character_shadow: wgpu::RenderPipeline,
     char_meshes: Vec<GpuMesh>,
-    char_bind: wgpu::BindGroup,
-    char_batches: Vec<(usize, u32, u32)>,
+    char_points: Vec<[GpuMesh; LODS]>,
+    /// Силуэт сквозь стены, чёрная обводка, цветные точки.
+    char_ghost: wgpu::RenderPipeline,
+    char_outline: wgpu::RenderPipeline,
+    char_color: wgpu::RenderPipeline,
+    char_batches: Vec<(usize, usize, u32, u32)>,
     /// Обводка: проходы нормалей и глубины и полноэкранный умножающий проход.
     nd_voxel: wgpu::RenderPipeline,
     nd_char: wgpu::RenderPipeline,
@@ -169,8 +173,20 @@ pub struct WorldRenderer {
 
 const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Unorm8x4];
-const CHAR_ATTRS: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Uint16x4];
+const CHAR_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+const POINT_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint8x4];
+
+fn point_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
+    let [_, instances] = vertex_layouts();
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<PointVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &POINT_ATTRS,
+        }),
+        instances,
+    ]
+}
 
 fn char_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
     let [_, instances] = vertex_layouts();
@@ -204,7 +220,6 @@ fn vertex_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
 impl WorldRenderer {
     pub fn new(
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
         msaa: u32,
         meshes: &[Mesh],
@@ -447,72 +462,38 @@ impl WorldRenderer {
             cache: None,
         });
 
-        // Свои солдаты: цвет каждого вокселя — из 3D-атласа (группа 2).
-        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("character atlas"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D3,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        });
-        let (atlas_size, atlas_data) = match characters {
-            Some(c) => (c.atlas_size, c.atlas.clone()),
-            None => ([1, 1, 1], vec![255; 4]),
-        };
-        let atlas = device.create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some("character atlas"),
-                size: wgpu::Extent3d { width: atlas_size[0], height: atlas_size[1], depth_or_array_layers: atlas_size[2] },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D3,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &atlas_data,
-        );
-        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
-        let char_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("character atlas"),
-            layout: &atlas_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas_view) }],
-        });
-        let char_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("character"),
-            bind_group_layouts: &[Some(&main_layout), None, Some(&atlas_layout)],
-            immediate_size: 0,
-        });
+        // Свои солдаты — точками, как у RWR. Три прохода: силуэт цвета команды там,
+        // где солдата закрывает стена (глубина «дальше»), крупные чёрные точки (обводка)
+        // и цветные точки поверх.
         let char_vertex = char_layouts();
-        let character = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("character"),
-            layout: Some(&char_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_char"),
-                compilation_options: Default::default(),
-                buffers: &char_vertex,
-            },
-            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
-            depth_stencil: Some(depth(true, Default::default())),
-            multisample,
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_char"),
-                compilation_options: Default::default(),
-                targets: &color_target,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let point_vertex = point_layouts();
+        let point_pipeline = |label: &str, vs: &str, fs: &str, compare: wgpu::CompareFunction, write: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&main_pipeline_layout),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers: &point_vertex },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(write),
+                    depth_compare: Some(compare),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &color_target,
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let char_ghost = point_pipeline("character ghost", "vs_point_ghost", "fs_point_ghost", wgpu::CompareFunction::Greater, false);
+        let char_outline = point_pipeline("character outline", "vs_point_outline", "fs_point_outline", wgpu::CompareFunction::Less, true);
+        let char_color = point_pipeline("character points", "vs_point", "fs_point", wgpu::CompareFunction::Less, true);
         let character_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("character shadow"),
             layout: Some(&shadow_pipeline_layout),
@@ -531,12 +512,12 @@ impl WorldRenderer {
         });
         // --- Обводка: нормали и глубина в свою текстуру, потом умножающий проход.
         let nd_target = [Some(wgpu::ColorTargetState { format: ND_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
-        let nd_pipeline = |label: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout<'static>>], vs: &str| {
+        let nd_pipeline = |label: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout<'static>>], vs: &str, cull: Option<wgpu::Face>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&main_pipeline_layout),
                 vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers },
-                primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+                primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
                 depth_stencil: Some(depth(true, Default::default())),
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
@@ -549,8 +530,8 @@ impl WorldRenderer {
                 cache: None,
             })
         };
-        let nd_voxel = nd_pipeline("nd voxel", "fs_nd", &layouts, "vs_voxel");
-        let nd_char = nd_pipeline("nd character", "fs_nd_char", &char_vertex, "vs_char");
+        let nd_voxel = nd_pipeline("nd voxel", "fs_nd", &layouts, "vs_voxel", Some(wgpu::Face::Back));
+        let nd_char = nd_pipeline("nd character", "fs_point_nd", &point_vertex, "vs_point", None);
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -597,12 +578,17 @@ impl WorldRenderer {
             cache: None,
         });
 
-        let char_meshes = characters
+        let (char_meshes, char_points) = characters
             .map(|c| {
                 c.meshes
                     .iter()
-                    .map(|m| GpuMesh::raw(device, bytemuck::cast_slice(&m.vertices), &m.indices, "character part"))
-                    .collect()
+                    .map(|m| {
+                        (
+                            GpuMesh::raw(device, bytemuck::cast_slice(&m.vertices), &m.indices, "character part"),
+                            m.lods.each_ref().map(|l| GpuMesh::raw(device, bytemuck::cast_slice(&l.points), &l.indices, "character points")),
+                        )
+                    })
+                    .unzip()
             })
             .unwrap_or_default();
 
@@ -636,10 +622,12 @@ impl WorldRenderer {
             chunks: HashMap::new(),
             batches: Vec::new(),
             visible: Vec::new(),
-            character,
             character_shadow,
             char_meshes,
-            char_bind,
+            char_points,
+            char_ghost,
+            char_outline,
+            char_color,
             char_batches: Vec::new(),
             nd_voxel,
             nd_char,
@@ -725,7 +713,10 @@ impl WorldRenderer {
         pass.set_bind_group(0, &self.shadow_bind, &[]);
         self.draw_geometry(&mut pass);
         pass.set_pipeline(&self.character_shadow);
-        self.draw_characters(&mut pass);
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+        for &(mesh, _, first, count) in &self.char_batches {
+            self.char_meshes[mesh].draw(&mut pass, first..first + count);
+        }
         drop(pass);
 
         // Проход нормалей и глубины — для обводки и затенения.
@@ -787,9 +778,11 @@ impl WorldRenderer {
         }
         pass.set_pipeline(&self.voxel);
         self.draw_geometry(pass);
-        pass.set_pipeline(&self.character);
-        pass.set_bind_group(2, &self.char_bind, &[]);
-        self.draw_characters(pass);
+        // Силуэт — до самих солдат: в буфере глубины пока только земля и стены.
+        for pipeline in [&self.char_ghost, &self.char_outline, &self.char_color] {
+            pass.set_pipeline(pipeline);
+            self.draw_characters(pass);
+        }
         if let Some(nd) = &self.nd {
             pass.set_pipeline(&self.post);
             pass.set_bind_group(1, &nd.bind, &[]);
@@ -803,9 +796,9 @@ impl WorldRenderer {
 
     fn draw_characters(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_vertex_buffer(1, self.instances.slice(..));
-        for &(mesh, first, count) in &self.char_batches {
+        for &(mesh, lod, first, count) in &self.char_batches {
             if count > 0 {
-                self.char_meshes[mesh].draw(pass, first..first + count);
+                self.char_points[mesh][lod].draw(pass, first..first + count);
             }
         }
     }
@@ -877,14 +870,8 @@ pub fn install(render_state: &egui_wgpu::RenderState, msaa: u32, data_dir: Optio
     debug_assert_eq!(meshes.len(), MESH_COUNT);
     let characters = match data_dir.map(CharacterSet::load) {
         Some(Ok(set)) => {
-            notes.push(format!(
-                "Солдаты: {} моделей, {} видов оружия, атлас {}×{}×{}",
-                set.models.len(),
-                set.weapons.len(),
-                set.atlas_size[0],
-                set.atlas_size[1],
-                set.atlas_size[2]
-            ));
+            let points: usize = set.meshes.iter().map(|m| m.lods[0].points.len() / 4).sum();
+            notes.push(format!("Солдаты: {} моделей, {} видов оружия, точек {points}", set.models.len(), set.weapons.len()));
             Some(Arc::new(set))
         }
         Some(Err(e)) => {
@@ -895,7 +882,6 @@ pub fn install(render_state: &egui_wgpu::RenderState, msaa: u32, data_dir: Optio
     };
     let renderer = WorldRenderer::new(
         &render_state.device,
-        &render_state.queue,
         render_state.target_format,
         msaa,
         &meshes,
