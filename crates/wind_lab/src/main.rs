@@ -892,11 +892,14 @@ impl Lab {
                 _ => "—".into(),
             });
             ui.end_row();
+            theme::label(ui, "Оружие");
+            ui.label(&self.world.weapon(i).name);
+            ui.end_row();
             theme::label(ui, "Патроны");
             if s.reload_timer > 0.0 {
                 ui.label("перезарядка…");
             } else {
-                ui.label(format!("{} / {}", s.ammo, self.world.config.weapon.magazine_size));
+                ui.label(format!("{} / {}", s.ammo, self.world.weapon(i).magazine_size));
             }
             ui.end_row();
             theme::label(ui, "Гранаты");

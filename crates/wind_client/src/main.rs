@@ -164,6 +164,8 @@ struct Game {
     pilot: Pilot,
     /// Отдача: 0 — спокойно, 1 — сильно. Растёт с каждым своим выстрелом и спадает.
     kick: f32,
+    /// «Нагрев» своей очереди — как у сервера: разброс растёт с каждым выстрелом.
+    heat: f32,
     shots_seen: u32,
     notes: Vec<String>,
     render_state: Option<egui_wgpu::RenderState>,
@@ -245,6 +247,7 @@ impl Game {
             follow: args.follow,
             pilot: Pilot::default(),
             kick: 0.0,
+            heat: 0.0,
             shots_seen: 0,
             notes,
             render_state,
@@ -343,7 +346,7 @@ impl eframe::App for Game {
             let mut input = if self.bench.is_some() { PlayerInput::default() } else { self.read_input(&ctx, mouse_world) };
             // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
             if self.bench.is_none() {
-                let (speed, radius, _) = self.source.soldier_spec();
+                let (speed, radius) = self.source.soldier_spec();
                 let server = self.source.own_server_pos();
                 if let Some(map) = self.source.map() {
                     input.pos = self.pilot.update(map, server, input.move_dir, speed, radius, dt);
@@ -364,8 +367,12 @@ impl eframe::App for Game {
             }
             // Отдача: каждый свой выстрел толкает прицел и камеру, потом всё успокаивается.
             let shots = self.source.own_shots();
+            let weapon = self.source.own_weapon().unwrap_or_default();
+            self.heat = (self.heat - weapon.sustained_fire_diminish_rate * dt).max(0.0);
             if shots > self.shots_seen {
-                self.kick = (self.kick + 0.3 * (shots - self.shots_seen) as f32).min(1.0);
+                let n = (shots - self.shots_seen) as f32;
+                self.kick = (self.kick + 0.3 * n).min(1.0);
+                self.heat = (self.heat + weapon.sustained_fire_grow_step * n).min(wind_sim::arsenal::MAX_HEAT);
             }
             self.shots_seen = shots;
             self.kick *= (-dt * 7.0).exp();
@@ -460,12 +467,12 @@ impl eframe::App for Game {
 }
 
 impl Game {
-    /// Разброс оружия на расстоянии до прицела — в пикселях экрана, с отдачей.
+    /// Разброс оружия на расстоянии до прицела — в пикселях экрана: с ростом
+    /// разброса в очереди и толчком отдачи.
     fn spread_px(&self, view: &source::View, rect: egui::Rect, aspect: f32) -> f32 {
-        let (_, _, spread_deg) = self.source.soldier_spec();
-        let (Some(me), Some(map)) = (view.me_pos, self.source.map()) else { return 4.0 };
+        let (Some(weapon), Some(me), Some(map)) = (self.source.own_weapon(), view.me_pos, self.source.map()) else { return 4.0 };
         let to = self.aim - me;
-        let half = to.length() * (spread_deg.to_radians() * 0.5).tan();
+        let half = to.length() * (weapon.spread(self.heat) * 0.5).tan();
         let side = to.normalize_or_zero().perp() * half;
         let vp = self.camera.view_proj(aspect);
         let screen = |p: Vec2| {
@@ -473,7 +480,7 @@ impl Game {
             Vec2::new(s.x * rect.width() * 0.5, s.y * rect.height() * 0.5)
         };
         let px = screen(self.aim).distance(screen(self.aim + side));
-        px.clamp(3.0, 120.0) + self.kick * 10.0
+        px.clamp(3.0, 160.0) + self.kick * 6.0
     }
 
     fn fps_line(&self) -> String {

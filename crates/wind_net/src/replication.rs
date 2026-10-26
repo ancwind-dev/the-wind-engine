@@ -12,6 +12,7 @@ use crate::protocol::{self, Kind, Welcome, dq_angle, q_angle, read_pos, write_po
 use std::collections::VecDeque;
 use wind_sim::map::Map;
 use std::path::Path;
+use wind_sim::arsenal::{Arsenal, WeaponSpec};
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::mapfile::MapFile;
 use wind_sim::{Event, Soldier, Vec2, World, mapgen};
@@ -573,6 +574,8 @@ pub struct RemoteWorld {
     pub corpses: Vec<Corpse>,
     /// Атмосфера карты — для картинки.
     pub atmosphere: Atmosphere,
+    /// Оружие и классы — из своих `data/weapons.ron` и `data/factions.ron`.
+    pub arsenal: Arsenal,
     /// Время клиента, которое вернул сервер в последнем снимке.
     pub echo_time: u32,
     /// Когда (по часам клиента, с) пришёл последний снимок.
@@ -586,8 +589,14 @@ pub struct RemoteWorld {
 }
 
 impl RemoteWorld {
-    /// Мир по приветствию сервера. Карту из файла ищем в `maps_dir` и сверяем отпечаток.
+    /// Мир по приветствию сервера. Карту из файла ищем в `maps_dir`, оружие — в папке
+    /// данных над ней, и сверяем отпечатки с сервером.
     pub fn new(welcome: Welcome, maps_dir: &Path) -> Result<Self, String> {
+        let data_dir = maps_dir.parent().unwrap_or(Path::new("."));
+        let arsenal = if Arsenal::exists(data_dir) { Arsenal::load(data_dir)? } else { Arsenal::default() };
+        if arsenal.fingerprint() != welcome.arsenal_fingerprint {
+            return Err("оружие у тебя не такое, как на сервере (data/weapons.ron, data/factions.ron)".into());
+        }
         let (map, layout, atmosphere) = if welcome.map_name.is_empty() {
             let (map, layout) = mapgen::generate(welcome.map_size, welcome.capture_points, welcome.seed);
             (map, layout, Atmosphere::default())
@@ -619,6 +628,7 @@ impl RemoteWorld {
             kill_feed: VecDeque::new(),
             corpses: Vec::new(),
             atmosphere,
+            arsenal,
             echo_time: 0,
             snapshot_time: 0.0,
             own_pos: None,
@@ -635,6 +645,11 @@ impl RemoteWorld {
     pub fn render_pos(&self, s: &RemoteSoldier, now: f64) -> Vec2 {
         let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
         s.prev.lerp(s.pos, t)
+    }
+
+    /// Оружие своего солдата.
+    pub fn my_weapon(&self) -> &WeaponSpec {
+        self.arsenal.weapon_of(self.welcome.team, self.welcome.soldier)
     }
 
     pub fn my_soldier(&self) -> Option<&RemoteSoldier> {
@@ -762,8 +777,6 @@ impl RemoteWorld {
             }
         }
 
-        let speed = self.welcome.projectile_speed;
-        let ttl = self.welcome.weapon_range * 1.2 / speed;
         let radius = self.welcome.soldier_radius;
         for fx in effects {
             match fx {
@@ -777,6 +790,9 @@ impl RemoteWorld {
                         _ => None,
                     };
                     if let Some(from) = from {
+                        let team = self.soldiers[shooter as usize].as_ref().map_or(self.welcome.team, |s| s.net.team());
+                        let weapon = self.arsenal.weapon_of(team, shooter);
+                        let (speed, ttl) = (weapon.projectile_speed, weapon.range * 1.2 / weapon.projectile_speed);
                         let dir = Vec2::new(angle.cos(), angle.sin());
                         self.tracers.push(Tracer { pos: from + dir * (radius + 0.05), vel: dir * speed, ttl });
                     }

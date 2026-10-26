@@ -57,7 +57,7 @@ impl Bot {
             .flatten()
             .filter(|s| s.net.team() != my_team)
             .map(|s| s.pos)
-            .filter(|p| p.distance(pos) < world.welcome.weapon_range)
+            .filter(|p| p.distance(pos) < world.my_weapon().range)
             .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
 
         // Идём к ближайшей не нашей точке.

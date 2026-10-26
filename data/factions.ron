@@ -1,22 +1,28 @@
-// Кто воюет за какую команду. Пути — от data/models, без расширения .xml.
-// weight — как часто встречается (по умолчанию 1).
+// Кто воюет за какую команду — это и есть классы. model — путь от data/models
+// без .xml, weapon — имя из data/weapons.ron, weight — как часто встречается
+// (по умолчанию 1). Набор солдату выбирается по его номеру одинаково в симуляции
+// и в отрисовке.
 (
     teams: [
         (
             name: "USMC",
             soldiers: [
-                (model: "soldiers/usmc/rifleman", weapon: "weapons/m4", weight: 4),
-                (model: "soldiers/usmc/rifleman_mask", weapon: "weapons/m4", weight: 1),
-                (model: "soldiers/usmc/grenadier", weapon: "weapons/m4", weight: 1),
-                (model: "soldiers/usmc/platoon_sergeant", weapon: "weapons/m4", weight: 1),
-                (model: "soldiers/usmc/radio_operator", weapon: "weapons/m4", weight: 1),
+                // Стрелки.
+                (model: "soldiers/usmc/rifleman", weapon: "m4", weight: 4),
+                (model: "soldiers/usmc/rifleman_mask", weapon: "m4", weight: 1),
+                (model: "soldiers/usmc/platoon_sergeant", weapon: "m4", weight: 1),
+                // Связист — с пистолетом-пулемётом.
+                (model: "soldiers/usmc/radio_operator", weapon: "pp2000", weight: 1),
+                // Гранатомётчик — с гранатомётом.
+                (model: "soldiers/usmc/grenadier", weapon: "m32_mgl", weight: 1),
             ],
         ),
         (
             name: "VLM",
             soldiers: [
-                (model: "soldiers/vlm/rifleman", weapon: "weapons/ak74", weight: 3),
-                (model: "soldiers/vlm/rifleman", weapon: "weapons/aks74u", weight: 1),
+                (model: "soldiers/vlm/rifleman", weapon: "ak74", weight: 4),
+                (model: "soldiers/vlm/rifleman", weapon: "aks74u", weight: 2),
+                (model: "soldiers/vlm/rifleman", weapon: "gm94", weight: 1),
             ],
         ),
     ],

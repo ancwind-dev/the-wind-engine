@@ -1,5 +1,6 @@
 //! Мир и тик симуляции.
 
+use crate::arsenal::{BlastSpec, WeaponSpec};
 use crate::config::SimConfig;
 use crate::grid::SpatialGrid;
 use crate::map::Map;
@@ -84,6 +85,10 @@ pub struct Soldier {
     pub grenades: u32,
     pub grenade_timer: f32,
     pub kills: u32,
+    /// Набор (класс): номер в `arsenal.teams[team]`. Выбирается по номеру солдата.
+    pub kit: u8,
+    /// «Нагрев» очереди: разброс растёт с каждым выстрелом и спадает со временем.
+    pub heat: f32,
 }
 
 impl Soldier {
@@ -100,6 +105,9 @@ pub enum ProjectileKind {
     Bullet,
     /// `flight` — сколько ещё лететь, потом граната лежит до взрыва.
     Grenade { fuse: f32, flight: f32 },
+    /// Снаряд гранатомёта: летит `flight` секунд к точке прицела и взрывается —
+    /// там или раньше, если задел стену или врага.
+    Shell { flight: f32 },
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +117,8 @@ pub struct Projectile {
     pub ttl: f32,
     pub team: u8,
     pub shooter: u32,
+    /// Из какого оружия (номер в `arsenal.weapons`): от него урон и взрыв.
+    pub weapon: u8,
     pub kind: ProjectileKind,
 }
 
@@ -227,7 +237,8 @@ impl World {
             for _ in 0..per_team {
                 let spread = (per_team as f32).sqrt() * 0.8;
                 let pos = world.find_spawn_spot(world.bases[team as usize], spread, &mut rng);
-                let mut soldier = world.fresh_soldier(team, pos);
+                let kit = world.config.arsenal.pick(team, world.soldiers.len() as u32) as u8;
+                let mut soldier = world.fresh_soldier(team, pos, kit);
                 // Чтобы не стреляли все в один тик.
                 soldier.cooldown = rng.range(0.0, 1.0);
                 world.soldiers.push(soldier);
@@ -277,7 +288,7 @@ impl World {
         for p in &self.projectiles {
             match p.kind {
                 ProjectileKind::Bullet => stats.bullets += 1,
-                ProjectileKind::Grenade { .. } => stats.grenades += 1,
+                ProjectileKind::Grenade { .. } | ProjectileKind::Shell { .. } => stats.grenades += 1,
             }
         }
         for s in &self.soldiers {
@@ -308,7 +319,6 @@ impl World {
     fn move_soldiers(&mut self) {
         let dt = self.dt();
         let spec = &self.config.soldier;
-        let range = self.config.weapon.range;
         let capture_radius = self.config.capture.radius;
         let (seed, tick) = (self.seed, self.tick);
         let prev = snapshot(&self.soldiers);
@@ -316,6 +326,7 @@ impl World {
         let flow = &self.flow;
         let grid = &self.grid;
         let radius = spec.radius;
+        let arsenal = &self.config.arsenal;
 
         self.soldiers.par_iter_mut().enumerate().for_each(|(i, s)| {
             if !s.alive {
@@ -342,6 +353,8 @@ impl World {
                 let to = prev[target as usize].0 - s.pos;
                 let d = to.length();
                 s.facing = to.y.atan2(to.x);
+                // Подходим на дальность своего оружия: у пистолета-пулемёта она короче.
+                let range = arsenal.weapons[arsenal.teams[s.team as usize & 1][s.kit as usize].weapon].range;
                 if d > range * 0.8 {
                     desired = to / d;
                     speed *= 0.7;
@@ -452,8 +465,8 @@ impl World {
             spots.extend(self.points.iter().filter(|p| p.owner == Some(team)).map(|p| p.pos));
             let spot = spots[rng.below(spots.len() as u32) as usize];
             let pos = self.find_spawn_spot(spot, 6.0, &mut rng);
-            let controller = self.soldiers[i].controller;
-            self.soldiers[i] = Soldier { controller, ..self.fresh_soldier(team, pos) };
+            let (controller, kit) = (self.soldiers[i].controller, self.soldiers[i].kit);
+            self.soldiers[i] = Soldier { controller, ..self.fresh_soldier(team, pos, kit) };
         }
     }
 
@@ -511,12 +524,33 @@ impl World {
             ttl: spec.fuse,
             team: s.team,
             shooter: soldier,
+            weapon: 0,
             kind: ProjectileKind::Grenade { fuse: spec.fuse, flight: distance / spec.throw_speed },
         });
         self.events.push(Event::GrenadeThrown { shooter: soldier, from: s.pos, to: s.pos + to, fuse: spec.fuse });
     }
 
-    fn fresh_soldier(&self, team: u8, pos: Vec2) -> Soldier {
+    /// Оружие солдата.
+    pub fn weapon(&self, soldier: u32) -> &WeaponSpec {
+        let s = &self.soldiers[soldier as usize];
+        let arsenal = &self.config.arsenal;
+        &arsenal.weapons[arsenal.teams[s.team as usize & 1][s.kit as usize].weapon]
+    }
+
+    /// Взрыв ручной гранаты — в тех же величинах, что и у гранатомёта.
+    pub(crate) fn grenade_blast(&self) -> BlastSpec {
+        let g = &self.config.grenade;
+        BlastSpec {
+            radius: g.blast_radius,
+            kill_probability: g.kill_probability,
+            wall_damage: g.wall_damage,
+            wall_damage_radius: g.wall_damage_radius,
+        }
+    }
+
+    fn fresh_soldier(&self, team: u8, pos: Vec2, kit: u8) -> Soldier {
+        let arsenal = &self.config.arsenal;
+        let weapon = &arsenal.weapons[arsenal.teams[team as usize & 1][kit as usize].weapon];
         Soldier {
             controller: Controller::Ai,
             pos,
@@ -529,11 +563,13 @@ impl World {
             target: None,
             objective: NO_OBJECTIVE,
             cooldown: 0.0,
-            ammo: self.config.weapon.magazine_size,
+            ammo: weapon.magazine_size,
             reload_timer: 0.0,
             grenades: self.config.grenade.count,
             grenade_timer: 0.0,
             kills: 0,
+            kit,
+            heat: 0.0,
         }
     }
 

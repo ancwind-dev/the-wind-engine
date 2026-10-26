@@ -50,7 +50,7 @@ pub fn draw(painter: &Painter, rect: Rect, view: &View, status: Option<String>, 
         let mut fill = hp;
         fill.set_width(hp.width() * me.health.clamp(0.0, 1.0));
         painter.rect_filled(fill, 3, if me.health > 0.5 { Color32::from_rgb(110, 190, 90) } else { Color32::from_rgb(220, 90, 70) });
-        let ammo = if me.reloading { "перезарядка…".to_string() } else { format!("{} / {}", me.ammo, me.magazine) };
+        let ammo = if me.reloading { format!("{} · перезарядка…", me.weapon) } else { format!("{}  {} / {}", me.weapon, me.ammo, me.magazine) };
         painter.text(bar.center() + vec2(10.0, 0.0), Align2::CENTER_CENTER, ammo, FontId::proportional(18.0), TEXT);
         painter.text(
             bar.right_center() - vec2(14.0, 0.0),
