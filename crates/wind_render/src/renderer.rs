@@ -70,6 +70,17 @@ pub struct SkinInstance {
     pub _pad: u32,
 }
 
+/// Клуб пыли или дыма: мягкий полупрозрачный круг, повёрнутый к камере.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Particle {
+    pub pos: [f32; 3],
+    /// Поперечник, м.
+    pub size: f32,
+    /// Цвет sRGB и непрозрачность.
+    pub color: [f32; 4],
+}
+
 /// Изменения мешей карты, которые GPU ещё не забрал.
 ///
 /// Это общая очередь, а не часть кадра: eframe может не нарисовать какой-то кадр
@@ -99,6 +110,8 @@ pub struct FrameData {
     pub skins: Vec<SkinInstance>,
     /// Матрицы палок всех солдат и оружия подряд (см. `SkinInstance::base`).
     pub bones: Vec<[[f32; 4]; 4]>,
+    /// Пыль и дым, от дальних к ближним.
+    pub particles: Vec<Particle>,
     pub map: Arc<Mutex<PendingMap>>,
     /// Чанки, которые стоит рисовать в этом кадре.
     pub visible_chunks: Vec<u32>,
@@ -188,6 +201,11 @@ pub struct WorldRenderer {
     nd_char: wgpu::RenderPipeline,
     post: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
+    /// Пыль и дым: прозрачные, рисуются последними.
+    particles: wgpu::RenderPipeline,
+    particle_buffer: wgpu::Buffer,
+    particle_capacity: usize,
+    particle_count: u32,
     nd: Option<NdTarget>,
     pub stats: RenderStats,
 }
@@ -633,6 +651,45 @@ impl WorldRenderer {
             cache: None,
         });
 
+        // Пыль и дым: квадрат из 6 вершин на клуб, прозрачность, без записи глубины.
+        const PARTICLE_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x4];
+        let particles = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("particles"),
+            layout: Some(&main_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_particle"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: size_of::<Particle>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &PARTICLE_ATTRS,
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_particle"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let particle_capacity = 256;
+
         let (char_meshes, char_points) = characters
             .map(|c| {
                 c.meshes
@@ -703,6 +760,10 @@ impl WorldRenderer {
             nd_char,
             post,
             post_layout,
+            particles,
+            particle_buffer: particle_buffer(device, particle_capacity),
+            particle_capacity,
+            particle_count: 0,
             nd: None,
             stats: RenderStats::default(),
         }
@@ -765,6 +826,14 @@ impl WorldRenderer {
         }
         self.batches.clone_from(&frame.batches);
         self.char_batches.clone_from(&frame.char_batches);
+        if frame.particles.len() > self.particle_capacity {
+            self.particle_capacity = frame.particles.len().next_power_of_two();
+            self.particle_buffer = particle_buffer(device, self.particle_capacity);
+        }
+        if !frame.particles.is_empty() {
+            queue.write_buffer(&self.particle_buffer, 0, bytemuck::cast_slice(&frame.particles));
+        }
+        self.particle_count = frame.particles.len() as u32;
         if frame.skins.len() > self.skin_capacity {
             self.skin_capacity = frame.skins.len().next_power_of_two();
             self.skin_instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -879,6 +948,12 @@ impl WorldRenderer {
             pass.set_bind_group(1, &nd.bind, &[]);
             pass.draw(0..3, 0..1);
         }
+        // Пыль и дым — после обводки: контуры стен не должны просвечивать сквозь дым.
+        if self.particle_count > 0 {
+            pass.set_pipeline(&self.particles);
+            pass.set_vertex_buffer(0, self.particle_buffer.slice(..));
+            pass.draw(0..6, 0..self.particle_count);
+        }
     }
 
     fn rebind_ground(&mut self, device: &wgpu::Device) {
@@ -910,6 +985,15 @@ impl WorldRenderer {
             }
         }
     }
+}
+
+fn particle_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("particles"),
+        size: (capacity * size_of::<Particle>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn bones_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
