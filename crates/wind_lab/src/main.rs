@@ -5,7 +5,9 @@
 
 mod editor;
 mod editor_ui;
+mod icons;
 mod scene;
+mod studio;
 mod theme;
 mod viewport;
 
@@ -15,6 +17,8 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use editor_ui::MapWorkspace;
+use icons::Icon;
+use studio::Studio;
 use viewport::Viewport;
 use wind_sim::mapfile::MapFile;
 use wind_net::{ClientStatus, DEFAULT_PORT, NetClient, NetServer, ReplicationConfig};
@@ -88,12 +92,14 @@ struct Lab {
     map_generation: u64,
     /// Карта из файла (или из редактора), на которой идёт симуляция. `None` — процедурная.
     map_file: Option<MapFile>,
+    studio: Studio,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Workspace {
     Simulation,
     Map,
+    Studio,
 }
 
 impl Lab {
@@ -113,13 +119,16 @@ impl Lab {
         let world = World::new(with_settings(&base_config, &settings), settings.seed);
         let mut viewport = Viewport::new();
         let mut editor_view = Viewport::new();
+        let mut characters = None;
         if let Some(rs) = &cc.wgpu_render_state {
             let installed = wind_render::install(rs, MSAA, config_path.parent());
             viewport.set_characters(installed.characters.clone());
-            editor_view.set_characters(installed.characters);
+            editor_view.set_characters(installed.characters.clone());
+            characters = installed.characters;
             viewport.has_3d = true;
             editor_view.has_3d = true;
         }
+        let studio = Studio::new(characters, cc.wgpu_render_state.is_some());
         let maps_dir = config_path.parent().map_or_else(|| PathBuf::from("data/maps"), |data| data.join("maps"));
         let map_ws = MapWorkspace::new(maps_dir, &base_config);
         let mut lab = Lab {
@@ -151,6 +160,7 @@ impl Lab {
             editor_view,
             map_generation: 0,
             map_file: None,
+            studio,
         };
         // wind_lab --connect 127.0.0.1:7777 — сразу в игру; wind_lab --serve — сразу поднять сервер.
         let mut args = std::env::args().skip(1);
@@ -174,6 +184,14 @@ impl Lab {
                     }
                 }
                 "--editor" => lab.set_workspace(Workspace::Map),
+                "--studio" => lab.set_workspace(Workspace::Studio),
+                // wind_lab --3d --follow 5 — выделить солдата №5 и следовать за ним вблизи.
+                "--follow" => {
+                    if let Some(n) = args.next().and_then(|v| v.parse().ok()) {
+                        lab.selected = Some(n);
+                        lab.viewport.reset_close(6.0);
+                    }
+                }
                 _ => {}
             }
         }
@@ -300,8 +318,8 @@ impl Lab {
             }
         }
 
-        // В редакторе симуляция стоит — если только на ней не играют по сети.
-        let editing = self.workspace == Workspace::Map && self.server.is_none();
+        // В редакторе и студии симуляция стоит — если только на ней не играют по сети.
+        let editing = self.workspace != Workspace::Simulation && self.server.is_none();
         if self.paused || editing {
             return;
         }
@@ -390,7 +408,7 @@ impl Lab {
                 egui::MenuBar::new().ui(ui, |ui| {
                     ui.label(RichText::new("  The Wind Engine  ").strong());
                     ui.menu_button("Файл", |ui| {
-                        if ui.button("Перечитать data/sim.ron").clicked() {
+                        if icons::button(ui, Icon::Restart, "Перечитать data/sim.ron").clicked() {
                             self.reload_config();
                         }
                         if ui.button("Выход").clicked() {
@@ -398,14 +416,14 @@ impl Lab {
                         }
                     });
                     ui.menu_button("Симуляция", |ui| {
-                        let label = if self.paused { "Пуск  (Пробел)" } else { "Пауза  (Пробел)" };
-                        if ui.button(label).clicked() {
+                        let (icon, label) = if self.paused { (Icon::Play, "Пуск  (Пробел)") } else { (Icon::Pause, "Пауза  (Пробел)") };
+                        if icons::button(ui, icon, label).clicked() {
                             self.paused = !self.paused;
                         }
-                        if ui.button("Шаг на тик  (→)").clicked() {
+                        if icons::button(ui, Icon::Step, "Шаг на тик  (→)").clicked() {
                             self.step();
                         }
-                        if ui.button("Перезапустить матч").clicked() {
+                        if icons::button(ui, Icon::Restart, "Перезапустить матч").clicked() {
                             self.restart();
                         }
                     });
@@ -423,13 +441,16 @@ impl Lab {
                     ui.add_space(24.0);
                     // Вкладки рабочих пространств, как Layout / Modeling в Blender.
                     if self.client.is_some() {
-                        let _ = ui.selectable_label(true, "Игра по сети");
+                        let _ = icons::selectable(ui, true, Icon::Network, "Игра по сети", None);
                     } else {
-                        if ui.selectable_label(self.workspace == Workspace::Simulation, "Лаборатория").clicked() {
+                        if icons::selectable(ui, self.workspace == Workspace::Simulation, Icon::Simulation, "Лаборатория", None).clicked() {
                             self.set_workspace(Workspace::Simulation);
                         }
-                        if ui.selectable_label(self.workspace == Workspace::Map, "Редактор карт").clicked() {
+                        if icons::selectable(ui, self.workspace == Workspace::Map, Icon::MapEditor, "Редактор карт", None).clicked() {
                             self.set_workspace(Workspace::Map);
+                        }
+                        if icons::selectable(ui, self.workspace == Workspace::Studio, Icon::Studio, "Студия персонажей", None).clicked() {
+                            self.set_workspace(Workspace::Studio);
                         }
                     }
                 });
@@ -496,13 +517,8 @@ impl Lab {
         for team in 0..2 {
             let total = self.world.soldiers.iter().filter(|s| s.team == team as u8).count();
             let alive = self.world.stats.alive[team];
-            let title = RichText::new(format!(
-                "{}  {alive}/{total} · убийств {}",
-                theme::TEAM_NAME[team],
-                self.world.score[team]
-            ))
-            .color(theme::TEAM[team]);
-            egui::CollapsingHeader::new(title).id_salt(("team", team)).default_open(true).show(ui, |ui| {
+            let title = format!("{}  {alive}/{total} · убийств {}", theme::TEAM_NAME[team], self.world.score[team]);
+            icons::collapsing(ui, Icon::Team, &title, theme::TEAM[team], ("team", team), |ui| {
                 // Лучшие бойцы команды — клик выделяет.
                 let mut best: Vec<(usize, u32)> = self
                     .world
@@ -515,7 +531,7 @@ impl Lab {
                 best.sort_by_key(|&(_, kills)| std::cmp::Reverse(kills));
                 for (i, kills) in best.into_iter().take(8) {
                     let selected = self.selected == Some(i as u32);
-                    if ui.selectable_label(selected, format!("Солдат #{i} — {kills}")).clicked() {
+                    if icons::selectable(ui, selected, Icon::Soldier, &format!("Солдат #{i} — {kills}"), None).clicked() {
                         self.selected = Some(i as u32);
                         self.viewport.focus(self.world.soldiers[i].pos);
                     }
@@ -536,7 +552,7 @@ impl Lab {
                 }
             });
         }
-        egui::CollapsingHeader::new("Точки захвата").default_open(true).show(ui, |ui| {
+        icons::collapsing(ui, Icon::Flag, "Точки захвата", theme::TEXT, "points", |ui| {
             for (i, p) in self.world.points.iter().enumerate() {
                 if point_label(ui, i, p.owner).clicked() {
                     self.viewport.focus(p.pos);
@@ -574,14 +590,14 @@ impl Lab {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.client.is_some() {
-                        theme::panel(ui, "Подключение", true, |ui| self.client_panel(ui));
-                        theme::panel(ui, "Управление", true, controls_panel);
+                        theme::panel(ui, Icon::Network, "Подключение", true, |ui| self.client_panel(ui));
+                        theme::panel(ui, Icon::Keyboard, "Управление", true, controls_panel);
                     } else {
-                        theme::panel(ui, "Симуляция", true, |ui| self.simulation_panel(ui));
-                        theme::panel(ui, "Матч", true, |ui| self.match_panel(ui));
-                        theme::panel(ui, "Сеть", true, |ui| self.network_panel(ui));
-                        theme::panel(ui, "Производительность", true, |ui| self.performance_panel(ui));
-                        theme::panel(ui, "Выделение", true, |ui| self.selection_panel(ui));
+                        theme::panel(ui, Icon::Play, "Симуляция", true, |ui| self.simulation_panel(ui));
+                        theme::panel(ui, Icon::Flag, "Матч", true, |ui| self.match_panel(ui));
+                        theme::panel(ui, Icon::Server, "Сеть", true, |ui| self.network_panel(ui));
+                        theme::panel(ui, Icon::Chart, "Производительность", true, |ui| self.performance_panel(ui));
+                        theme::panel(ui, Icon::Cursor, "Выделение", true, |ui| self.selection_panel(ui));
                     }
                 });
             });
@@ -589,11 +605,11 @@ impl Lab {
 
     fn simulation_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let label = if self.paused { "▶ Пуск" } else { "⏸ Пауза" };
-            if ui.button(label).clicked() {
+            let (icon, label) = if self.paused { (Icon::Play, "Пуск") } else { (Icon::Pause, "Пауза") };
+            if icons::button(ui, icon, label).clicked() {
                 self.paused = !self.paused;
             }
-            if ui.add_enabled(self.paused, egui::Button::new("Шаг")).clicked() {
+            if icons::button_enabled(ui, self.paused, Icon::Step, "Шаг").clicked() {
                 self.step();
             }
         });
@@ -660,8 +676,8 @@ impl Lab {
                 || self.settings.capture_points != self.world.config.capture_points))
             || self.settings.soldiers_per_team != self.world.config.soldiers_per_team
             || self.settings.seed != self.world.seed;
-        let button = egui::Button::new(if changed { "Перезапустить с новыми параметрами" } else { "Перезапустить матч" });
-        if ui.add_sized([ui.available_width(), 22.0], button).clicked() {
+        let text = if changed { "Перезапустить с новыми параметрами" } else { "Перезапустить матч" };
+        if icons::wide_button(ui, Icon::Restart, text).clicked() {
             self.restart();
         }
     }
@@ -675,7 +691,7 @@ impl Lab {
                     ui.add(egui::DragValue::new(&mut self.server_port).range(1024..=65535));
                     ui.end_row();
                 });
-                if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Запустить сервер")).clicked() {
+                if icons::wide_button(ui, Icon::Server, "Запустить сервер").clicked() {
                     self.start_server();
                 }
             }
@@ -696,7 +712,7 @@ impl Lab {
                     ui.label(format!("{:.0} КБ/с", server.traffic.sent_per_sec / 1024.0));
                     ui.end_row();
                 });
-                if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Остановить сервер")).clicked() {
+                if icons::wide_button(ui, Icon::Pause, "Остановить сервер").clicked() {
                     // Без сервера игроки пропадут — отдаём их солдат обратно ИИ.
                     for c in &server.clients {
                         self.world.release_control(c.replica.soldier);
@@ -716,7 +732,7 @@ impl Lab {
             ui.add(egui::TextEdit::singleline(&mut self.player_name).desired_width(150.0));
             ui.end_row();
         });
-        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Подключиться и играть")).clicked() {
+        if icons::wide_button(ui, Icon::Network, "Подключиться и играть").clicked() {
             self.connect();
         }
         for line in &self.net_log {
@@ -763,7 +779,7 @@ impl Lab {
                 .small()
                 .color(theme::TEXT_DIM),
         );
-        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Отключиться")).clicked() {
+        if icons::wide_button(ui, Icon::Pause, "Отключиться").clicked() {
             self.disconnect();
         }
     }
@@ -917,7 +933,7 @@ fn point_label(ui: &mut egui::Ui, index: usize, owner: Option<u8>) -> egui::Resp
         None => ("ничья", theme::TEXT_DIM),
     };
     let letter = (b'A' + index as u8) as char;
-    ui.selectable_label(false, RichText::new(format!("Точка {letter} — {name}")).color(color))
+    icons::selectable(ui, false, Icon::Flag, &format!("Точка {letter} — {name}"), Some(color))
 }
 
 impl eframe::App for Lab {
@@ -945,6 +961,11 @@ impl eframe::App for Lab {
             ui.ctx().request_repaint();
             return;
         }
+        if self.client.is_none() && self.workspace == Workspace::Studio {
+            self.studio_workspace(ui);
+            ui.ctx().request_repaint();
+            return;
+        }
         self.outliner(ui);
         self.properties(ui);
         let ctx = ui.ctx().clone();
@@ -952,7 +973,7 @@ impl eframe::App for Lab {
             let playing = self.client.is_some();
             let scene = match &self.client {
                 Some(client) => scene::remote(client),
-                None => Some(scene::local(&self.world, self.selected, &self.blasts)),
+                None => Some(scene::local(&self.world, self.selected, &self.blasts, self.accumulator)),
             };
             let Some(scene) = scene else {
                 ui.centered_and_justified(|ui| ui.label("Ждём ответа сервера…"));
@@ -1010,6 +1031,21 @@ impl Lab {
         }
     }
 
+    /// Рабочее пространство «Студия персонажей».
+    fn studio_workspace(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("studio_models")
+            .resizable(true)
+            .default_size(200.0)
+            .frame(egui::Frame::new().fill(theme::OUTLINER).inner_margin(egui::Margin::same(6)))
+            .show(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.studio.outliner(ui)));
+        egui::Panel::right("studio_properties")
+            .resizable(true)
+            .default_size(320.0)
+            .frame(egui::Frame::new().fill(theme::REGION).inner_margin(egui::Margin::same(6)))
+            .show(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.studio.properties(ui)));
+        egui::CentralPanel::no_frame().show(ui, |ui| self.studio.viewport(ui));
+    }
+
     fn set_workspace(&mut self, workspace: Workspace) {
         if self.workspace != workspace {
             self.workspace = workspace;
@@ -1017,6 +1053,7 @@ impl Lab {
             match workspace {
                 Workspace::Simulation => self.viewport.refresh_map(),
                 Workspace::Map => self.editor_view.refresh_map(),
+                Workspace::Studio => self.studio.view.refresh_map(),
             }
         }
     }

@@ -163,7 +163,7 @@ fn local_view(l: &Local) -> View {
             .iter()
             .enumerate()
             .filter(|(_, s)| s.alive)
-            .map(|(i, s)| SoldierDraw { id: i as u32, pos: s.pos, facing: s.facing, team: s.team })
+            .map(|(i, s)| SoldierDraw { id: i as u32, pos: s.drawn_pos(l.accumulator), facing: s.facing, team: s.team, look: None })
             .collect(),
         blasts: l.blasts.clone(),
         points: w
@@ -182,7 +182,7 @@ fn local_view(l: &Local) -> View {
         }
     }
     if let Some(me) = l.me.map(|i| &w.soldiers[i as usize]) {
-        v.me_pos = Some(me.pos);
+        v.me_pos = Some(me.drawn_pos(l.accumulator));
         v.has_me = true;
         v.me = Me {
             alive: me.alive,
@@ -202,7 +202,7 @@ fn local_view(l: &Local) -> View {
         .iter()
         .enumerate()
         .filter(|(_, s)| !s.alive && s.respawn_timer > 0.0)
-        .map(|(i, s)| CorpseDraw { id: i as u32, pos: s.pos, facing: s.facing, team: s.team, age: respawn - s.respawn_timer })
+        .map(|(i, s)| CorpseDraw { id: i as u32, pos: s.pos, facing: s.facing, team: s.team, age: respawn - s.respawn_timer, model: None })
         .collect();
     v
 }
@@ -218,7 +218,7 @@ fn remote_view(c: &NetClient) -> View {
             .enumerate()
             .filter_map(|(i, s)| {
                 let s = s.as_ref()?;
-                Some(SoldierDraw { id: i as u32, pos: w.render_pos(s, now), facing: s.net.facing(), team: s.net.team() })
+                Some(SoldierDraw { id: i as u32, pos: w.render_pos(s, now), facing: s.net.facing(), team: s.net.team(), look: None })
             })
             .collect(),
         bullets: w.tracers.iter().map(|t| (t.pos, t.vel)).collect(),
@@ -247,7 +247,7 @@ fn remote_view(c: &NetClient) -> View {
         corpses: w
             .corpses
             .iter()
-            .map(|c| CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age })
+            .map(|c| CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, model: None })
             .collect(),
     }
 }

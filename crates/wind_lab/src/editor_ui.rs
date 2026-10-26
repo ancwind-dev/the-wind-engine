@@ -2,6 +2,7 @@
 //! свойства справа, подсказки снизу — как в Blender.
 
 use crate::editor::{FENCE, HOUSE_WALL, MapEditor, Pointer, TerrainMode, Tool, WallShape};
+use crate::icons::{self, Icon};
 use crate::theme;
 use crate::viewport::{Scene, ScenePoint, ViewportOutput};
 use eframe::egui::{self, Color32, RichText};
@@ -250,9 +251,16 @@ impl MapWorkspace {
     pub fn tool_shelf(&mut self, ui: &mut egui::Ui) -> Option<Vec2> {
         ui.label(RichText::new("Инструменты").strong());
         ui.add_space(2.0);
-        for (key, tool, name) in [("1", Tool::Walls, "Стены"), ("2", Tool::Terrain, "Рельеф"), ("3", Tool::Ground, "Покрытие"), ("4", Tool::Points, "Точки и базы")] {
-            let text = format!("{key}   {name}");
-            if ui.add_sized([ui.available_width(), 26.0], egui::Button::selectable(self.editor.tool == tool, text)).clicked() {
+        let tools = [
+            ("1", Tool::Walls, Icon::Walls, "Стены"),
+            ("2", Tool::Terrain, Icon::Terrain, "Рельеф"),
+            ("3", Tool::Ground, Icon::Ground, "Покрытие"),
+            ("4", Tool::Points, Icon::Flag, "Точки и базы"),
+        ];
+        for (key, tool, icon, name) in tools {
+            let text = format!("{name}   {key}");
+            let r = ui.add_sized([ui.available_width(), 26.0], egui::Button::selectable(self.editor.tool == tool, text.as_str()));
+            if icons::decorate_centered(ui, r, icon, &text).clicked() {
                 self.editor.tool = tool;
             }
         }
@@ -262,13 +270,12 @@ impl MapWorkspace {
         let mut focus = None;
         let l = &self.editor.file.layout;
         for (i, base) in l.bases.iter().enumerate() {
-            let label = RichText::new(format!("База {}", ["синих", "красных"][i])).color(theme::TEAM[i]);
-            if ui.selectable_label(false, label).clicked() {
+            if icons::selectable(ui, false, Icon::Team, &format!("База {}", ["синих", "красных"][i]), Some(theme::TEAM[i])).clicked() {
                 focus = Some(*base);
             }
         }
         for (i, p) in l.capture_points.iter().enumerate() {
-            if ui.selectable_label(false, format!("Точка {}", (b'A' + i as u8) as char)).clicked() {
+            if icons::selectable(ui, false, Icon::Flag, &format!("Точка {}", (b'A' + i as u8) as char), None).clicked() {
                 focus = Some(*p);
             }
         }
@@ -278,19 +285,19 @@ impl MapWorkspace {
     /// Свойства справа. Возвращает просьбу к лаборатории, если она есть.
     pub fn properties(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         let mut request = None;
-        theme::panel(ui, "Инструмент", true, |ui| self.tool_panel(ui));
-        theme::panel(ui, "Карта", true, |ui| request = self.map_panel(ui));
-        theme::panel(ui, "Атмосфера", true, |ui| self.atmosphere_panel(ui));
-        theme::panel(ui, "Проверка", true, |ui| {
+        theme::panel(ui, Icon::Wrench, "Инструмент", true, |ui| self.tool_panel(ui));
+        theme::panel(ui, Icon::MapEditor, "Карта", true, |ui| request = self.map_panel(ui));
+        theme::panel(ui, Icon::Sun, "Атмосфера", true, |ui| self.atmosphere_panel(ui));
+        theme::panel(ui, Icon::Check, "Проверка", true, |ui| {
             if self.editor.issues.is_empty() {
-                ui.label(RichText::new("✔ Всё в порядке: на карте можно играть").color(Color32::from_rgb(120, 200, 110)));
+                icons::label(ui, Icon::Check, "Всё в порядке: на карте можно играть", Color32::from_rgb(120, 200, 110));
             }
             for issue in &self.editor.issues {
-                ui.label(RichText::new(format!("⚠ {issue}")).color(theme::ERROR));
+                icons::label(ui, Icon::Warning, issue, theme::ERROR);
             }
         });
-        theme::panel(ui, "Новая карта", false, |ui| self.new_panel(ui));
-        theme::panel(ui, "Открыть", true, |ui| self.open_panel(ui));
+        theme::panel(ui, Icon::New, "Новая карта", false, |ui| self.new_panel(ui));
+        theme::panel(ui, Icon::Open, "Открыть", true, |ui| self.open_panel(ui));
         if !self.message.0.is_empty() {
             ui.label(RichText::new(&self.message.0).small().color(self.message.1));
         }
@@ -382,10 +389,10 @@ impl MapWorkspace {
             ui.end_row();
             theme::label(ui, "Отмена");
             ui.horizontal(|ui| {
-                if ui.add_enabled(self.editor.can_undo(), egui::Button::new("↶ Ctrl+Z")).clicked() {
+                if icons::button_enabled(ui, self.editor.can_undo(), Icon::Undo, "Ctrl+Z").clicked() {
                     self.editor.undo();
                 }
-                if ui.add_enabled(self.editor.can_redo(), egui::Button::new("↷ Ctrl+Shift+Z")).clicked() {
+                if icons::button_enabled(ui, self.editor.can_redo(), Icon::Redo, "Ctrl+Shift+Z").clicked() {
                     self.editor.redo();
                 }
             });
@@ -393,11 +400,11 @@ impl MapWorkspace {
         });
         ui.horizontal(|ui| {
             let save = if self.editor.dirty { "Сохранить *  (Ctrl+S)" } else { "Сохранить  (Ctrl+S)" };
-            if ui.button(save).clicked() {
+            if icons::button(ui, Icon::Save, save).clicked() {
                 self.save();
             }
             let playable = self.editor.issues.is_empty();
-            if ui.add_enabled(playable, egui::Button::new("▶ Играть на этой карте")).clicked() {
+            if icons::button_enabled(ui, playable, Icon::Play, "Играть на этой карте").clicked() {
                 request = Some(Request::Play(self.editor.file.clone()));
             }
         });
@@ -478,7 +485,7 @@ impl MapWorkspace {
                 ui.end_row();
             }
         });
-        if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Создать")).clicked() {
+        if icons::wide_button(ui, Icon::New, "Создать").clicked() {
             self.run(Pending::New);
         }
     }
@@ -498,7 +505,7 @@ impl MapWorkspace {
                     ui.selectable_value(&mut self.open_choice, m.clone(), m);
                 }
             });
-            if ui.button("Открыть").clicked() {
+            if icons::button(ui, Icon::Open, "Открыть").clicked() {
                 let name = self.open_choice.clone();
                 self.run(Pending::Open(name));
             }
