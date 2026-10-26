@@ -33,6 +33,8 @@ struct Globals {
     post: vec4<f32>,
     // Вьюпорт в пикселях кадра: x, y, ширина, высота.
     screen: vec4<f32>,
+    // x — ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
+    skin: vec4<f32>,
     points: array<Point, 32>,
 };
 
@@ -268,34 +270,56 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
 // направления и без теней — цвет вокселя чуть ярче, а нижняя половина каждой точки
 // чуть темнее (отсюда «пиксельная» фактура). Обводка — те же точки, крупнее и чёрные,
 // чуть дальше от камеры. Где солдата закрывает стена — силуэт цвета команды.
+//
+// Матрицы палок всех солдат лежат подряд в одном буфере; экземпляр знает, с какой
+// начинаются его палки. Воксель у сустава смешивает положение между своей палкой
+// и соседней — сгиб получается плавным, а не ступенькой.
 
-// Меш для теней: только позиции.
+@group(1) @binding(4) var<storage, read> bones: array<mat4x4<f32>>;
+
+// Экземпляр: x — первая матрица палок, y — бит 0: оружие, z — цвет команды (RGBA8).
 struct CIn {
+    // Позиция в позе покоя, м.
     @location(0) pos: vec3<f32>,
-    @location(3) m0: vec4<f32>,
-    @location(4) m1: vec4<f32>,
-    @location(5) m2: vec4<f32>,
-    @location(6) m3: vec4<f32>,
+    @location(1) bone: u32,
+    @location(3) inst: vec4<u32>,
 };
 
 @vertex
 fn vs_char_shadow(v: CIn) -> @builtin(position) vec4<f32> {
-    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
-    return g.light_view_proj * model * vec4<f32>(v.pos, 1.0);
+    return g.light_view_proj * bones[v.inst.x + v.bone] * vec4<f32>(v.pos, 1.0);
 }
 
 struct PIn {
-    // Центр вокселя.
+    // Центр вокселя в позе покоя, м.
     @location(0) pos: vec3<f32>,
     // rgb — цвет (sRGB 0..255), a — угол квадратика 0..3 и уровень детализации (биты 2..3).
     @location(1) color: vec4<u32>,
-    @location(3) m0: vec4<f32>,
-    @location(4) m1: vec4<f32>,
-    @location(5) m2: vec4<f32>,
-    @location(6) m3: vec4<f32>,
-    // rgb — цвет команды (sRGB), a: 0 — солдат, 1 — оружие.
-    @location(7) tint: vec4<f32>,
+    // x — палка, y — соседняя палка у сустава, z — расстояние до сустава (¼ вокселя).
+    @location(2) bones: vec4<u32>,
+    @location(3) inst: vec4<u32>,
 };
+
+// Где воксель в мире: у сустава — между своей палкой и соседней. На самом суставе
+// пополам (обе палки сходятся в этой точке), дальше ширины сгиба — только своя.
+fn skinned(v: PIn) -> vec3<f32> {
+    let p = vec4<f32>(v.pos, 1.0);
+    let own = (bones[v.inst.x + v.bones.x] * p).xyz;
+    let width = g.skin.x;
+    if (v.bones.y == v.bones.x || width <= 0.0) {
+        return own;
+    }
+    let w = 0.5 * (1.0 - smoothstep(0.0, width, f32(v.bones.z) * 0.25));
+    if (w <= 0.0) {
+        return own;
+    }
+    let other = (bones[v.inst.x + v.bones.y] * p).xyz;
+    return mix(own, other, w);
+}
+
+fn is_weapon(v: PIn) -> bool {
+    return (v.inst.y & 1u) != 0u;
+}
 
 struct POut {
     @builtin(position) clip: vec4<f32>,
@@ -312,8 +336,7 @@ const CHAR_VOXEL: f32 = 1.0 / 32.0;
 // `scale` — множитель размера точки, `extra` — сколько пикселей добавить (при 1080p),
 // `push` — сдвиг к камере, м (минус — от камеры).
 fn point_out(v: PIn, scale: f32, extra: f32, push: f32) -> POut {
-    let model = mat4x4<f32>(v.m0, v.m1, v.m2, v.m3);
-    let world = (model * vec4<f32>(v.pos, 1.0)).xyz;
+    let world = skinned(v);
     let to_eye = normalize(g.eye.xyz - world);
     var clip = g.view_proj * vec4<f32>(world + to_eye * push, 1.0);
     // У RWR точка — 2,6 пикселя при 1080p и не зависит от расстояния. Вблизи мы не
@@ -334,20 +357,20 @@ fn point_out(v: PIn, scale: f32, extra: f32, push: f32) -> POut {
     out.world = world;
     out.color = vec3<f32>(v.color.rgb) / 255.0;
     out.corner = c;
-    out.weapon = v.tint.a;
+    out.weapon = select(0.0, 1.0, is_weapon(v));
     return out;
 }
 
 @vertex
 fn vs_point(v: PIn) -> POut {
     // У RWR точки оружия чуть крупнее (3,0 против 2,6).
-    return point_out(v, select(1.0, 1.15, v.tint.a > 0.5), 0.0, 0.0);
+    return point_out(v, select(1.0, 1.15, is_weapon(v)), 0.0, 0.0);
 }
 
 @vertex
 fn vs_point_outline(v: PIn) -> POut {
     // У оружия обводки нет: квадратик нулевого размера ничего не рисует.
-    if (v.tint.a > 0.5) {
+    if (is_weapon(v)) {
         return point_out(v, 0.0, 0.0, 0.0);
     }
     return point_out(v, 1.0, 1.6, -0.08);
@@ -357,7 +380,7 @@ fn vs_point_outline(v: PIn) -> POut {
 fn vs_point_ghost(v: PIn) -> POut {
     // Ближе к камере на полметра — чтобы земля под ногами не считалась «стеной».
     var out = point_out(v, 1.0, 0.0, 0.5);
-    out.color = v.tint.rgb;
+    out.color = unpack4x8unorm(v.inst.z).rgb;
     return out;
 }
 

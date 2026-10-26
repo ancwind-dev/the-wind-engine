@@ -20,6 +20,8 @@ pub struct SceneSoldier {
     pub facing: f32,
     pub team: u8,
     pub player: bool,
+    /// Явный вид в 3D — для студии персонажей.
+    pub look: Option<wind_render::Look>,
 }
 
 pub struct ScenePoint {
@@ -124,6 +126,8 @@ pub struct Viewport {
     pub overlays: Overlays,
     /// Камера следует за выделенным солдатом.
     pub follow: bool,
+    /// На сколько метров над землёй смотрит 3D-камера (в студии — на грудь солдата).
+    pub aim_height: f32,
     /// Рисовать в 3D (тем же `wind_render`, что и игра).
     pub mode_3d: bool,
     /// 3D доступно: отрисовщик мира установлен в wgpu.
@@ -147,6 +151,7 @@ impl Viewport {
             camera: Camera { center: Vec2::ZERO, zoom: 1.0 },
             overlays: Overlays { grid: true, bullets: true, flow: false, vision: true },
             follow: false,
+            aim_height: 0.0,
             mode_3d: false,
             has_3d: false,
             camera_3d: wind_render::Camera::default(),
@@ -185,6 +190,25 @@ impl Viewport {
         self.follow = true;
         self.camera.zoom = zoom;
         self.camera_3d.distance = 30.0;
+    }
+
+    /// Сразу 3D и крупно: камера смотрит на `pos` с расстояния `distance`, м,
+    /// под наклоном `pitch` (рад над горизонтом).
+    pub fn look_at_3d(&mut self, pos: Vec2, distance: f32, pitch: f32) {
+        self.mode_3d = self.has_3d;
+        self.framed = true;
+        self.camera_3d.target = pos;
+        self.camera_3d.distance = distance;
+        self.camera_3d.pitch = pitch;
+    }
+
+    pub fn camera_3d(&self) -> &wind_render::Camera {
+        &self.camera_3d
+    }
+
+    /// Ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
+    pub fn set_joint_blend(&mut self, width: f32) {
+        self.scene_3d.joint_blend = width;
     }
 
     pub fn focus(&mut self, pos: Vec2) {
@@ -242,7 +266,7 @@ impl Viewport {
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            cam.distance = (cam.distance * (-scroll * 0.0015).exp()).clamp(5.0, 1500.0);
+            cam.distance = (cam.distance * (-scroll * 0.0015).exp()).clamp(1.5, 1500.0);
             if ui.input(|i| i.key_pressed(egui::Key::Home)) {
                 cam.target = Vec2::splat(size * 0.5);
                 cam.distance = size * 0.9;
@@ -255,7 +279,7 @@ impl Viewport {
             cam.target += (s.pos - cam.target) * (1.0 - (-dt * 8.0).exp());
         }
 
-        cam.target_height = scene.map.height_at(cam.target);
+        cam.target_height = scene.map.height_at(cam.target) + self.aim_height;
         let aspect = rect.width() / rect.height().max(1.0);
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
         let mouse_world = pointer.and_then(|p| {
@@ -266,7 +290,7 @@ impl Viewport {
         let soldiers: Vec<wind_render::SoldierDraw> = scene
             .soldiers
             .iter()
-            .map(|s| wind_render::SoldierDraw { id: s.id, pos: s.pos, facing: s.facing, team: s.team })
+            .map(|s| wind_render::SoldierDraw { id: s.id, pos: s.pos, facing: s.facing, team: s.team, look: s.look })
             .collect();
         let bullets: Vec<(Vec2, Vec2)> = scene.bullets.iter().map(|&(tail, head)| (head, head - tail)).collect();
         let grenades: Vec<Vec2> = scene.grenades.iter().map(|g| g.0).collect();

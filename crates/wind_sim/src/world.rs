@@ -60,6 +60,15 @@ pub struct Soldier {
     pub kills: u32,
 }
 
+impl Soldier {
+    /// Где рисовать солдата через `ahead` секунд после тика: симуляция идёт 20 раз
+    /// в секунду, а кадров больше — без этого солдат движется рывками, а анимация
+    /// шага видит его стоящим в большинстве кадров.
+    pub fn drawn_pos(&self, ahead: f32) -> Vec2 {
+        self.pos + self.vel * ahead
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProjectileKind {
     Bullet,

@@ -13,4 +13,6 @@ pub mod voxel;
 
 pub use camera::Camera;
 pub use renderer::{DEPTH_FORMAT, FrameData, Installed, RenderStats, WorldPaint, install, stats};
-pub use scene::{CorpseDraw, DrawInput, PointDraw, SceneBuilder, SoldierDraw};
+pub use character::Motion;
+pub use glam;
+pub use scene::{CorpseDraw, DrawInput, JOINT_BLEND, Look, PointDraw, SceneBuilder, SoldierDraw, falls_forward};

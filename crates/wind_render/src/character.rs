@@ -1,34 +1,40 @@
 //! Свои солдаты: модели RWR со скелетом, процедурная поза, оружие, тела.
 //!
-//! Каждая палка скелета — жёсткая часть со своими вокселями. Как у RWR, солдат
-//! рисуется облаком точек: каждый воксель — квадратик постоянного размера на экране
-//! (см. заметку «Как устроена картинка RWR»). Грани, склеенные по форме, остались только
-//! для теней.
+//! У каждой палки скелета свои воксели и своя матрица; матрицы всех палок солдата
+//! уходят в видеокарту, и модель рисуется одним вызовом на всех солдат (как у RWR).
+//! Воксель у сустава смешивает положение между своей палкой и соседней — сгиб плавный.
+//! Как у RWR, солдат рисуется облаком точек: каждый воксель — квадратик постоянного
+//! размера на экране (см. заметку «Как устроена картинка RWR»). Грани, склеенные
+//! по форме, остались только для теней.
 
 use crate::rwr::{self, RwrModel, VOXEL};
 use bytemuck::{Pod, Zeroable};
-use glam::{IVec3, Mat3, Mat4, Vec3};
+use glam::{IVec3, Mat3, Mat4, Quat, Vec3};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Вершина меша для теней: позиция, м, относительно точки крепления.
+/// Вершина меша для теней: позиция в позе покоя (м) и номер палки.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CharVertex {
     pub pos: [f32; 3],
+    pub bone: u32,
 }
 
-/// Угол точки-вокселя: центр вокселя (м, относительно точки крепления), цвет sRGB
-/// и в `color[3]` — номер угла квадратика 0..3 и уровень детализации (биты 2..3).
-/// На каждый воксель — 4 вершины.
+/// Угол точки-вокселя: центр вокселя в позе покоя (м) и цвет sRGB; в `color[3]` —
+/// номер угла квадратика 0..3 и уровень детализации (биты 2..3). В `bones` — палка
+/// вокселя, соседняя палка у ближайшего сустава и расстояние до этого сустава
+/// в четвертях вокселя (255 — далеко). На каждый воксель — 4 вершины.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct PointVertex {
     pub pos: [f32; 3],
     pub color: [u8; 4],
+    pub bones: [u8; 4],
 }
 
+/// Меш модели целиком (солдата или оружия).
 #[derive(Clone, Debug, Default)]
 pub struct CharMesh {
     /// Грани для теней.
@@ -48,15 +54,6 @@ pub struct PointMesh {
     pub indices: Vec<u32>,
 }
 
-/// Жёсткая часть: палка скелета и её меш.
-pub struct Part {
-    pub stick: (usize, usize),
-    pub mesh: usize,
-    /// Точка крепления (начало палки) в позе покоя, воксели.
-    pub rest_origin: Vec3,
-    pub rest_frame: Mat3,
-}
-
 /// Номера нужных точек скелета. Без них модель не анимируется — стоит как есть.
 #[derive(Clone, Copy, Debug)]
 struct Joints {
@@ -74,8 +71,13 @@ struct Joints {
 pub struct CharModel {
     pub name: String,
     pub rest: Vec<Vec3>,
-    pub parts: Vec<Part>,
+    /// Палки скелета: (начало, конец). На каждую — своя матрица.
+    pub sticks: Vec<(usize, usize)>,
+    /// Меш всей модели в `CharacterSet::meshes`.
+    pub mesh: usize,
     joints: Option<Joints>,
+    /// Поворот корпуса в позе покоя (см. `body_frame`).
+    rest_body: Mat3,
 }
 
 pub struct WeaponModel {
@@ -261,14 +263,29 @@ impl CharModel {
         self.rest.iter().map(|&v| rot * v + Vec3::Y * lift).collect()
     }
 
-    /// Части модели в пространстве модели (метры, +X вперёд): (меш, матрица).
-    pub fn parts(&self, pose: &Pose, out: &mut impl FnMut(usize, Mat4)) {
-        for part in &self.parts {
-            let (a, b) = (pose[part.stick.0], pose[part.stick.1]);
-            let frame = stick_frame(b - a);
-            let m = Mat4::from_translation(a * VOXEL) * Mat4::from_mat3(frame * part.rest_frame.transpose());
-            out(part.mesh, m);
+    /// Матрицы палок, по одной на палку: из позы покоя в позу `pose` (метры, +X вперёд).
+    ///
+    /// Поворот палки = поворот корпуса + наклон палки кратчайшим путём. Поворот вокруг
+    /// самой палки берётся от корпуса, а не от мира — иначе при падении или на шаге
+    /// части проворачивались вокруг своей оси и тело «разъезжалось».
+    pub fn bones(&self, pose: &Pose, out: &mut impl FnMut(Mat4)) {
+        let body = self.body_frame(pose) * self.rest_body.transpose();
+        for &(a, b) in &self.sticks {
+            let turned = body * (self.rest[b] - self.rest[a]).normalize_or(Vec3::Y);
+            let tilt = Quat::from_rotation_arc(turned, (pose[b] - pose[a]).normalize_or(turned));
+            out(Mat4::from_translation(pose[a] * VOXEL)
+                * Mat4::from_mat3(Mat3::from_quat(tilt) * body)
+                * Mat4::from_translation(-self.rest[a] * VOXEL));
         }
+    }
+
+    /// Поворот корпуса: «вверх» — от поясницы к шее, «вбок» — от бедра к бедру.
+    fn body_frame(&self, pose: &Pose) -> Mat3 {
+        let Some(j) = self.joints else { return Mat3::IDENTITY };
+        let up = (pose[j.neck] - pose[j.mid]).normalize_or(Vec3::Y);
+        let across = pose[j.hip[1]] - pose[j.hip[0]];
+        let side = (across - up * across.dot(up)).normalize_or(Vec3::Z);
+        Mat3::from_cols(up.cross(side), up, side)
     }
 
     /// Где и как держится оружие: начало координат оружия — в правой руке,
@@ -301,18 +318,6 @@ fn two_bone(root: Vec3, end: Vec3, a: f32, b: f32, bend: Vec3) -> Vec3 {
     root + dir * along + n * h
 }
 
-/// Система координат палки: ось — сама палка, второе направление — «вверх»,
-/// а для почти вертикальных палок — «вперёд». Переход плавный, чтобы части не дёргались.
-fn stick_frame(d: Vec3) -> Mat3 {
-    let d = d.normalize_or(Vec3::Y);
-    let vertical = d.dot(Vec3::Y).abs();
-    let t = ((vertical - 0.8) / 0.15).clamp(0.0, 1.0);
-    let hint = (Vec3::Y * (1.0 - t) + Vec3::X * t).normalize();
-    let side = d.cross(hint).normalize_or(Vec3::Z);
-    let up = side.cross(d);
-    Mat3::from_cols(d, up, side)
-}
-
 // --- Сборка мешей ------------------------------------------------------------------
 
 #[derive(Default)]
@@ -325,16 +330,37 @@ impl Builder {
         let rest: Vec<Vec3> = m.particles.iter().map(|p| p.pos).collect();
         // Все воксели модели: грань части, закрытая вокселем соседней части, не нужна.
         let solid: HashSet<IVec3> = m.voxels.iter().map(|v| v.0).collect();
-        let mut parts = Vec::new();
-        for (s, &(a, b)) in m.sticks.iter().enumerate() {
-            let voxels: Vec<_> = m.bindings[s].iter().map(|&i| m.voxels[i]).collect();
-            if voxels.is_empty() {
-                continue;
+        let has_voxels: Vec<bool> = m.bindings.iter().map(|b| !b.is_empty()).collect();
+        // Соседняя палка для плавного сгиба: из палок с вокселями, что сходятся с этой
+        // в суставе, — ближайшая к точке. Возвращает её номер и расстояние до сустава.
+        let partner = |s: usize, p: Vec3| -> (u8, u8) {
+            let (a, b) = m.sticks[s];
+            let mut best: Option<(f32, usize, usize)> = None;
+            for joint in [a, b] {
+                for (q, &(qa, qb)) in m.sticks.iter().enumerate() {
+                    if q == s || !has_voxels[q] || (qa != joint && qb != joint) {
+                        continue;
+                    }
+                    let d = segment_distance(p, rest[qa], rest[qb]);
+                    if best.is_none_or(|(bd, ..)| d < bd) {
+                        best = Some((d, q, joint));
+                    }
+                }
             }
-            let origin = rest[a];
-            let mesh = self.mesh(&voxels, origin, Some(&solid));
-            parts.push(Part { stick: (a, b), mesh, rest_origin: origin, rest_frame: stick_frame(rest[b] - rest[a]) });
+            match best {
+                Some((_, q, joint)) => (q as u8, (p.distance(rest[joint]) * 4.0).min(255.0) as u8),
+                None => (s as u8, 255),
+            }
+        };
+        let mut mesh = CharMesh::default();
+        for s in 0..m.sticks.len() {
+            let voxels: Vec<_> = m.bindings[s].iter().map(|&i| m.voxels[i]).collect();
+            if !voxels.is_empty() {
+                add_part(&mut mesh, &voxels, s as u8, Some(&solid), |p| partner(s, p));
+            }
         }
+        self.meshes.push(mesh);
+        let mesh = self.meshes.len() - 1;
         let find = |n: &str| m.particle(n);
         let pair = |r: &str, l: &str| Some([find(r)?, find(l)?]);
         let joints = (|| {
@@ -350,63 +376,84 @@ impl Builder {
                 foot: pair("rightfoot", "leftfoot")?,
             })
         })();
-        CharModel { name: name.to_owned(), rest, parts, joints }
+        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY };
+        model.rest_body = model.body_frame(&model.rest);
+        model
     }
 
-    /// Предмет без скелета (оружие): одна часть с началом координат модели.
+    /// Предмет без скелета (оружие): одна палка, её матрица — положение предмета.
     fn prop(&mut self, m: &RwrModel) -> usize {
-        self.mesh(&m.voxels, Vec3::ZERO, None)
-    }
-
-    /// Меш из вокселей: грани для теней склеиваются по форме, а каждый видимый
-    /// воксель становится точкой со своим цветом.
-    fn mesh(&mut self, voxels: &[(IVec3, [u8; 4])], origin: Vec3, whole: Option<&HashSet<IVec3>>) -> usize {
-        let min = voxels.iter().fold(IVec3::MAX, |a, v| a.min(v.0));
-        let max = voxels.iter().fold(IVec3::MIN, |a, v| a.max(v.0));
-        let size = max - min + IVec3::ONE;
-        let mut filled_cells = vec![false; (size.x * size.y * size.z) as usize];
-        let idx = |p: IVec3| ((p.z * size.y + p.y) * size.x + p.x) as usize;
-        for &(c, _) in voxels {
-            filled_cells[idx(c - min)] = true;
-        }
-        let filled = |p: IVec3| p.cmpge(IVec3::ZERO).all() && p.cmplt(size).all() && filled_cells[idx(p)];
-        let solid = |p: IVec3| filled(p) || whole.is_some_and(|w| w.contains(&(p + min)));
         let mut mesh = CharMesh::default();
-        for (corners, _) in greedy_shape(size, filled, solid) {
-            let base = mesh.vertices.len() as u32;
-            for c in corners {
-                mesh.vertices.push(CharVertex { pos: (((c + min).as_vec3() - origin) * VOXEL).to_array() });
-            }
-            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        }
-        const SIDES: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
-        // Воксель, со всех сторон закрытый другими, не виден.
-        let visible: Vec<_> = voxels.iter().filter(|(c, _)| !SIDES.iter().all(|&d| solid(*c - min + d))).collect();
-        for (lod, out) in mesh.lods.iter_mut().enumerate() {
-            // Кубик k×k×k: цвет — средний, точка — в центре кубика.
-            let k = 1 << lod;
-            let mut cells: HashMap<IVec3, ([u32; 3], u32)> = HashMap::new();
-            for &&(c, rgba) in &visible {
-                let e = cells.entry(c.div_euclid(IVec3::splat(k))).or_default();
-                for (sum, c) in e.0.iter_mut().zip(rgba) {
-                    *sum += c as u32;
-                }
-                e.1 += 1;
-            }
-            let mut cells: Vec<_> = cells.into_iter().collect();
-            cells.sort_by_key(|(c, _)| (c.z, c.y, c.x));
-            for (cell, (sum, n)) in cells {
-                let center = (((cell * k).as_vec3() + Vec3::splat(k as f32 * 0.5) - origin) * VOXEL).to_array();
-                let [r, g, b] = sum.map(|v| (v / n) as u8);
-                let base = out.points.len() as u32;
-                for corner in 0..4 {
-                    out.points.push(PointVertex { pos: center, color: [r, g, b, corner | (lod as u8) << 2] });
-                }
-                out.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-            }
-        }
+        add_part(&mut mesh, &m.voxels, 0, None, |_| (0, 255));
         self.meshes.push(mesh);
         self.meshes.len() - 1
+    }
+}
+
+/// Расстояние от точки до отрезка.
+fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+/// Воксели одной палки в меш модели: грани для теней склеиваются по форме, а каждый
+/// видимый воксель становится точкой со своим цветом. `partner` — соседняя палка
+/// и расстояние до сустава для точки (в вокселях позы покоя).
+fn add_part(
+    mesh: &mut CharMesh,
+    voxels: &[(IVec3, [u8; 4])],
+    bone: u8,
+    whole: Option<&HashSet<IVec3>>,
+    partner: impl Fn(Vec3) -> (u8, u8),
+) {
+    let min = voxels.iter().fold(IVec3::MAX, |a, v| a.min(v.0));
+    let max = voxels.iter().fold(IVec3::MIN, |a, v| a.max(v.0));
+    let size = max - min + IVec3::ONE;
+    let mut filled_cells = vec![false; (size.x * size.y * size.z) as usize];
+    let idx = |p: IVec3| ((p.z * size.y + p.y) * size.x + p.x) as usize;
+    for &(c, _) in voxels {
+        filled_cells[idx(c - min)] = true;
+    }
+    let filled = |p: IVec3| p.cmpge(IVec3::ZERO).all() && p.cmplt(size).all() && filled_cells[idx(p)];
+    let solid = |p: IVec3| filled(p) || whole.is_some_and(|w| w.contains(&(p + min)));
+    for (corners, _) in greedy_shape(size, filled, solid) {
+        let base = mesh.vertices.len() as u32;
+        for c in corners {
+            mesh.vertices.push(CharVertex { pos: ((c + min).as_vec3() * VOXEL).to_array(), bone: bone as u32 });
+        }
+        mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    const SIDES: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+    // Воксель, со всех сторон закрытый другими, не виден.
+    let visible: Vec<_> = voxels.iter().filter(|(c, _)| !SIDES.iter().all(|&d| solid(*c - min + d))).collect();
+    for (lod, out) in mesh.lods.iter_mut().enumerate() {
+        // Кубик k×k×k: цвет — средний, точка — в центре кубика.
+        let k = 1 << lod;
+        let mut cells: HashMap<IVec3, ([u32; 3], u32)> = HashMap::new();
+        for &&(c, rgba) in &visible {
+            let e = cells.entry(c.div_euclid(IVec3::splat(k))).or_default();
+            for (sum, c) in e.0.iter_mut().zip(rgba) {
+                *sum += c as u32;
+            }
+            e.1 += 1;
+        }
+        let mut cells: Vec<_> = cells.into_iter().collect();
+        cells.sort_by_key(|(c, _)| (c.z, c.y, c.x));
+        for (cell, (sum, n)) in cells {
+            let center = (cell * k).as_vec3() + Vec3::splat(k as f32 * 0.5);
+            let [r, g, b] = sum.map(|v| (v / n) as u8);
+            let (other, dist) = partner(center);
+            let base = out.points.len() as u32;
+            for corner in 0..4 {
+                out.points.push(PointVertex {
+                    pos: (center * VOXEL).to_array(),
+                    color: [r, g, b, corner | (lod as u8) << 2],
+                    bones: [bone, other, dist, 0],
+                });
+            }
+            out.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
     }
 }
 
@@ -498,9 +545,12 @@ mod tests {
         let set = CharacterSet::load(&data()).unwrap();
         assert!(!set.models.is_empty() && !set.weapons.is_empty());
         let m = &set.models[0];
-        assert_eq!(m.parts.len(), 17);
-        let quads: usize = m.parts.iter().map(|p| set.meshes[p.mesh].indices.len() / 6).sum();
-        let points = |lod: usize| -> usize { m.parts.iter().map(|p| set.meshes[p.mesh].lods[lod].points.len() / 4).sum() };
+        assert_eq!(m.sticks.len(), 17);
+        let mesh = &set.meshes[m.mesh];
+        let quads = mesh.indices.len() / 6;
+        let points = |lod: usize| mesh.lods[lod].points.len() / 4;
+        // У суставов у точек есть соседняя палка.
+        assert!(mesh.lods[0].points.iter().any(|p| p.bones[0] != p.bones[1] && p.bones[2] < 16));
         // Склейка по форме: сотни граней, а не тысячи.
         assert!(quads < 3500, "граней у солдата: {quads}");
         assert!(points(0) > 500 && points(0) < 4000, "точек у солдата: {}", points(0));
@@ -515,12 +565,53 @@ mod tests {
         let set = CharacterSet::load(&data()).unwrap();
         let m = &set.models[0];
         let mut moved = 0.0f32;
-        m.parts(&m.rest, &mut |_, mat| {
-            // В позе покоя часть переходит в своё же место: матрица = перенос в точку крепления.
-            let rot = Mat3::from_mat4(mat);
-            moved = moved.max((rot - Mat3::IDENTITY).abs().to_cols_array().iter().copied().fold(0.0, f32::max));
+        m.bones(&m.rest, &mut |mat| {
+            // В позе покоя каждая палка остаётся на месте: матрица единичная.
+            moved = moved.max((mat - Mat4::IDENTITY).abs().to_cols_array().iter().copied().fold(0.0, f32::max));
         });
         assert!(moved < 1e-4, "{moved}");
+    }
+
+    /// Матрицы палок, по порядку.
+    fn part_matrices(m: &CharModel, pose: &Pose) -> Vec<Mat4> {
+        let mut out = Vec::new();
+        m.bones(pose, &mut |mat| out.push(mat));
+        out
+    }
+
+    #[test]
+    fn corpse_falls_as_one_piece() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for m in &set.models {
+            for forward in [false, true] {
+                let pose = m.corpse(10.0, forward);
+                let angle = if forward { -1.0 } else { 1.0 } * std::f32::consts::FRAC_PI_2;
+                let rot = Mat3::from_rotation_z(angle);
+                for mat in part_matrices(m, &pose) {
+                    let diff = (Mat3::from_mat4(mat) - rot).abs().to_cols_array().iter().copied().fold(0.0, f32::max);
+                    assert!(diff < 1e-3, "{}: часть повёрнута не как всё тело ({diff})", m.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn walking_parts_turn_smoothly() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for m in &set.models {
+            let mut last: Option<Vec<Mat4>> = None;
+            for step in 0..400 {
+                let pose = m.pose(Motion { speed: 4.5 + (step % 7) as f32 * 0.3, phase: step as f32 * 0.05 });
+                let now = part_matrices(m, &pose);
+                if let Some(prev) = &last {
+                    for (a, b) in prev.iter().zip(&now) {
+                        let jump = (Mat3::from_mat4(*a) - Mat3::from_mat4(*b)).abs().to_cols_array().iter().copied().fold(0.0, f32::max);
+                        assert!(jump < 0.3, "{}: часть резко повернулась за шаг ({jump})", m.name);
+                    }
+                }
+                last = Some(now);
+            }
+        }
     }
 
     #[test]

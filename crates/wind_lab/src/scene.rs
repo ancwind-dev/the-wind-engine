@@ -12,7 +12,8 @@ pub struct Blast {
     pub age: f32,
 }
 
-pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast]) -> Scene<'a> {
+/// `ahead` — сколько секунд прошло после последнего тика (см. `Soldier::drawn_pos`).
+pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahead: f32) -> Scene<'a> {
     let soldiers = world
         .soldiers
         .iter()
@@ -20,10 +21,11 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast]) -> S
         .filter(|(_, s)| s.alive)
         .map(|(i, s)| SceneSoldier {
             id: i as u32,
-            pos: s.pos,
+            pos: s.drawn_pos(ahead),
             facing: s.facing,
             team: s.team,
             player: matches!(s.controller, Controller::Player(_)),
+            look: None,
         })
         .collect();
     let mut bullets = Vec::new();
@@ -71,6 +73,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast]) -> S
                 facing: s.facing,
                 team: s.team,
                 age: world.config.soldier.respawn_time - s.respawn_timer,
+                model: None,
             })
             .collect(),
         atmosphere: world.atmosphere.clone(),
@@ -93,6 +96,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
                 facing: s.net.facing(),
                 team: s.net.team(),
                 player: s.net.is_player(),
+                look: None,
             })
         })
         .collect();
@@ -132,7 +136,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
             .collect(),
         rings: Vec::new(),
         lines: Vec::new(),
-        corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age }).collect(),
+        corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, model: None }).collect(),
         atmosphere: w.atmosphere.clone(),
     })
 }

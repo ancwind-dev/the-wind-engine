@@ -7,7 +7,7 @@ use crate::decals::Decals;
 use wind_sim::atmosphere::Atmosphere;
 use crate::mapmesh::MapMesher;
 use crate::models::{MeshId, SOLDIER_VOXEL};
-use crate::renderer::{FrameData, Globals, GroundPoint, Instance, MAX_POINTS, PendingMap, SHADOW_SIZE};
+use crate::renderer::{FrameData, Globals, GroundPoint, Instance, MAX_POINTS, PendingMap, SHADOW_SIZE, SkinInstance};
 use std::sync::{Arc, Mutex};
 use glam::camera::rh::{proj::directx as proj, view};
 use glam::{Mat4, Vec2, Vec3};
@@ -18,6 +18,17 @@ pub struct SoldierDraw {
     pub pos: Vec2,
     pub facing: f32,
     pub team: u8,
+    /// Явный вид — для студии. Без него модель выбирается по номеру солдата,
+    /// а шаг — по тому, как он перемещается.
+    pub look: Option<Look>,
+}
+
+/// Модель, оружие и движение солдата, заданные явно.
+#[derive(Clone, Copy, Debug)]
+pub struct Look {
+    pub model: usize,
+    pub weapon: Option<usize>,
+    pub motion: Motion,
 }
 
 /// Убитый солдат: лежит, пока не возродится.
@@ -28,6 +39,8 @@ pub struct CorpseDraw {
     pub team: u8,
     /// Сколько секунд прошло со смерти — для падения.
     pub age: f32,
+    /// Явная модель — для студии.
+    pub model: Option<usize>,
 }
 
 pub struct PointDraw {
@@ -85,7 +98,12 @@ pub struct SceneBuilder {
     pub team_colors: [[f32; 3]; 2],
     /// Свои солдаты (из `install`). Без них рисуются встроенные болванчики.
     pub characters: Option<Arc<CharacterSet>>,
+    /// Ширина плавного сгиба у суставов, воксели. 0 — части жёсткие.
+    pub joint_blend: f32,
 }
+
+/// Ширина сгиба по умолчанию, воксели.
+pub const JOINT_BLEND: f32 = 4.0;
 
 impl Default for SceneBuilder {
     fn default() -> Self {
@@ -98,8 +116,14 @@ impl Default for SceneBuilder {
             anim: Vec::new(),
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
             characters: None,
+            joint_blend: JOINT_BLEND,
         }
     }
+}
+
+/// Куда падает убитый: у каждого солдата своё направление, но всегда одно и то же.
+pub fn falls_forward(id: u32) -> bool {
+    id.wrapping_mul(0x9E37_79B9) >> 31 == 1
 }
 
 /// Насколько далеко от центра экрана ещё есть смысл рисовать, м.
@@ -146,8 +170,10 @@ impl SceneBuilder {
         // --- Экземпляры, по мешам.
         let mut by_mesh: [Vec<Instance>; crate::models::MESH_COUNT] = Default::default();
         let characters = self.characters.clone();
+        // Свои солдаты: на каждого — один экземпляр и матрицы всех палок.
         // По мешу и уровню детализации: индекс = меш × LODS + уровень.
-        let mut by_char: Vec<Vec<Instance>> = vec![Vec::new(); characters.as_ref().map_or(0, |c| c.meshes.len() * LODS)];
+        let mut by_char: Vec<Vec<SkinInstance>> = vec![Vec::new(); characters.as_ref().map_or(0, |c| c.meshes.len() * LODS)];
+        let mut bones: Vec<[[f32; 4]; 4]> = Vec::new();
         let eye = cam.eye();
         // Уровень детализации — по тому, сколько пикселей занимает воксель при 1080p:
         // точка всё равно не меньше 2,6 пикселя, и мелкие воксели вдали сливаются.
@@ -162,12 +188,9 @@ impl SceneBuilder {
                 2
             }
         };
-        // У солдат и оружия tint — цвет команды (для силуэта сквозь стены), a: 1 — оружие.
-        let team_colors = self.team_colors;
-        let char_instance = |m: Mat4, team: u8, weapon: bool| {
-            let c = team_colors[team as usize & 1];
-            Instance { model: m.to_cols_array_2d(), tint: [c[0], c[1], c[2], if weapon { 1.0 } else { 0.0 }] }
-        };
+        // Цвет команды — для силуэта сквозь стены.
+        let team_colors = self.team_colors.map(|c| u32::from_le_bytes([c[0], c[1], c[2], 1.0].map(|v| (v * 255.0) as u8)));
+        let skin = |base: usize, team: u8, weapon: bool| SkinInstance { base: base as u32, flags: weapon as u32, team: team_colors[team as usize & 1], _pad: 0 };
         let v = SOLDIER_VOXEL;
         for s in input.soldiers {
             let speed = self.animate(s, input.dt);
@@ -176,17 +199,25 @@ impl SceneBuilder {
             }
             let a = self.anim[s.id as usize];
             // Свои модели: поза по скелету, оружие в правой руке.
+            let look = s.look.or_else(|| {
+                let (model, weapon) = characters.as_ref()?.pick(s.team, s.id)?;
+                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase * 2.0 } })
+            });
             if let Some(set) = &characters
-                && let Some((model, weapon)) = set.pick(s.team, s.id)
+                && let Some(look) = look
             {
-                let model = &set.models[model];
-                let pose = model.pose(Motion { speed, phase: a.phase * 2.0 });
+                let model = &set.models[look.model];
+                let pose = model.pose(look.motion);
                 let at = to_3d(s.pos, input.map.height_at(s.pos));
                 let lod = lod_at(at);
                 let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-s.facing);
-                model.parts(&pose, &mut |mesh, m| by_char[mesh * LODS + lod].push(char_instance(root * m, s.team, false)));
-                if let Some(grip) = model.weapon_frame(&pose) {
-                    by_char[set.weapons[weapon].mesh * LODS + lod].push(char_instance(root * grip, s.team, true));
+                by_char[model.mesh * LODS + lod].push(skin(bones.len(), s.team, false));
+                model.bones(&pose, &mut |m| bones.push((root * m).to_cols_array_2d()));
+                if let Some(weapon) = look.weapon
+                    && let Some(grip) = model.weapon_frame(&pose)
+                {
+                    by_char[set.weapons[weapon].mesh * LODS + lod].push(skin(bones.len(), s.team, true));
+                    bones.push((root * grip).to_cols_array_2d());
                 }
                 continue;
             }
@@ -244,14 +275,14 @@ impl SceneBuilder {
                 if c.pos.distance_squared(cam.target) > reach2 {
                     continue;
                 }
-                let Some((model, _)) = set.pick(c.team, c.id) else { continue };
+                let Some(model) = c.model.or_else(|| set.pick(c.team, c.id).map(|p| p.0)) else { continue };
                 let model = &set.models[model];
-                let forward = c.id.wrapping_mul(0x9E37_79B9) >> 31 == 1;
-                let pose = model.corpse(c.age, forward);
+                let pose = model.corpse(c.age, falls_forward(c.id));
                 let at = to_3d(c.pos, input.map.height_at(c.pos));
                 let lod = lod_at(at);
                 let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-c.facing);
-                model.parts(&pose, &mut |mesh, m| by_char[mesh * LODS + lod].push(char_instance(root * m, c.team, false)));
+                by_char[model.mesh * LODS + lod].push(skin(bones.len(), c.team, false));
+                model.bones(&pose, &mut |m| bones.push((root * m).to_cols_array_2d()));
             }
         }
 
@@ -261,11 +292,12 @@ impl SceneBuilder {
             batches.push((mesh, instances.len() as u32, list.len() as u32));
             instances.extend_from_slice(list);
         }
+        let mut skins = Vec::new();
         let mut char_batches = Vec::new();
         for (mesh, list) in by_char.iter().enumerate() {
             if !list.is_empty() {
-                char_batches.push((mesh / LODS, mesh % LODS, instances.len() as u32, list.len() as u32));
-                instances.extend_from_slice(list);
+                char_batches.push((mesh / LODS, mesh % LODS, skins.len() as u32, list.len() as u32));
+                skins.extend_from_slice(list);
             }
         }
 
@@ -274,6 +306,8 @@ impl SceneBuilder {
             instances,
             batches,
             char_batches,
+            skins,
+            bones,
             map: self.pending.clone(),
             visible_chunks,
         }
@@ -295,7 +329,9 @@ impl SceneBuilder {
         }
         // Кровь — когда тело уже упало.
         for c in input.corpses.iter().filter(|c| c.age > 0.45) {
-            rects.extend(self.decals.corpse(c.id, c.pos));
+            // Лужа — под корпусом: тело упало на метр вперёд или назад от ног.
+            let fall = Vec2::from_angle(c.facing) * if falls_forward(c.id) { 1.0 } else { -1.0 };
+            rects.extend(self.decals.corpse(c.id, c.pos + fall));
         }
         if rects.is_empty() {
             return;
@@ -386,6 +422,7 @@ impl SceneBuilder {
             tint: [atmo.tint[0], atmo.tint[1], atmo.tint[2], input.viewport_px[3] / (2.0 * (cam.fov_y * 0.5).tan())],
             post: [atmo.outline, atmo.occlusion, atmo.vignette, cam.far()],
             screen: input.viewport_px,
+            skin: [self.joint_blend, 0.0, 0.0, 0.0],
             points,
         }
     }

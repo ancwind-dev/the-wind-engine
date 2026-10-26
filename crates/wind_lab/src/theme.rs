@@ -1,5 +1,6 @@
 //! Оформление в духе Blender: тёмно-серые панели, синий акцент, оранжевое выделение.
 
+use crate::icons::{self, Icon};
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontFamily, FontId, Margin, Stroke, TextStyle,
     epaint::text::{FontInsert, FontPriority, InsertFontFamily},
@@ -101,20 +102,25 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
-/// Сворачиваемая панель, как в редакторе свойств Blender.
-pub fn panel(ui: &mut egui::Ui, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
+/// Сворачиваемая панель с иконкой, как в редакторе свойств Blender.
+pub fn panel(ui: &mut egui::Ui, icon: Icon, title: &str, open: bool, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
         .fill(SUBPANEL)
         .corner_radius(4)
         .inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 6 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::CollapsingHeader::new(egui::RichText::new(title).strong())
+            let r = egui::CollapsingHeader::new(egui::RichText::new(icons::pad(title)).strong())
+                .id_salt(title)
                 .default_open(open)
                 .show(ui, |ui| {
                     ui.add_space(2.0);
                     add(ui);
                 });
+            // Иконка — после стрелки сворачивания.
+            let h = r.header_response.rect;
+            let x = h.left() + ui.spacing().icon_width + ui.spacing().icon_spacing + 4.0;
+            icons::paint(ui.painter(), egui::Rect::from_min_size(egui::pos2(x, h.center().y - 7.0), egui::vec2(14.0, 14.0)), icon, TEXT);
         });
     ui.add_space(4.0);
 }

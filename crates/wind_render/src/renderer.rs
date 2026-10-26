@@ -1,4 +1,4 @@
-﻿//! GPU-часть: конвейеры, буферы, карта теней. Живёт в ресурсах egui-wgpu
+//! GPU-часть: конвейеры, буферы, карта теней. Живёт в ресурсах egui-wgpu
 //! и вызывается из paint callback (см. [`WorldPaint`]).
 
 use crate::character::{CharVertex, CharacterSet, LODS, PointVertex};
@@ -46,6 +46,8 @@ pub struct Globals {
     pub post: [f32; 4],
     /// Вьюпорт в пикселях кадра: x, y, ширина, высота.
     pub screen: [f32; 4],
+    /// x — ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
+    pub skin: [f32; 4],
     pub points: [GroundPoint; MAX_POINTS],
 }
 
@@ -55,6 +57,17 @@ pub struct Globals {
 pub struct Instance {
     pub model: [[f32; 4]; 4],
     pub tint: [f32; 4],
+}
+
+/// Экземпляр своего солдата или оружия: с какой матрицы в буфере палок начинаются
+/// его палки, признаки (бит 0 — оружие) и цвет команды (RGBA8).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct SkinInstance {
+    pub base: u32,
+    pub flags: u32,
+    pub team: u32,
+    pub _pad: u32,
 }
 
 /// Изменения мешей карты, которые GPU ещё не забрал.
@@ -81,9 +94,11 @@ pub struct FrameData {
     pub instances: Vec<Instance>,
     /// (меш, первый экземпляр, сколько).
     pub batches: Vec<(usize, u32, u32)>,
-    /// То же для своих солдат и оружия: (меш персонажа, первый экземпляр, сколько).
-    /// Солдаты и оружие: (меш, уровень детализации, первый экземпляр, сколько).
+    /// Свои солдаты и оружие: (меш, уровень детализации, первый экземпляр, сколько).
     pub char_batches: Vec<(usize, usize, u32, u32)>,
+    pub skins: Vec<SkinInstance>,
+    /// Матрицы палок всех солдат и оружия подряд (см. `SkinInstance::base`).
+    pub bones: Vec<[[f32; 4]; 4]>,
     pub map: Arc<Mutex<PendingMap>>,
     /// Чанки, которые стоит рисовать в этом кадре.
     pub visible_chunks: Vec<u32>,
@@ -162,6 +177,12 @@ pub struct WorldRenderer {
     char_outline: wgpu::RenderPipeline,
     char_color: wgpu::RenderPipeline,
     char_batches: Vec<(usize, usize, u32, u32)>,
+    skin_layout: wgpu::BindGroupLayout,
+    skin_bind: wgpu::BindGroup,
+    skin_instances: wgpu::Buffer,
+    skin_capacity: usize,
+    bones: wgpu::Buffer,
+    bones_capacity: usize,
     /// Обводка: проходы нормалей и глубины и полноэкранный умножающий проход.
     nd_voxel: wgpu::RenderPipeline,
     nd_char: wgpu::RenderPipeline,
@@ -173,30 +194,35 @@ pub struct WorldRenderer {
 
 const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Unorm8x4];
-const CHAR_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
-const POINT_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint8x4];
+const CHAR_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32];
+const POINT_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint8x4, 2 => Uint8x4];
+const SKIN_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![3 => Uint32x4];
+
+const SKIN_INSTANCES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: size_of::<SkinInstance>() as u64,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &SKIN_ATTRS,
+};
 
 fn point_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
-    let [_, instances] = vertex_layouts();
     [
         Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<PointVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &POINT_ATTRS,
         }),
-        instances,
+        Some(SKIN_INSTANCES),
     ]
 }
 
 fn char_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
-    let [_, instances] = vertex_layouts();
     [
         Some(wgpu::VertexBufferLayout {
             array_stride: size_of::<CharVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &CHAR_ATTRS,
         }),
-        instances,
+        Some(SKIN_INSTANCES),
     ]
 }
 const INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] =
@@ -360,6 +386,31 @@ impl WorldRenderer {
             bind_group_layouts: &[Some(&shadow_layout)],
             immediate_size: 0,
         });
+        // Матрицы палок солдат (группа 1): читает только вершинный шейдер.
+        let skin_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bones"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                // Номер 4 — чтобы не совпасть с текстурами группы 1 у других конвейеров.
+                binding: 4,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let char_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("character"),
+            bind_group_layouts: &[Some(&main_layout), Some(&skin_layout)],
+            immediate_size: 0,
+        });
+        let char_shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("character shadow"),
+            bind_group_layouts: &[Some(&shadow_layout), Some(&skin_layout)],
+            immediate_size: 0,
+        });
 
         let depth = |write: bool, bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
@@ -470,7 +521,7 @@ impl WorldRenderer {
         let point_pipeline = |label: &str, vs: &str, fs: &str, compare: wgpu::CompareFunction, write: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&main_pipeline_layout),
+                layout: Some(&char_pipeline_layout),
                 vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers: &point_vertex },
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -496,7 +547,7 @@ impl WorldRenderer {
         let char_color = point_pipeline("character points", "vs_point", "fs_point", wgpu::CompareFunction::Less, true);
         let character_shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("character shadow"),
-            layout: Some(&shadow_pipeline_layout),
+            layout: Some(&char_shadow_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_char_shadow"),
@@ -512,12 +563,16 @@ impl WorldRenderer {
         });
         // --- Обводка: нормали и глубина в свою текстуру, потом умножающий проход.
         let nd_target = [Some(wgpu::ColorTargetState { format: ND_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
-        let nd_pipeline = |label: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout<'static>>], vs: &str, cull: Option<wgpu::Face>| {
+        let nd_pipeline = |label: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout<'static>>], vs: &str, layout: &wgpu::PipelineLayout| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&main_pipeline_layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers },
-                primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
+                // Солдаты-точки — квадратики «на камеру», их не отсекаем.
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: (vs != "vs_point").then_some(wgpu::Face::Back),
+                    ..Default::default()
+                },
                 depth_stencil: Some(depth(true, Default::default())),
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
@@ -530,8 +585,8 @@ impl WorldRenderer {
                 cache: None,
             })
         };
-        let nd_voxel = nd_pipeline("nd voxel", "fs_nd", &layouts, "vs_voxel", Some(wgpu::Face::Back));
-        let nd_char = nd_pipeline("nd character", "fs_point_nd", &point_vertex, "vs_point", None);
+        let nd_voxel = nd_pipeline("nd voxel", "fs_nd", &layouts, "vs_voxel", &main_pipeline_layout);
+        let nd_char = nd_pipeline("nd character", "fs_point_nd", &point_vertex, "vs_point", &char_pipeline_layout);
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -601,6 +656,10 @@ impl WorldRenderer {
             usage: wgpu::BufferUsages::VERTEX,
         });
         let capacity = 1024;
+        let skin_capacity = 1024;
+        let bones_capacity = 16 * 1024;
+        let bones = bones_buffer(device, bones_capacity);
+        let skin_bind = skin_bind(device, &skin_layout, &bones);
         WorldRenderer {
             voxel,
             shadow,
@@ -629,6 +688,17 @@ impl WorldRenderer {
             char_outline,
             char_color,
             char_batches: Vec::new(),
+            skin_instances: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skin instances"),
+                size: (skin_capacity * size_of::<SkinInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            skin_capacity,
+            skin_layout,
+            skin_bind,
+            bones,
+            bones_capacity,
             nd_voxel,
             nd_char,
             post,
@@ -695,6 +765,26 @@ impl WorldRenderer {
         }
         self.batches.clone_from(&frame.batches);
         self.char_batches.clone_from(&frame.char_batches);
+        if frame.skins.len() > self.skin_capacity {
+            self.skin_capacity = frame.skins.len().next_power_of_two();
+            self.skin_instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skin instances"),
+                size: (self.skin_capacity * size_of::<SkinInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !frame.skins.is_empty() {
+            queue.write_buffer(&self.skin_instances, 0, bytemuck::cast_slice(&frame.skins));
+        }
+        if frame.bones.len() > self.bones_capacity {
+            self.bones_capacity = frame.bones.len().next_power_of_two();
+            self.bones = bones_buffer(device, self.bones_capacity);
+            self.skin_bind = skin_bind(device, &self.skin_layout, &self.bones);
+        }
+        if !frame.bones.is_empty() {
+            queue.write_buffer(&self.bones, 0, bytemuck::cast_slice(&frame.bones));
+        }
         self.visible.clone_from(&frame.visible_chunks);
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -713,7 +803,8 @@ impl WorldRenderer {
         pass.set_bind_group(0, &self.shadow_bind, &[]);
         self.draw_geometry(&mut pass);
         pass.set_pipeline(&self.character_shadow);
-        pass.set_vertex_buffer(1, self.instances.slice(..));
+        pass.set_bind_group(1, &self.skin_bind, &[]);
+        pass.set_vertex_buffer(1, self.skin_instances.slice(..));
         for &(mesh, _, first, count) in &self.char_batches {
             self.char_meshes[mesh].draw(&mut pass, first..first + count);
         }
@@ -758,7 +849,7 @@ impl WorldRenderer {
         self.stats = RenderStats {
             chunks: self.chunks.len(),
             chunks_drawn: self.visible.iter().filter(|c| self.chunks.contains_key(c)).count(),
-            instances: frame.instances.len(),
+            instances: frame.instances.len() + frame.skins.len(),
             draw_calls: 0,
         };
         self.stats.draw_calls = (self.stats.chunks_drawn + self.batches.len()) * 2 + 1;
@@ -795,7 +886,8 @@ impl WorldRenderer {
     }
 
     fn draw_characters(&self, pass: &mut wgpu::RenderPass<'_>) {
-        pass.set_vertex_buffer(1, self.instances.slice(..));
+        pass.set_bind_group(1, &self.skin_bind, &[]);
+        pass.set_vertex_buffer(1, self.skin_instances.slice(..));
         for &(mesh, lod, first, count) in &self.char_batches {
             if count > 0 {
                 self.char_points[mesh][lod].draw(pass, first..first + count);
@@ -818,6 +910,23 @@ impl WorldRenderer {
             }
         }
     }
+}
+
+fn bones_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bones"),
+        size: (capacity * 64) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn skin_bind(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, bones: &wgpu::Buffer) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bones"),
+        layout,
+        entries: &[wgpu::BindGroupEntry { binding: 4, resource: bones.as_entire_binding() }],
+    })
 }
 
 fn layer_texture(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, w: u32, h: u32) -> wgpu::Texture {

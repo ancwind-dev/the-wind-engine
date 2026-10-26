@@ -52,7 +52,7 @@ impl Decals {
             return None;
         }
         self.blood.insert(id, pos);
-        self.stamp(pos, 0.6, 1)
+        self.stamp(pos, 0.85, 1)
     }
 
     /// Тексели прямоугольника для отправки на GPU.
