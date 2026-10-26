@@ -144,7 +144,7 @@ impl Arsenal {
     pub fn load(data_dir: &Path) -> Result<Self, String> {
         let read = |name: &str| {
             let path = data_dir.join(name);
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display())).map(|t| (path, t))
+            crate::config::read_text(&path).map(|t| (path, t))
         };
         let (path, text) = read("weapons.ron")?;
         let weapons: WeaponsFile = ron::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;

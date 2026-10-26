@@ -14,6 +14,7 @@ use wind_sim::map::Map;
 use std::path::Path;
 use wind_sim::arsenal::{Arsenal, WeaponSpec};
 use wind_sim::atmosphere::Atmosphere;
+use wind_sim::round::{EndReason, Phase, Round};
 use wind_sim::mapfile::MapFile;
 use wind_sim::{Event, Soldier, Vec2, World, mapgen};
 
@@ -206,6 +207,7 @@ impl ServerReplica {
             w.write_bits(p.owner.map_or(0, |t| t as u32 + 1), 2);
             w.write_signed((p.progress * 127.0).round() as i32, 8);
         }
+        write_round(&mut w, &world.round);
 
         let mut removed_w = BitWriter::new();
         removed_w.write_var(removed.len() as u32);
@@ -293,7 +295,7 @@ impl ServerReplica {
                     scratch.write_var(victim);
                     scratch.write_bits(world.soldiers[killer as usize].team as u32, 1);
                 }
-                Event::PointCaptured { .. } => continue,
+                Event::PointCaptured { .. } | Event::RoundOver { .. } | Event::RoundStarted { .. } => continue,
             }
             if scratch.len_bits() as i64 > left {
                 continue;
@@ -576,6 +578,8 @@ pub struct RemoteWorld {
     pub atmosphere: Atmosphere,
     /// Оружие и классы — из своих `data/weapons.ron` и `data/factions.ron`.
     pub arsenal: Arsenal,
+    /// Раунд по последнему снимку.
+    pub round: Round,
     /// Время клиента, которое вернул сервер в последнем снимке.
     pub echo_time: u32,
     /// Когда (по часам клиента, с) пришёл последний снимок.
@@ -629,6 +633,7 @@ impl RemoteWorld {
             corpses: Vec::new(),
             atmosphere,
             arsenal,
+            round: Round::default(),
             echo_time: 0,
             snapshot_time: 0.0,
             own_pos: None,
@@ -695,6 +700,7 @@ impl RemoteWorld {
             let progress = r.read_signed(8)? as f32 / 127.0;
             points.push((owner, progress));
         }
+        let round = read_round(&mut r)?;
 
         let total = self.soldiers.len() as u32;
         let mut view = base_view;
@@ -824,6 +830,15 @@ impl RemoteWorld {
             p.progress = progress;
         }
 
+        // Новый раунд: карта и точки вернутся сами (чанки и снимок), а тела и эффекты
+        // прошлого раунда убираем.
+        if round.number != self.round.number {
+            self.corpses.clear();
+            self.tracers.clear();
+            self.grenades.clear();
+            self.blasts.clear();
+        }
+        self.round = round;
         self.me = me;
         self.score = score;
         self.echo_time = echo_time;
@@ -878,4 +893,38 @@ impl RemoteWorld {
             self.kill_feed.pop_back();
         }
     }
+}
+
+/// Раунд в снимке: номер, фаза, победитель, время фазы и удержание (в десятых секунды).
+fn write_round(w: &mut BitWriter, round: &Round) {
+    w.write_var(round.number);
+    match round.phase {
+        Phase::Playing => w.write_bool(false),
+        Phase::Over { winner, reason } => {
+            w.write_bool(true);
+            w.write_bits(winner.map_or(0, |t| t as u32 + 1), 2);
+            w.write_bool(reason == EndReason::TimeUp);
+        }
+    }
+    let tenths = |s: f32| (s.max(0.0) * 10.0) as u32;
+    w.write_var(tenths(round.time));
+    w.write_var(tenths(round.hold[0]));
+    w.write_var(tenths(round.hold[1]));
+}
+
+fn read_round(r: &mut BitReader) -> Result<Round, Truncated> {
+    let number = r.read_var()?;
+    let phase = if r.read_bool()? {
+        let winner = match r.read_bits(2)? {
+            0 => None,
+            t => Some((t - 1) as u8),
+        };
+        let reason = if r.read_bool()? { EndReason::TimeUp } else { EndReason::AllPoints };
+        Phase::Over { winner, reason }
+    } else {
+        Phase::Playing
+    };
+    let time = r.read_var()? as f32 / 10.0;
+    let hold = [r.read_var()? as f32 / 10.0, r.read_var()? as f32 / 10.0];
+    Ok(Round { number, phase, time, hold })
 }

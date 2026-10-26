@@ -4,6 +4,7 @@
 //! что хочется поменять.
 
 use crate::arsenal::{Arsenal, WeaponSpec};
+use crate::round::RoundSpec;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -28,6 +29,8 @@ pub struct SimConfig {
     pub weapon: WeaponSpec,
     pub grenade: GrenadeSpec,
     pub capture: CaptureSpec,
+    /// Правила раунда: сколько держать точки, длина раунда, перерыв.
+    pub round: RoundSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -80,7 +83,7 @@ pub struct CaptureSpec {
 impl SimConfig {
     /// Читает `sim.ron`, а оружие и классы — из `weapons.ron` и `factions.ron` рядом.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let text = read_text(path)?;
         let mut config: SimConfig = ron::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
         let dir = path.parent().unwrap_or(Path::new("."));
         config.arsenal = if Arsenal::exists(dir) { Arsenal::load(dir)? } else { Arsenal::single(config.weapon.clone()) };
@@ -90,6 +93,14 @@ impl SimConfig {
     pub fn dt(&self) -> f32 {
         1.0 / self.tick_rate.max(1) as f32
     }
+}
+
+/// Текст файла данных. Блокнот Windows (и PowerShell) ставят в начало невидимую
+/// метку BOM — без её удаления файл не разбирается, и игра молча берёт настройки
+/// по умолчанию.
+pub fn read_text(path: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(text.strip_prefix('\u{feff}').map(str::to_owned).unwrap_or(text))
 }
 
 impl Default for SimConfig {
@@ -105,6 +116,7 @@ impl Default for SimConfig {
             weapon: WeaponSpec::default(),
             grenade: GrenadeSpec::default(),
             capture: CaptureSpec::default(),
+            round: RoundSpec::default(),
             arsenal: Arsenal::default(),
         }
     }
@@ -143,5 +155,22 @@ impl Default for GrenadeSpec {
 impl Default for CaptureSpec {
     fn default() -> Self {
         CaptureSpec { radius: 10.0, time: 12.0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_with_bom_is_read() {
+        let dir = std::env::temp_dir().join(format!("wind_sim_bom_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sim.ron");
+        std::fs::write(&path, "\u{feff}(tick_rate: 30, round: (time_limit: 20.0))").unwrap();
+        let c = SimConfig::load(&path).unwrap();
+        assert_eq!(c.tick_rate, 30);
+        assert_eq!(c.round.time_limit, 20.0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

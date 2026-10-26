@@ -10,6 +10,7 @@ pub mod mapfile;
 pub mod mapgen;
 pub mod nav;
 pub mod rng;
+pub mod round;
 pub mod world;
 
 mod ai;

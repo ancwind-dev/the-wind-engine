@@ -47,6 +47,7 @@ impl Link {
                 aim: me + Vec2::new(10.0, 0.0),
                 fire: true,
                 grenade: false,
+                spawn: 0,
                 pos: None,
             },
         );
@@ -170,3 +171,35 @@ fn file_map_is_loaded_and_checked() {
     assert!(missing.contains("нет карты"), "{missing}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn round_state_and_restored_map_reach_client() {
+    let config = ReplicationConfig { packet_budget: 64 * 1024, ..Default::default() };
+    let mut link = Link::new(30, config);
+    link.world.config.round.time_limit = 2.0;
+    link.world.config.round.intermission = 1.0;
+    // Ломаем стены в первом раунде.
+    let walls: Vec<Vec2> = (0..link.world.map.solid.len())
+        .filter(|&i| link.world.map.solid[i] != 0 && link.world.map.solid[i] != wind_sim::map::INDESTRUCTIBLE)
+        .step_by(50)
+        .take(8)
+        .map(|i| Vec2::new((i as u32 % link.world.map.width) as f32 + 0.5, (i as u32 / link.world.map.width) as f32 + 0.5))
+        .collect();
+    for at in walls {
+        link.world.map.damage_circle(at, 3.0, 250.0);
+    }
+    // Раунд — 2 с (40 тиков): через 45 тиков идут итоги.
+    for _ in 0..45 {
+        link.tick(0.0);
+    }
+    assert!(!link.client.round.playing(), "у клиента должны быть итоги раунда");
+    assert_eq!(link.client.round.phase, link.world.round.phase);
+    // Перерыв (1 с) кончился — новый раунд, стены целые и у сервера, и у клиента.
+    for _ in 0..30 {
+        link.tick(0.0);
+    }
+    assert_eq!(link.client.round.number, 2);
+    assert!(link.client.round.playing());
+    assert!(link.client.map.solid == link.world.map.solid, "клиент должен получить восстановленные стены");
+}
+

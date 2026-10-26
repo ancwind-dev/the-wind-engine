@@ -8,7 +8,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -149,6 +149,7 @@ impl InputPacket {
         write_pos(&mut w, self.input.aim);
         w.write_bool(self.input.fire);
         w.write_bool(self.input.grenade);
+        w.write_bits(self.input.spawn as u32, 5);
         w.write_bool(self.input.pos.is_some());
         if let Some(p) = self.input.pos {
             write_pos(&mut w, p);
@@ -166,12 +167,13 @@ impl InputPacket {
         let aim = read_pos(&mut r)?;
         let fire = r.read_bool()?;
         let grenade = r.read_bool()?;
+        let spawn = r.read_bits(5)? as u8;
         let pos = if r.read_bool()? { Some(read_pos(&mut r)?) } else { None };
         Ok(InputPacket {
             seq,
             ack_tick,
             time_ms,
-            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, pos },
+            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, spawn, pos },
         })
     }
 }
@@ -202,6 +204,10 @@ pub struct Welcome {
     /// Отпечаток оружия и классов (`Arsenal::fingerprint`): у клиента должны быть
     /// те же `weapons.ron` и `factions.ron`, что и на сервере.
     pub arsenal_fingerprint: u64,
+    /// Правила раунда: сколько держать все точки, длина раунда и перерыва, с.
+    pub hold_time: f32,
+    pub time_limit: f32,
+    pub intermission: f32,
     /// Карта из файла: имя папки в `data/maps` и отпечаток. Пустое имя — карта из seed.
     pub map_name: String,
     pub map_fingerprint: u64,
@@ -224,6 +230,9 @@ impl Welcome {
             self.interest_radius,
             self.grenade_speed,
             self.soldier_speed,
+            self.hold_time,
+            self.time_limit,
+            self.intermission,
         ] {
             w.write_f32(v);
         }
@@ -249,6 +258,9 @@ impl Welcome {
             interest_radius: r.read_f32()?,
             grenade_speed: r.read_f32()?,
             soldier_speed: r.read_f32()?,
+            hold_time: r.read_f32()?,
+            time_limit: r.read_f32()?,
+            intermission: r.read_f32()?,
             arsenal_fingerprint: r.read_u64()?,
             map_name: r.read_str(128)?,
             map_fingerprint: r.read_u64()?,
@@ -281,6 +293,7 @@ mod tests {
                 aim: Vec2::new(100.5, 200.25),
                 fire: true,
                 grenade: false,
+                spawn: 3,
                 pos: Some(Vec2::new(12.0, 34.5)),
             },
         };
@@ -294,6 +307,7 @@ mod tests {
         assert!(back.input.fire && !back.input.grenade);
         assert!((back.input.move_dir.x - 1.0).abs() < 0.01);
         assert_eq!(back.input.pos, Some(Vec2::new(12.0, 34.5)));
+        assert_eq!(back.input.spawn, 3);
     }
 
     #[test]

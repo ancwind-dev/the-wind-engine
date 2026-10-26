@@ -44,7 +44,7 @@ impl MapFile {
 
     pub fn load(dir: &Path) -> Result<Self, String> {
         let err = |what: &str, e: &dyn std::fmt::Display| format!("{}: {what}: {e}", dir.display());
-        let text = std::fs::read_to_string(dir.join("map.ron")).map_err(|e| err("map.ron", &e))?;
+        let text = crate::config::read_text(&dir.join("map.ron"))?;
         let meta: Meta = ron::from_str(&text).map_err(|e| err("map.ron", &e))?;
         let (w, h) = (meta.width, meta.height);
         let mut map = Map::new(w, h);

@@ -210,6 +210,9 @@ pub fn welcome_for(world: &World, client_id: u16, soldier: u32, config: &Replica
         grenade_speed: c.grenade.throw_speed,
         soldier_speed: c.soldier.speed,
         arsenal_fingerprint: c.arsenal.fingerprint(),
+        hold_time: c.round.hold_time,
+        time_limit: c.round.time_limit,
+        intermission: c.round.intermission,
         map_name: world.map_file.as_ref().map_or(String::new(), |f| f.0.clone()),
         map_fingerprint: world.map_file.as_ref().map_or(0, |f| f.1),
     }
