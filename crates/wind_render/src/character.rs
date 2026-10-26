@@ -1,29 +1,50 @@
 //! Свои солдаты: модели RWR со скелетом, процедурная поза, оружие, тела.
 //!
-//! Каждая палка скелета — жёсткая часть со своими вокселями. Грани части склеиваются
-//! только по форме, а цвет каждого вокселя лежит в общей 3D-текстуре (атласе):
-//! у камуфляжа почти каждый воксель своего цвета, и склейка по цвету не помогла бы.
+//! Каждая палка скелета — жёсткая часть со своими вокселями. Как у RWR, солдат
+//! рисуется облаком точек: каждый воксель — квадратик постоянного размера на экране
+//! (см. заметку «Как устроена картинка RWR»). Грани, склеенные по форме, остались только
+//! для теней.
 
 use crate::rwr::{self, RwrModel, VOXEL};
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Mat3, Mat4, Vec3};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Вершина части солдата: позиция (м, относительно точки крепления), нормаль
-/// и координата угла вокселя в атласе — по ней шейдер берёт цвет.
+/// Вершина меша для теней: позиция, м, относительно точки крепления.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CharVertex {
     pub pos: [f32; 3],
-    pub normal: [i8; 4],
-    pub atlas: [u16; 4],
+}
+
+/// Угол точки-вокселя: центр вокселя (м, относительно точки крепления), цвет sRGB
+/// и в `color[3]` — номер угла квадратика 0..3 и уровень детализации (биты 2..3).
+/// На каждый воксель — 4 вершины.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct PointVertex {
+    pub pos: [f32; 3],
+    pub color: [u8; 4],
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct CharMesh {
+    /// Грани для теней.
     pub vertices: Vec<CharVertex>,
+    pub indices: Vec<u32>,
+    /// Точки для картинки, по уровням детализации: на уровне n воксели объединены
+    /// кубиками 2ⁿ×2ⁿ×2ⁿ. По 4 вершины и 6 индексов на точку.
+    pub lods: [PointMesh; LODS],
+}
+
+/// Сколько уровней детализации у точек солдата.
+pub const LODS: usize = 3;
+
+#[derive(Clone, Debug, Default)]
+pub struct PointMesh {
+    pub points: Vec<PointVertex>,
     pub indices: Vec<u32>,
 }
 
@@ -85,12 +106,9 @@ fn one() -> u32 {
     1
 }
 
-/// Всё про своих солдат: меши, атлас цветов, модели, кто в какой команде.
+/// Всё про своих солдат: меши, модели, кто в какой команде.
 pub struct CharacterSet {
     pub meshes: Vec<CharMesh>,
-    /// Атлас цветов: размер и RGBA по вокселям (x быстрее всего, потом y, потом z).
-    pub atlas_size: [u32; 3],
-    pub atlas: Vec<u8>,
     pub models: Vec<CharModel>,
     pub weapons: Vec<WeaponModel>,
     /// Для каждой команды: (модель, оружие, вес).
@@ -143,11 +161,8 @@ impl CharacterSet {
                 teams[team].push((model, weapon, s.weight.max(1)));
             }
         }
-        let (atlas_size, atlas) = builder.finish_atlas();
         Ok(CharacterSet {
             meshes: builder.meshes,
-            atlas_size,
-            atlas,
             models,
             weapons,
             teams,
@@ -298,25 +313,12 @@ fn stick_frame(d: Vec3) -> Mat3 {
     Mat3::from_cols(d, up, side)
 }
 
-// --- Сборка мешей и атласа ---------------------------------------------------------
-
-/// Кусок атласа: размер и цвета.
-struct Block {
-    size: IVec3,
-    colors: Vec<[u8; 4]>,
-}
+// --- Сборка мешей ------------------------------------------------------------------
 
 #[derive(Default)]
 struct Builder {
     meshes: Vec<CharMesh>,
-    blocks: Vec<(Block, IVec3)>,
-    cursor: IVec3,
-    row_depth: i32,
-    atlas_extent: IVec3,
 }
-
-/// Атлас не шире этого по X (ограничение 3D-текстур в wgpu по умолчанию — 2048).
-const ATLAS_WIDTH: i32 = 2048;
 
 impl Builder {
     fn character(&mut self, name: &str, m: &RwrModel) -> CharModel {
@@ -356,70 +358,55 @@ impl Builder {
         self.mesh(&m.voxels, Vec3::ZERO, None)
     }
 
-    /// Меш из вокселей: грани склеиваются по форме, цвета уходят в атлас.
+    /// Меш из вокселей: грани для теней склеиваются по форме, а каждый видимый
+    /// воксель становится точкой со своим цветом.
     fn mesh(&mut self, voxels: &[(IVec3, [u8; 4])], origin: Vec3, whole: Option<&HashSet<IVec3>>) -> usize {
         let min = voxels.iter().fold(IVec3::MAX, |a, v| a.min(v.0));
         let max = voxels.iter().fold(IVec3::MIN, |a, v| a.max(v.0));
         let size = max - min + IVec3::ONE;
-        let mut colors = vec![[0u8; 4]; (size.x * size.y * size.z) as usize];
+        let mut filled_cells = vec![false; (size.x * size.y * size.z) as usize];
         let idx = |p: IVec3| ((p.z * size.y + p.y) * size.x + p.x) as usize;
-        for &(c, rgba) in voxels {
-            colors[idx(c - min)] = [rgba[0], rgba[1], rgba[2], 255];
+        for &(c, _) in voxels {
+            filled_cells[idx(c - min)] = true;
         }
-        let place = self.place(size);
-        let filled = |p: IVec3| {
-            p.cmpge(IVec3::ZERO).all() && p.cmplt(size).all() && colors[idx(p)][3] != 0
-        };
-        let mut mesh = CharMesh::default();
+        let filled = |p: IVec3| p.cmpge(IVec3::ZERO).all() && p.cmplt(size).all() && filled_cells[idx(p)];
         let solid = |p: IVec3| filled(p) || whole.is_some_and(|w| w.contains(&(p + min)));
-        for (corners, normal) in greedy_shape(size, filled, solid) {
+        let mut mesh = CharMesh::default();
+        for (corners, _) in greedy_shape(size, filled, solid) {
             let base = mesh.vertices.len() as u32;
             for c in corners {
-                let world = (c + min).as_vec3();
-                let a = c + place;
-                mesh.vertices.push(CharVertex {
-                    pos: ((world - origin) * VOXEL).to_array(),
-                    normal: [normal[0], normal[1], normal[2], 0],
-                    atlas: [a.x as u16, a.y as u16, a.z as u16, 0],
-                });
+                mesh.vertices.push(CharVertex { pos: (((c + min).as_vec3() - origin) * VOXEL).to_array() });
             }
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        self.blocks.push((Block { size, colors }, place));
-        self.meshes.push(mesh);
-        self.meshes.len() - 1
-    }
-
-    /// Место для блока в атласе: ряды вдоль X, с зазором в 1 воксель.
-    fn place(&mut self, size: IVec3) -> IVec3 {
-        if self.cursor.x + size.x > ATLAS_WIDTH {
-            self.cursor = IVec3::new(0, 0, self.cursor.z + self.row_depth + 1);
-            self.row_depth = 0;
-        }
-        let at = self.cursor;
-        self.cursor.x += size.x + 1;
-        self.row_depth = self.row_depth.max(size.z);
-        self.atlas_extent = self.atlas_extent.max(at + size);
-        at
-    }
-
-    fn finish_atlas(&self) -> ([u32; 3], Vec<u8>) {
-        let e = self.atlas_extent.max(IVec3::ONE);
-        let mut data = vec![0u8; (e.x * e.y * e.z * 4) as usize];
-        for (block, at) in &self.blocks {
-            let s = block.size;
-            for z in 0..s.z {
-                for y in 0..s.y {
-                    for x in 0..s.x {
-                        let src = block.colors[((z * s.y + y) * s.x + x) as usize];
-                        let p = *at + IVec3::new(x, y, z);
-                        let dst = (((p.z * e.y + p.y) * e.x + p.x) * 4) as usize;
-                        data[dst..dst + 4].copy_from_slice(&src);
-                    }
+        const SIDES: [IVec3; 6] = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        // Воксель, со всех сторон закрытый другими, не виден.
+        let visible: Vec<_> = voxels.iter().filter(|(c, _)| !SIDES.iter().all(|&d| solid(*c - min + d))).collect();
+        for (lod, out) in mesh.lods.iter_mut().enumerate() {
+            // Кубик k×k×k: цвет — средний, точка — в центре кубика.
+            let k = 1 << lod;
+            let mut cells: HashMap<IVec3, ([u32; 3], u32)> = HashMap::new();
+            for &&(c, rgba) in &visible {
+                let e = cells.entry(c.div_euclid(IVec3::splat(k))).or_default();
+                for (sum, c) in e.0.iter_mut().zip(rgba) {
+                    *sum += c as u32;
                 }
+                e.1 += 1;
+            }
+            let mut cells: Vec<_> = cells.into_iter().collect();
+            cells.sort_by_key(|(c, _)| (c.z, c.y, c.x));
+            for (cell, (sum, n)) in cells {
+                let center = (((cell * k).as_vec3() + Vec3::splat(k as f32 * 0.5) - origin) * VOXEL).to_array();
+                let [r, g, b] = sum.map(|v| (v / n) as u8);
+                let base = out.points.len() as u32;
+                for corner in 0..4 {
+                    out.points.push(PointVertex { pos: center, color: [r, g, b, corner | (lod as u8) << 2] });
+                }
+                out.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             }
         }
-        ([e.x as u32, e.y as u32, e.z as u32], data)
+        self.meshes.push(mesh);
+        self.meshes.len() - 1
     }
 }
 
@@ -513,10 +500,13 @@ mod tests {
         let m = &set.models[0];
         assert_eq!(m.parts.len(), 17);
         let quads: usize = m.parts.iter().map(|p| set.meshes[p.mesh].indices.len() / 6).sum();
+        let points = |lod: usize| -> usize { m.parts.iter().map(|p| set.meshes[p.mesh].lods[lod].points.len() / 4).sum() };
         // Склейка по форме: сотни граней, а не тысячи.
         assert!(quads < 3500, "граней у солдата: {quads}");
-        println!("граней у солдата: {quads}");
-        assert!(set.atlas_size.iter().all(|&s| s <= 2048));
+        assert!(points(0) > 500 && points(0) < 4000, "точек у солдата: {}", points(0));
+        // Каждый следующий уровень детализации заметно легче.
+        assert!(points(1) * 2 < points(0) && points(2) * 2 < points(1));
+        println!("граней у солдата: {quads}, точек: {} / {} / {}", points(0), points(1), points(2));
         assert!(set.pick(0, 5).is_some() && set.pick(1, 5).is_some());
     }
 

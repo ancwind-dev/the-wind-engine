@@ -2,7 +2,7 @@
 //! Источник данных (локальная симуляция или сеть) не важен — на входе простые списки.
 
 use crate::camera::{Camera, to_3d};
-use crate::character::{CharacterSet, Motion};
+use crate::character::{CharacterSet, LODS, Motion};
 use crate::decals::Decals;
 use wind_sim::atmosphere::Atmosphere;
 use crate::mapmesh::MapMesher;
@@ -146,8 +146,28 @@ impl SceneBuilder {
         // --- Экземпляры, по мешам.
         let mut by_mesh: [Vec<Instance>; crate::models::MESH_COUNT] = Default::default();
         let characters = self.characters.clone();
-        let mut by_char: Vec<Vec<Instance>> = vec![Vec::new(); characters.as_ref().map_or(0, |c| c.meshes.len())];
-        let plain = |m: Mat4| Instance { model: m.to_cols_array_2d(), tint: [1.0, 1.0, 1.0, 0.0] };
+        // По мешу и уровню детализации: индекс = меш × LODS + уровень.
+        let mut by_char: Vec<Vec<Instance>> = vec![Vec::new(); characters.as_ref().map_or(0, |c| c.meshes.len() * LODS)];
+        let eye = cam.eye();
+        // Уровень детализации — по тому, сколько пикселей занимает воксель при 1080p:
+        // точка всё равно не меньше 2,6 пикселя, и мелкие воксели вдали сливаются.
+        let focal_1080 = 1080.0 / (2.0 * (cam.fov_y * 0.5).tan());
+        let lod_at = |p: Vec3| {
+            let voxel_px = crate::rwr::VOXEL * focal_1080 / p.distance(eye).max(0.1);
+            if voxel_px > 0.6 {
+                0
+            } else if voxel_px > 0.3 {
+                1
+            } else {
+                2
+            }
+        };
+        // У солдат и оружия tint — цвет команды (для силуэта сквозь стены), a: 1 — оружие.
+        let team_colors = self.team_colors;
+        let char_instance = |m: Mat4, team: u8, weapon: bool| {
+            let c = team_colors[team as usize & 1];
+            Instance { model: m.to_cols_array_2d(), tint: [c[0], c[1], c[2], if weapon { 1.0 } else { 0.0 }] }
+        };
         let v = SOLDIER_VOXEL;
         for s in input.soldiers {
             let speed = self.animate(s, input.dt);
@@ -161,10 +181,12 @@ impl SceneBuilder {
             {
                 let model = &set.models[model];
                 let pose = model.pose(Motion { speed, phase: a.phase * 2.0 });
-                let root = Mat4::from_translation(to_3d(s.pos, input.map.height_at(s.pos))) * Mat4::from_rotation_y(-s.facing);
-                model.parts(&pose, &mut |mesh, m| by_char[mesh].push(plain(root * m)));
+                let at = to_3d(s.pos, input.map.height_at(s.pos));
+                let lod = lod_at(at);
+                let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-s.facing);
+                model.parts(&pose, &mut |mesh, m| by_char[mesh * LODS + lod].push(char_instance(root * m, s.team, false)));
                 if let Some(grip) = model.weapon_frame(&pose) {
-                    by_char[set.weapons[weapon].mesh].push(plain(root * grip));
+                    by_char[set.weapons[weapon].mesh * LODS + lod].push(char_instance(root * grip, s.team, true));
                 }
                 continue;
             }
@@ -226,8 +248,10 @@ impl SceneBuilder {
                 let model = &set.models[model];
                 let forward = c.id.wrapping_mul(0x9E37_79B9) >> 31 == 1;
                 let pose = model.corpse(c.age, forward);
-                let root = Mat4::from_translation(to_3d(c.pos, input.map.height_at(c.pos))) * Mat4::from_rotation_y(-c.facing);
-                model.parts(&pose, &mut |mesh, m| by_char[mesh].push(plain(root * m)));
+                let at = to_3d(c.pos, input.map.height_at(c.pos));
+                let lod = lod_at(at);
+                let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-c.facing);
+                model.parts(&pose, &mut |mesh, m| by_char[mesh * LODS + lod].push(char_instance(root * m, c.team, false)));
             }
         }
 
@@ -240,7 +264,7 @@ impl SceneBuilder {
         let mut char_batches = Vec::new();
         for (mesh, list) in by_char.iter().enumerate() {
             if !list.is_empty() {
-                char_batches.push((mesh, instances.len() as u32, list.len() as u32));
+                char_batches.push((mesh / LODS, mesh % LODS, instances.len() as u32, list.len() as u32));
                 instances.extend_from_slice(list);
             }
         }
