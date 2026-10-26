@@ -11,6 +11,9 @@ use wind_sim::PlayerInput;
 use wind_sim::rng::Rng;
 
 const HELLO_INTERVAL: Duration = Duration::from_millis(250);
+/// Ввод шлём не чаще 60 раз в секунду: чаще серверу (20 тиков) не нужно,
+/// а при 1000 кадрах в секунду это лишние 5 КБ/с от каждого игрока.
+const INPUT_INTERVAL: Duration = Duration::from_micros(16_600);
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,6 +43,7 @@ pub struct NetClient {
     started: Instant,
     last_hello: Option<Instant>,
     last_heard: Instant,
+    last_input: Option<Instant>,
     seq: u32,
     rng: Rng,
     buf: Vec<u8>,
@@ -70,6 +74,7 @@ impl NetClient {
             started: Instant::now(),
             last_hello: None,
             last_heard: Instant::now(),
+            last_input: None,
             seq: 0,
             rng: Rng::new(seed),
             buf: vec![0; protocol::MAX_PACKET],
@@ -162,12 +167,13 @@ impl NetClient {
         }
     }
 
-    /// Шлёт ввод вместе с подтверждением последнего снимка.
+    /// Шлёт ввод вместе с подтверждением последнего снимка (не чаще 60 раз в секунду).
     pub fn send_input(&mut self, input: PlayerInput) {
         let Some(world) = &self.world else { return };
-        if self.status != ClientStatus::Connected {
+        if self.status != ClientStatus::Connected || self.last_input.is_some_and(|t| t.elapsed() < INPUT_INTERVAL) {
             return;
         }
+        self.last_input = Some(Instant::now());
         self.seq += 1;
         let packet = InputPacket {
             seq: self.seq,

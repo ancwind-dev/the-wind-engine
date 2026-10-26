@@ -17,6 +17,6 @@ mod combat;
 pub use config::SimConfig;
 pub use glam::Vec2;
 pub use world::{
-    CapturePoint, Controller, Event, PlayerInput, Projectile, ProjectileKind, Soldier, TickStats,
-    World,
+    CLAIM_CATCH_UP, CLAIM_MAX_GAP, CapturePoint, Controller, Event, PlayerInput, Projectile, ProjectileKind,
+    Soldier, TickStats, World, walk,
 };

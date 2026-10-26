@@ -3,12 +3,14 @@
 
 pub mod bits;
 pub mod client;
+pub mod pilot;
 pub mod protocol;
 pub mod replication;
 pub mod server;
 pub mod traffic;
 
 pub use client::{ClientStatus, NetClient};
+pub use pilot::Pilot;
 pub use protocol::DEFAULT_PORT;
 pub use replication::{RemoteSoldier, RemoteWorld, ReplicationConfig};
 pub use server::NetServer;

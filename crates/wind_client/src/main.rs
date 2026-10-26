@@ -14,7 +14,7 @@ use source::{Local, Source};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-use wind_net::NetClient;
+use wind_net::{NetClient, Pilot};
 use wind_render::{Camera, DrawInput, SceneBuilder, WorldPaint};
 use wind_sim::mapfile::MapFile;
 use wind_sim::{PlayerInput, SimConfig, Vec2, World};
@@ -160,6 +160,11 @@ struct Game {
     bench: Option<Bench>,
     /// За кем следит камера в режиме наблюдателя.
     follow: u32,
+    /// Свой солдат на клиенте: двигается сразу, без ожидания сервера.
+    pilot: Pilot,
+    /// Отдача: 0 — спокойно, 1 — сильно. Растёт с каждым своим выстрелом и спадает.
+    kick: f32,
+    shots_seen: u32,
     notes: Vec<String>,
     render_state: Option<egui_wgpu::RenderState>,
 }
@@ -238,6 +243,9 @@ impl Game {
             aim: Vec2::ZERO,
             bench,
             follow: args.follow,
+            pilot: Pilot::default(),
+            kick: 0.0,
+            shots_seen: 0,
             notes,
             render_state,
         }
@@ -268,6 +276,8 @@ impl Game {
                 aim: self.aim,
                 fire: i.pointer.primary_down(),
                 grenade: i.key_down(egui::Key::G),
+                // Заполняет пилот своего солдата.
+                pos: None,
             }
         })
     }
@@ -330,9 +340,35 @@ impl eframe::App for Game {
                 }
             });
 
-            let input = if self.bench.is_some() { PlayerInput::default() } else { self.read_input(&ctx, mouse_world) };
+            let mut input = if self.bench.is_some() { PlayerInput::default() } else { self.read_input(&ctx, mouse_world) };
+            // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
+            if self.bench.is_none() {
+                let (speed, radius, _) = self.source.soldier_spec();
+                let server = self.source.own_server_pos();
+                if let Some(map) = self.source.map() {
+                    input.pos = self.pilot.update(map, server, input.move_dir, speed, radius, dt);
+                }
+                self.source.set_own_pos(input.pos);
+            }
             self.source.update(dt, input);
-            let view = self.source.view();
+            let mut view = self.source.view();
+            if let (Some(p), Some(id)) = (self.pilot.pos(), self.source.own_id()) {
+                view.me_pos = Some(p);
+                let look = self.aim - p;
+                for s in view.soldiers.iter_mut().filter(|s| s.id == id) {
+                    s.pos = p;
+                    if look != Vec2::ZERO {
+                        s.facing = look.y.atan2(look.x);
+                    }
+                }
+            }
+            // Отдача: каждый свой выстрел толкает прицел и камеру, потом всё успокаивается.
+            let shots = self.source.own_shots();
+            if shots > self.shots_seen {
+                self.kick = (self.kick + 0.3 * (shots - self.shots_seen) as f32).min(1.0);
+            }
+            self.shots_seen = shots;
+            self.kick *= (-dt * 7.0).exp();
 
             // Камера плавно идёт за своим солдатом, а у наблюдателя — за выбранным (Tab — следующий).
             if self.bench.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
@@ -348,8 +384,17 @@ impl eframe::App for Game {
                 Some(s.pos)
             });
             if let Some(me) = focus {
+                // Своего солдата камера чуть выносит к прицелу — видно, куда стреляешь.
+                let ahead = if view.me_pos.is_some() {
+                    (self.aim - me).clamp_length_max(self.camera.distance * 0.6) * 0.3
+                } else {
+                    Vec2::ZERO
+                };
                 let k = 1.0 - (-dt * 8.0).exp();
-                self.camera.target += (me - self.camera.target) * k;
+                self.camera.target += (me + ahead - self.camera.target) * k;
+                // Отдача чуть вздрагивает камерой.
+                let t = self.started.elapsed().as_secs_f32();
+                self.camera.target += Vec2::new((t * 91.0).sin(), (t * 73.0).cos()) * self.kick * 0.06;
                 if let Some(map) = self.source.map() {
                     let h = map.height_at(self.camera.target);
                     self.camera.target_height += (h - self.camera.target_height) * k;
@@ -401,7 +446,9 @@ impl eframe::App for Game {
             if self.bench.is_none()
                 && let Some(p) = ctx.input(|i| i.pointer.hover_pos())
             {
-                hud::crosshair(&painter, p);
+                let gap = self.spread_px(&view, rect, aspect);
+                let time = self.started.elapsed().as_secs_f32();
+                hud::crosshair(&painter, p, gap, view.me.alive && view.me.reloading, time);
             }
             let stats = self.render_state.as_ref().map(wind_render::stats).unwrap_or_default();
             hud::perf(&painter, rect, &self.fps_line(), self.debug.then(|| self.debug_lines(&stats, &view)));
@@ -413,6 +460,22 @@ impl eframe::App for Game {
 }
 
 impl Game {
+    /// Разброс оружия на расстоянии до прицела — в пикселях экрана, с отдачей.
+    fn spread_px(&self, view: &source::View, rect: egui::Rect, aspect: f32) -> f32 {
+        let (_, _, spread_deg) = self.source.soldier_spec();
+        let (Some(me), Some(map)) = (view.me_pos, self.source.map()) else { return 4.0 };
+        let to = self.aim - me;
+        let half = to.length() * (spread_deg.to_radians() * 0.5).tan();
+        let side = to.normalize_or_zero().perp() * half;
+        let vp = self.camera.view_proj(aspect);
+        let screen = |p: Vec2| {
+            let s = vp.project_point3(wind_render::camera::to_3d(p, map.height_at(p)));
+            Vec2::new(s.x * rect.width() * 0.5, s.y * rect.height() * 0.5)
+        };
+        let px = screen(self.aim).distance(screen(self.aim + side));
+        px.clamp(3.0, 120.0) + self.kick * 10.0
+    }
+
     fn fps_line(&self) -> String {
         format!("{:.0} FPS · худший кадр {:.1} мс · F3 — отладка", self.fps.fps, self.fps.worst_ms)
     }
@@ -423,6 +486,7 @@ impl Game {
             format!("Экземпляров: {}, вызовов отрисовки: {}", stats.instances, stats.draw_calls),
             format!("Чанков карты: {} рисуется из {}", stats.chunks_drawn, stats.chunks),
             format!("Камера: {:.0} м", self.camera.distance),
+            format!("Свой солдат: возвратов на место сервера {}", self.pilot.snaps),
         ];
         match &self.source {
             Source::Local(l) => {
