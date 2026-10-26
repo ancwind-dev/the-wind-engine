@@ -5,6 +5,7 @@ use std::time::Instant;
 use wind_net::{ClientStatus, NetClient};
 use wind_render::{CorpseDraw, PointDraw, SoldierDraw};
 use wind_sim::arsenal::WeaponSpec;
+use wind_sim::round::Round;
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::map::Map;
 use wind_sim::{Controller, Event, PlayerInput, ProjectileKind, Vec2, World};
@@ -24,6 +25,19 @@ pub struct Me {
     pub kills: u32,
 }
 
+/// Раунд для HUD: идёт ли бой, кто победил, сколько времени, кто держит точки.
+#[derive(Clone, Default)]
+pub struct RoundView {
+    pub round: Round,
+    /// Правила: сколько держать все точки, длина раунда, перерыв, с.
+    pub hold_time: f32,
+    pub time_limit: f32,
+    pub intermission: f32,
+    pub team_names: [String; 2],
+    /// Наша команда (`None` — наблюдаем).
+    pub own_team: Option<u8>,
+}
+
 /// Кадр мира в простых списках.
 #[derive(Default)]
 pub struct View {
@@ -40,6 +54,7 @@ pub struct View {
     pub corpses: Vec<CorpseDraw>,
     /// Есть свой солдат (иначе мы наблюдатель).
     pub has_me: bool,
+    pub round: RoundView,
 }
 
 pub enum Source {
@@ -83,10 +98,12 @@ impl Source {
         }
     }
 
+    /// Номер раунда тоже входит в ключ: в новом раунде следы боя, обломки и руины
+    /// прошлого убираются.
     pub fn map_key(&self) -> u64 {
         match self {
-            Source::Local(l) => l.world.seed.wrapping_mul(2) + 1,
-            Source::Remote(c) => c.world.as_ref().map_or(0, |w| w.welcome.seed.wrapping_mul(2) + 2),
+            Source::Local(l) => (l.world.seed.wrapping_mul(2) + 1) ^ ((l.world.round.number as u64) << 40),
+            Source::Remote(c) => c.world.as_ref().map_or(0, |w| (w.welcome.seed.wrapping_mul(2) + 2) ^ ((w.round.number as u64) << 40)),
         }
     }
 
@@ -138,6 +155,14 @@ impl Source {
                 }
                 client.send_input(input);
             }
+        }
+    }
+
+    /// Идёт ли бой (а не перерыв между раундами).
+    pub fn round_playing(&self) -> bool {
+        match self {
+            Source::Local(l) => l.world.round.playing(),
+            Source::Remote(c) => c.world.as_ref().is_none_or(|w| w.round.playing()),
         }
     }
 
@@ -255,6 +280,15 @@ fn local_view(l: &Local) -> View {
         };
     }
     v.kill_feed = l.feed.iter().map(|f| (f.0.clone(), f.1)).collect();
+    let spec = &w.config.round;
+    v.round = RoundView {
+        round: w.round.clone(),
+        hold_time: spec.hold_time,
+        time_limit: spec.time_limit,
+        intermission: spec.intermission,
+        team_names: w.config.arsenal.team_names.clone(),
+        own_team: l.me.map(|i| w.soldiers[i as usize].team),
+    };
     let respawn = w.config.soldier.respawn_time;
     v.corpses = w
         .soldiers
@@ -304,6 +338,14 @@ fn remote_view(c: &NetClient) -> View {
         },
         score: w.score,
         kill_feed: w.kill_feed.iter().map(|k| (format!("{} → {}", name(k.killer), name(k.victim)), k.killer_team)).collect(),
+        round: RoundView {
+            round: w.round.clone(),
+            hold_time: w.welcome.hold_time,
+            time_limit: w.welcome.time_limit,
+            intermission: w.welcome.intermission,
+            team_names: w.arsenal.team_names.clone(),
+            own_team: Some(w.welcome.team),
+        },
         corpses: w
             .corpses
             .iter()

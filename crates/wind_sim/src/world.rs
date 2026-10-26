@@ -9,6 +9,7 @@ use crate::mapfile::MapFile;
 use crate::mapgen::{self, Layout};
 use crate::nav::FlowField;
 use crate::rng::Rng;
+use crate::round::{EndReason, Phase, Round};
 use crate::{ai, combat};
 use glam::Vec2;
 use rayon::prelude::*;
@@ -29,6 +30,9 @@ pub struct PlayerInput {
     pub aim: Vec2,
     pub fire: bool,
     pub grenade: bool,
+    /// Где появиться после смерти: 0 — на базе, 1 + i — на точке i, если она наша
+    /// (иначе на базе).
+    pub spawn: u8,
     /// Где своего солдата видит клиент. Клиент двигает его сам, без задержки на пинг,
     /// а сервер подтягивает солдата туда, но не быстрее `CLAIM_CATCH_UP` скоростей
     /// и не сквозь стены. `None` — двигать по `move_dir`, как раньше (боты, лаборатория).
@@ -136,6 +140,10 @@ pub enum Event {
     Kill { killer: u32, victim: u32 },
     Explosion { pos: Vec2, radius: f32 },
     PointCaptured { point: u32, team: u8 },
+    /// Раунд кончился: победитель (`None` — ничья).
+    RoundOver { winner: Option<u8> },
+    /// Начался новый раунд: карта, точки и счёт — как в начале.
+    RoundStarted { number: u32 },
     /// Выстрел. Пули по сети не передаём — клиенту хватает этого события.
     Shot { shooter: u32, angle: f32 },
     GrenadeThrown { shooter: u32, from: Vec2, to: Vec2, fuse: f32 },
@@ -179,6 +187,10 @@ pub struct World {
     pub map_file: Option<(String, u64)>,
     /// Атмосфера карты — только для картинки.
     pub atmosphere: Atmosphere,
+    /// Раунд: идёт бой или перерыв, сколько времени, кто держит все точки.
+    pub round: Round,
+    /// Карта в начале — новый раунд начинается с целыми стенами.
+    initial_map: Map,
     pub(crate) grid: SpatialGrid,
 }
 
@@ -219,6 +231,8 @@ impl World {
             tick: 0,
             map_file: None,
             atmosphere: Atmosphere::default(),
+            round: Round::default(),
+            initial_map: map.clone(),
             map,
             bases,
             points,
@@ -256,6 +270,18 @@ impl World {
         self.events.clear();
         let mut stats = TickStats::default();
 
+        // Перерыв между раундами: бой стоит, ждём начала нового.
+        if !self.round.playing() {
+            self.round.time += self.dt();
+            if self.round.time >= self.config.round.intermission {
+                self.new_round();
+            }
+            self.tick += 1;
+            stats.total_ms = ms(start);
+            self.stats = stats;
+            return;
+        }
+
         let t = Instant::now();
         self.rebuild_grid();
         stats.grid_ms = ms(t);
@@ -283,6 +309,7 @@ impl World {
         let t = Instant::now();
         self.update_capture_points();
         self.respawn();
+        self.update_round();
         stats.capture_ms = ms(t);
 
         for p in &self.projectiles {
@@ -447,6 +474,68 @@ impl World {
         }
     }
 
+    /// Кто держит все точки и не вышло ли время.
+    fn update_round(&mut self) {
+        let dt = self.dt();
+        let spec = &self.config.round;
+        let round = &mut self.round;
+        round.time += dt;
+        let mut owned = [0u32; 2];
+        for p in &self.points {
+            if let Some(t) = p.owner {
+                owned[t as usize] += 1;
+            }
+        }
+        let all = self.points.len() as u32;
+        for (hold, &owned) in round.hold.iter_mut().zip(&owned) {
+            *hold = if all > 0 && owned == all { *hold + dt } else { 0.0 };
+        }
+        let end = if let Some(team) = (0..2).find(|&t| round.hold[t] >= spec.hold_time) {
+            Some((Some(team as u8), EndReason::AllPoints))
+        } else if spec.time_limit > 0.0 && round.time >= spec.time_limit {
+            Some((Round::time_up_winner(owned), EndReason::TimeUp))
+        } else {
+            None
+        };
+        if let Some((winner, reason)) = end {
+            round.phase = Phase::Over { winner, reason };
+            round.time = 0.0;
+            self.projectiles.clear();
+            self.events.push(Event::RoundOver { winner });
+        }
+    }
+
+    /// Новый раунд на той же карте: стены, точки и счёт — как в начале,
+    /// все живы на своих базах.
+    fn new_round(&mut self) {
+        self.round = Round { number: self.round.number + 1, ..Round::default() };
+        // Восстанавливаем только изменившиеся чанки — клиенты получат их, как обычно.
+        for chunk in 0..self.map.chunk_revisions.len() {
+            let cells = self.initial_map.chunk_cells(chunk);
+            if cells != self.map.chunk_cells(chunk) {
+                let revision = self.map.chunk_revisions[chunk] + 1;
+                self.map.set_chunk_cells(chunk, &cells, revision);
+            }
+        }
+        for p in &mut self.points {
+            p.owner = None;
+            p.progress = 0.0;
+        }
+        self.projectiles.clear();
+        self.score = [0; 2];
+        let mut rng = Rng::for_entity(self.seed ^ 0x4E57, self.tick, 0);
+        let per_team = self.soldiers.iter().filter(|s| s.team == 0).count().max(1) as f32;
+        for i in 0..self.soldiers.len() {
+            let s = &self.soldiers[i];
+            let (team, controller, kit) = (s.team, s.controller, s.kit);
+            let pos = self.find_spawn_spot(self.bases[team as usize], per_team.sqrt() * 0.8, &mut rng);
+            let mut fresh = Soldier { controller, ..self.fresh_soldier(team, pos, kit) };
+            fresh.cooldown = rng.range(0.0, 1.0);
+            self.soldiers[i] = fresh;
+        }
+        self.events.push(Event::RoundStarted { number: self.round.number });
+    }
+
     fn respawn(&mut self) {
         let dt = self.dt();
         for i in 0..self.soldiers.len() {
@@ -461,9 +550,19 @@ impl World {
             let team = s.team;
             let mut rng = Rng::for_entity(self.seed ^ 0xBA5E, self.tick, i as u32);
             // Появляемся на базе или на любой своей точке.
-            let mut spots = vec![self.bases[team as usize]];
-            spots.extend(self.points.iter().filter(|p| p.owner == Some(team)).map(|p| p.pos));
-            let spot = spots[rng.below(spots.len() as u32) as usize];
+            let spot = match self.soldiers[i].controller {
+                // Игрок выбирает сам: база или своя точка (чужая — значит, база).
+                Controller::Player(input) => match input.spawn.checked_sub(1).and_then(|p| self.points.get(p as usize)) {
+                    Some(p) if p.owner == Some(team) => p.pos,
+                    _ => self.bases[team as usize],
+                },
+                // ИИ — на базе или на любой своей точке.
+                Controller::Ai => {
+                    let mut spots = vec![self.bases[team as usize]];
+                    spots.extend(self.points.iter().filter(|p| p.owner == Some(team)).map(|p| p.pos));
+                    spots[rng.below(spots.len() as u32) as usize]
+                }
+            };
             let pos = self.find_spawn_spot(spot, 6.0, &mut rng);
             let (controller, kit) = (self.soldiers[i].controller, self.soldiers[i].kit);
             self.soldiers[i] = Soldier { controller, ..self.fresh_soldier(team, pos, kit) };

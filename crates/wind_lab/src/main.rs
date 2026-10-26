@@ -366,7 +366,7 @@ impl Lab {
             (d, !typing && i.key_down(egui::Key::G))
         });
         move_dir = move_dir.normalize_or_zero();
-        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade, pos: None });
+        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade, spawn: 0, pos: None });
     }
 
     /// Раз в полсекунды смотрим, не изменился ли файл с параметрами.
@@ -639,7 +639,17 @@ impl Lab {
 
     fn match_panel(&mut self, ui: &mut egui::Ui) {
         let from_file = self.map_file.as_ref().map(|f| f.name.clone());
+        let round = &self.world.round;
+        let names = &self.world.config.arsenal.team_names;
+        let state = match round.phase {
+            wind_sim::round::Phase::Playing => format!("раунд {} · {:.0} с", round.number, round.time),
+            wind_sim::round::Phase::Over { winner: Some(t), .. } => format!("раунд {} · победили {}", round.number, names[t as usize & 1]),
+            wind_sim::round::Phase::Over { winner: None, .. } => format!("раунд {} · ничья", round.number),
+        };
         theme::props(ui, "match_props", |ui| {
+            theme::label(ui, "Раунд");
+            ui.label(state);
+            ui.end_row();
             theme::label(ui, "Карта");
             match &from_file {
                 Some(name) => ui.label(format!("«{name}» из редактора")),

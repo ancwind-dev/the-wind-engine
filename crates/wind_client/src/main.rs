@@ -166,6 +166,8 @@ struct Game {
     kick: f32,
     /// «Нагрев» своей очереди — как у сервера: разброс растёт с каждым выстрелом.
     heat: f32,
+    /// Где появиться после смерти: 0 — база, 1 + i — точка i (клавиши 1–6).
+    spawn: u8,
     shots_seen: u32,
     notes: Vec<String>,
     render_state: Option<egui_wgpu::RenderState>,
@@ -248,6 +250,7 @@ impl Game {
             pilot: Pilot::default(),
             kick: 0.0,
             heat: 0.0,
+            spawn: 0,
             shots_seen: 0,
             notes,
             render_state,
@@ -258,6 +261,11 @@ impl Game {
         let (forward, right) = self.camera.screen_axes();
         if let Some(m) = mouse_world {
             self.aim = m;
+        }
+        // Где появиться: 1 — база, 2…6 — точки A…E.
+        let keys = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6];
+        if let Some(k) = ctx.input(|i| keys.iter().position(|&k| i.key_pressed(k))) {
+            self.spawn = k as u8;
         }
         ctx.input(|i| {
             let mut d = Vec2::ZERO;
@@ -279,6 +287,7 @@ impl Game {
                 aim: self.aim,
                 fire: i.pointer.primary_down(),
                 grenade: i.key_down(egui::Key::G),
+                spawn: self.spawn,
                 // Заполняет пилот своего солдата.
                 pos: None,
             }
@@ -344,6 +353,12 @@ impl eframe::App for Game {
             });
 
             let mut input = if self.bench.is_some() { PlayerInput::default() } else { self.read_input(&ctx, mouse_world) };
+            // В перерыве между раундами бой стоит — и свой солдат тоже.
+            if !self.source.round_playing() {
+                input.move_dir = Vec2::ZERO;
+                input.fire = false;
+                input.grenade = false;
+            }
             // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
             if self.bench.is_none() {
                 let (speed, radius) = self.source.soldier_spec();
@@ -450,6 +465,10 @@ impl eframe::App for Game {
 
             let painter = ui.painter_at(rect);
             hud::draw(&painter, rect, &view, self.source.status(), !view.has_me);
+            hud::round(&painter, rect, &view);
+            if view.has_me && !view.me.alive && view.round.round.playing() {
+                hud::spawn_choice(&painter, rect, &view, self.spawn);
+            }
             if self.bench.is_none()
                 && let Some(p) = ctx.input(|i| i.pointer.hover_pos())
             {
