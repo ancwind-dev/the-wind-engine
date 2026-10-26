@@ -4,6 +4,7 @@
 use std::time::Instant;
 use wind_net::{ClientStatus, NetClient};
 use wind_render::{CorpseDraw, PointDraw, SoldierDraw};
+use wind_sim::arsenal::WeaponSpec;
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::map::Map;
 use wind_sim::{Controller, Event, PlayerInput, ProjectileKind, Vec2, World};
@@ -11,6 +12,8 @@ use wind_sim::{Controller, Event, PlayerInput, ProjectileKind, Vec2, World};
 /// Что показывает HUD про своего солдата.
 #[derive(Clone, Default)]
 pub struct Me {
+    /// Название оружия.
+    pub weapon: String,
     pub alive: bool,
     pub health: f32,
     pub ammo: u32,
@@ -156,17 +159,19 @@ impl Source {
         }
     }
 
-    /// Скорость шага и радиус солдата, разброс оружия в градусах.
-    pub fn soldier_spec(&self) -> (f32, f32, f32) {
+    /// Скорость шага и радиус солдата.
+    pub fn soldier_spec(&self) -> (f32, f32) {
         match self {
-            Source::Local(l) => {
-                let c = &l.world.config;
-                (c.soldier.speed, c.soldier.radius, c.weapon.spread_deg)
-            }
-            Source::Remote(c) => c
-                .world
-                .as_ref()
-                .map_or((0.0, 0.4, 0.0), |w| (w.welcome.soldier_speed, w.welcome.soldier_radius, w.welcome.spread_deg)),
+            Source::Local(l) => (l.world.config.soldier.speed, l.world.config.soldier.radius),
+            Source::Remote(c) => c.world.as_ref().map_or((0.0, 0.4), |w| (w.welcome.soldier_speed, w.welcome.soldier_radius)),
+        }
+    }
+
+    /// Оружие своего солдата.
+    pub fn own_weapon(&self) -> Option<WeaponSpec> {
+        match self {
+            Source::Local(l) => l.me.map(|i| l.world.weapon(i).clone()),
+            Source::Remote(c) => c.world.as_ref().map(|w| w.my_weapon().clone()),
         }
     }
 
@@ -230,17 +235,19 @@ fn local_view(l: &Local) -> View {
     for p in &w.projectiles {
         match p.kind {
             ProjectileKind::Bullet => v.bullets.push((p.pos, p.vel)),
-            ProjectileKind::Grenade { .. } => v.grenades.push(p.pos),
+            ProjectileKind::Grenade { .. } | ProjectileKind::Shell { .. } => v.grenades.push(p.pos),
         }
     }
     if let Some(me) = l.me.map(|i| &w.soldiers[i as usize]) {
         v.me_pos = Some(me.drawn_pos(l.accumulator));
         v.has_me = true;
+        let weapon = w.weapon(l.me.unwrap_or(0));
         v.me = Me {
+            weapon: weapon.name.to_uppercase(),
             alive: me.alive,
             health: me.health,
             ammo: me.ammo,
-            magazine: w.config.weapon.magazine_size,
+            magazine: weapon.magazine_size,
             reloading: me.reload_timer > 0.0,
             grenades: me.grenades,
             respawn_in: me.respawn_timer.max(0.0),
@@ -285,10 +292,11 @@ fn remote_view(c: &NetClient) -> View {
         me_pos: w.my_soldier().map(|s| w.render_pos(s, now)),
         has_me: true,
         me: Me {
+            weapon: w.my_weapon().name.to_uppercase(),
             alive: w.me.alive,
             health: w.me.health,
             ammo: w.me.ammo,
-            magazine: w.welcome.magazine_size,
+            magazine: w.my_weapon().magazine_size,
             reloading: w.me.reloading,
             grenades: w.me.grenades,
             respawn_in: w.me.respawn_in,

@@ -8,7 +8,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -193,18 +193,15 @@ pub struct Welcome {
     pub capture_points: u32,
     pub soldiers_total: u32,
     pub tick_rate: u32,
-    pub projectile_speed: f32,
-    pub weapon_range: f32,
     pub capture_radius: f32,
     pub soldier_radius: f32,
     pub interest_radius: f32,
     pub grenade_speed: f32,
     /// Скорость шага солдата, м/с — клиент двигает своего солдата сам.
     pub soldier_speed: f32,
-    /// Сколько секунд между выстрелами и разброс, градусы, — для прицела.
-    pub retrigger_time: f32,
-    pub spread_deg: f32,
-    pub magazine_size: u32,
+    /// Отпечаток оружия и классов (`Arsenal::fingerprint`): у клиента должны быть
+    /// те же `weapons.ron` и `factions.ron`, что и на сервере.
+    pub arsenal_fingerprint: u64,
     /// Карта из файла: имя папки в `data/maps` и отпечаток. Пустое имя — карта из seed.
     pub map_name: String,
     pub map_fingerprint: u64,
@@ -222,19 +219,15 @@ impl Welcome {
         w.write_var(self.soldiers_total);
         w.write_var(self.tick_rate);
         for v in [
-            self.projectile_speed,
-            self.weapon_range,
             self.capture_radius,
             self.soldier_radius,
             self.interest_radius,
             self.grenade_speed,
             self.soldier_speed,
-            self.retrigger_time,
-            self.spread_deg,
         ] {
             w.write_f32(v);
         }
-        w.write_var(self.magazine_size);
+        w.write_u64(self.arsenal_fingerprint);
         w.write_str(&self.map_name, 128);
         w.write_u64(self.map_fingerprint);
         w.finish()
@@ -251,16 +244,12 @@ impl Welcome {
             capture_points: r.read_var()?,
             soldiers_total: r.read_var()?,
             tick_rate: r.read_var()?,
-            projectile_speed: r.read_f32()?,
-            weapon_range: r.read_f32()?,
             capture_radius: r.read_f32()?,
             soldier_radius: r.read_f32()?,
             interest_radius: r.read_f32()?,
             grenade_speed: r.read_f32()?,
             soldier_speed: r.read_f32()?,
-            retrigger_time: r.read_f32()?,
-            spread_deg: r.read_f32()?,
-            magazine_size: r.read_var()?,
+            arsenal_fingerprint: r.read_u64()?,
             map_name: r.read_str(128)?,
             map_fingerprint: r.read_u64()?,
         })

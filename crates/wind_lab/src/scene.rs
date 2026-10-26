@@ -34,9 +34,10 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
         match p.kind {
             ProjectileKind::Bullet => bullets.push((p.pos - p.vel * 0.04, p.pos)),
             ProjectileKind::Grenade { fuse, .. } => grenades.push((p.pos, fuse)),
+            ProjectileKind::Shell { flight } => grenades.push((p.pos, flight)),
         }
     }
-    let sel = selected.map(|i| &world.soldiers[i as usize]).filter(|s| s.alive);
+    let sel = selected.filter(|&i| world.soldiers[i as usize].alive);
     Scene {
         title: "Вид сверху · локальная симуляция".into(),
         map: &world.map,
@@ -52,12 +53,15 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
         bullets,
         grenades,
         blasts: blasts.iter().map(|b| (b.pos, b.radius, b.age)).collect(),
-        selected: sel.map(|s| SelectedInfo {
-            pos: s.pos,
-            ranges: Some((world.config.soldier.vision_range, world.config.weapon.range)),
-            target: s.target.map(|t| &world.soldiers[t as usize]).filter(|t| t.alive).map(|t| t.pos),
+        selected: sel.map(|i| {
+            let s = &world.soldiers[i as usize];
+            SelectedInfo {
+                pos: s.pos,
+                ranges: Some((world.config.soldier.vision_range, world.weapon(i).range)),
+                target: s.target.map(|t| &world.soldiers[t as usize]).filter(|t| t.alive).map(|t| t.pos),
+            }
         }),
-        flow: sel.and_then(|s| world.flow.get(s.objective as usize)),
+        flow: sel.and_then(|i| world.flow.get(world.soldiers[i as usize].objective as usize)),
         hud: None,
         kill_feed: Vec::new(),
         rings: Vec::new(),
@@ -117,13 +121,13 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
         bullets: w.tracers.iter().map(|t| (t.pos - t.vel * 0.04, t.pos)).collect(),
         grenades: w.grenades.iter().map(|g| (g.pos, g.fuse)).collect(),
         blasts: w.blasts.clone(),
-        selected: me.map(|pos| SelectedInfo { pos, ranges: Some((w.welcome.interest_radius, w.welcome.weapon_range)), target: None }),
+        selected: me.map(|pos| SelectedInfo { pos, ranges: Some((w.welcome.interest_radius, w.my_weapon().range)), target: None }),
         flow: None,
         hud: Some(Hud {
             alive: w.me.alive,
             health: w.me.health,
             ammo: w.me.ammo,
-            magazine: w.welcome.magazine_size,
+            magazine: w.my_weapon().magazine_size,
             reloading: w.me.reloading,
             grenades: w.me.grenades,
             respawn_in: w.me.respawn_in,

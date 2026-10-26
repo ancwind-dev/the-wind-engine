@@ -3,6 +3,7 @@
 //! Все поля имеют значения по умолчанию: в файле можно указать только то,
 //! что хочется поменять.
 
+use crate::arsenal::{Arsenal, WeaponSpec};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -23,9 +24,14 @@ pub struct SimConfig {
     /// (проверяется при каждом «обдумывании»).
     pub defend_probability: f32,
     pub soldier: SoldierSpec,
+    /// Оружие на всех — если рядом нет `weapons.ron` и `factions.ron`.
     pub weapon: WeaponSpec,
     pub grenade: GrenadeSpec,
     pub capture: CaptureSpec,
+    /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
+    /// а без них — одно оружие `weapon` на всех.
+    #[serde(skip)]
+    pub arsenal: Arsenal,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -39,26 +45,6 @@ pub struct SoldierSpec {
     /// Сколько ближайших врагов проверять на прямую видимость за одно «обдумывание».
     pub vision_candidates: u32,
     pub respawn_time: f32,
-}
-
-/// Названия полей повторяют `.weapon`-файлы RWR, где это возможно.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct WeaponSpec {
-    /// Пауза между выстрелами, с.
-    pub retrigger_time: f32,
-    pub magazine_size: u32,
-    pub reload_time: f32,
-    /// Скорость пули, м/с.
-    pub projectile_speed: f32,
-    /// Дальность стрельбы, м.
-    pub range: f32,
-    /// Разброс в градусах.
-    pub spread_deg: f32,
-    /// Вероятность, что попадание убьёт сразу.
-    pub kill_probability: f32,
-    /// Урон, если попадание не убило (здоровье солдата = 1.0).
-    pub wound_damage: f32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -92,9 +78,13 @@ pub struct CaptureSpec {
 }
 
 impl SimConfig {
+    /// Читает `sim.ron`, а оружие и классы — из `weapons.ron` и `factions.ron` рядом.
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        ron::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+        let mut config: SimConfig = ron::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        config.arsenal = if Arsenal::exists(dir) { Arsenal::load(dir)? } else { Arsenal::single(config.weapon.clone()) };
+        Ok(config)
     }
 
     pub fn dt(&self) -> f32 {
@@ -115,6 +105,7 @@ impl Default for SimConfig {
             weapon: WeaponSpec::default(),
             grenade: GrenadeSpec::default(),
             capture: CaptureSpec::default(),
+            arsenal: Arsenal::default(),
         }
     }
 }
@@ -127,21 +118,6 @@ impl Default for SoldierSpec {
             vision_range: 55.0,
             vision_candidates: 4,
             respawn_time: 6.0,
-        }
-    }
-}
-
-impl Default for WeaponSpec {
-    fn default() -> Self {
-        WeaponSpec {
-            retrigger_time: 0.15,
-            magazine_size: 30,
-            reload_time: 2.5,
-            projectile_speed: 90.0,
-            range: 50.0,
-            spread_deg: 4.0,
-            kill_probability: 0.6,
-            wound_damage: 0.4,
         }
     }
 }

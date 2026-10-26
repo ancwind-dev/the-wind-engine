@@ -8,9 +8,9 @@
 //! по форме, остались только для теней.
 
 use crate::rwr::{self, RwrModel, VOXEL};
+use wind_sim::arsenal::Arsenal;
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, Mat3, Mat4, Quat, Vec3};
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -85,109 +85,65 @@ pub struct WeaponModel {
     pub mesh: usize,
 }
 
-#[derive(Deserialize)]
-struct FactionsFile {
-    teams: Vec<TeamFile>,
-}
-
-#[derive(Deserialize)]
-struct TeamFile {
-    name: String,
-    soldiers: Vec<SoldierFile>,
-}
-
-#[derive(Deserialize)]
-struct SoldierFile {
-    model: String,
-    weapon: String,
-    #[serde(default = "one")]
-    weight: u32,
-}
-
-fn one() -> u32 {
-    1
-}
-
 /// Всё про своих солдат: меши, модели, кто в какой команде.
 pub struct CharacterSet {
     pub meshes: Vec<CharMesh>,
     pub models: Vec<CharModel>,
     pub weapons: Vec<WeaponModel>,
-    /// Для каждой команды: (модель, оружие, вес).
-    pub teams: [Vec<(usize, usize, u32)>; 2],
+    /// Для каждой команды по наборам из `arsenal`: (модель, оружие).
+    pub teams: [Vec<(usize, usize)>; 2],
     pub team_names: [String; 2],
+    /// Оружие и классы — те же, что у симуляции: набор солдата выбирается одинаково.
+    pub arsenal: Arsenal,
 }
 
 /// Поза — положения 15 точек скелета в пространстве модели (воксели, +X вперёд).
 pub type Pose = Vec<Vec3>;
 
 impl CharacterSet {
-    /// Читает `data/factions.ron` и все упомянутые там модели.
+    /// Читает `data/weapons.ron`, `data/factions.ron` и все упомянутые там модели.
     pub fn load(data_dir: &Path) -> Result<Self, String> {
-        let path = data_dir.join("factions.ron");
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let file: FactionsFile = ron::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        if file.teams.len() != 2 {
-            return Err(format!("{}: нужно ровно две команды", path.display()));
-        }
+        let arsenal = Arsenal::load(data_dir)?;
         let mut builder = Builder::default();
         let mut set_models: Vec<(String, usize)> = Vec::new();
         let mut set_weapons: Vec<(String, usize)> = Vec::new();
         let mut models = Vec::new();
         let mut weapons = Vec::new();
-        let mut teams: [Vec<(usize, usize, u32)>; 2] = Default::default();
+        let mut teams: [Vec<(usize, usize)>; 2] = Default::default();
         let read = |name: &str| -> Result<RwrModel, String> {
             let p = data_dir.join("models").join(format!("{name}.xml"));
             let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             rwr::parse(&text).map_err(|e| format!("{}: {e}", p.display()))
         };
-        for (team, t) in file.teams.iter().enumerate() {
-            for s in &t.soldiers {
-                let model = match set_models.iter().find(|(n, _)| *n == s.model) {
+        for (team, kits) in arsenal.teams.iter().enumerate() {
+            for kit in kits {
+                let model = match set_models.iter().find(|(n, _)| *n == kit.model) {
                     Some(&(_, i)) => i,
                     None => {
-                        models.push(builder.character(&s.model, &read(&s.model)?));
-                        set_models.push((s.model.clone(), models.len() - 1));
+                        models.push(builder.character(&kit.model, &read(&kit.model)?));
+                        set_models.push((kit.model.clone(), models.len() - 1));
                         models.len() - 1
                     }
                 };
-                let weapon = match set_weapons.iter().find(|(n, _)| *n == s.weapon) {
+                let path = &arsenal.weapons[kit.weapon].model;
+                let weapon = match set_weapons.iter().find(|(n, _)| n == path) {
                     Some(&(_, i)) => i,
                     None => {
-                        let mesh = builder.prop(&read(&s.weapon)?);
-                        weapons.push(WeaponModel { name: s.weapon.clone(), mesh });
-                        set_weapons.push((s.weapon.clone(), weapons.len() - 1));
+                        let mesh = builder.prop(&read(path)?);
+                        weapons.push(WeaponModel { name: path.clone(), mesh });
+                        set_weapons.push((path.clone(), weapons.len() - 1));
                         weapons.len() - 1
                     }
                 };
-                teams[team].push((model, weapon, s.weight.max(1)));
+                teams[team].push((model, weapon));
             }
         }
-        Ok(CharacterSet {
-            meshes: builder.meshes,
-            models,
-            weapons,
-            teams,
-            team_names: [file.teams[0].name.clone(), file.teams[1].name.clone()],
-        })
+        Ok(CharacterSet { meshes: builder.meshes, models, weapons, teams, team_names: arsenal.team_names.clone(), arsenal })
     }
 
-    /// Какая модель и оружие у солдата — по его номеру, с учётом весов.
+    /// Какая модель и оружие у солдата — тот же набор, что выбрала симуляция.
     pub fn pick(&self, team: u8, id: u32) -> Option<(usize, usize)> {
-        let list = &self.teams[team as usize & 1];
-        let total: u32 = list.iter().map(|e| e.2).sum();
-        if total == 0 {
-            return None;
-        }
-        let mut r = id.wrapping_mul(2_654_435_761) >> 8;
-        r %= total;
-        for &(m, w, weight) in list {
-            if r < weight {
-                return Some((m, w));
-            }
-            r -= weight;
-        }
-        None
+        self.teams[team as usize & 1].get(self.arsenal.pick(team, id)).copied()
     }
 }
 

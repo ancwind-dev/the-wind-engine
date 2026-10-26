@@ -1,5 +1,6 @@
 //! Стрельба, полёт пуль и гранат, взрывы.
 
+use crate::arsenal::{BlastSpec, MAX_HEAT};
 use crate::rng::Rng;
 use crate::world::{Controller, Event, Projectile, ProjectileKind, World, snapshot};
 use glam::Vec2;
@@ -8,12 +9,11 @@ use rayon::prelude::*;
 /// Солдаты с целью стреляют. Решения параллельно, пули собираются в общий список.
 pub(crate) fn fire(world: &mut World) {
     let dt = world.dt();
-    let weapon = &world.config.weapon;
+    let arsenal = &world.config.arsenal;
     let radius = world.config.soldier.radius;
     let (seed, tick) = (world.seed, world.tick);
     let prev = snapshot(&world.soldiers);
     let map = &world.map;
-    let spread = weapon.spread_deg.to_radians();
 
     let shots: Vec<Projectile> = world
         .soldiers
@@ -23,8 +23,11 @@ pub(crate) fn fire(world: &mut World) {
             if !s.alive {
                 return None;
             }
+            let kit = &arsenal.teams[s.team as usize & 1][s.kit as usize];
+            let weapon = &arsenal.weapons[kit.weapon];
             s.cooldown -= dt;
             s.grenade_timer -= dt;
+            s.heat = (s.heat - weapon.sustained_fire_diminish_rate * dt).max(0.0);
             if s.reload_timer > 0.0 {
                 s.reload_timer -= dt;
                 if s.reload_timer <= 0.0 {
@@ -58,6 +61,10 @@ pub(crate) fn fire(world: &mut World) {
                         s.target = None;
                         return None;
                     }
+                    // Гранатомётом в упор не стреляют — заденет и себя.
+                    if weapon.blast.as_ref().is_some_and(|b| to.length() < b.radius * 1.3) {
+                        return None;
+                    }
                     to
                 }
             };
@@ -65,26 +72,41 @@ pub(crate) fn fire(world: &mut World) {
                 return None;
             }
             let mut rng = Rng::for_entity(seed ^ 0xF17E, tick, i as u32);
-            let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * spread;
+            let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * weapon.spread(s.heat);
             let dir = Vec2::new(angle.cos(), angle.sin());
-            // Кулдаун копится только во время стрельбы, иначе после паузы была бы очередь.
-            s.cooldown = s.cooldown.max(0.0) + weapon.retrigger_time;
+            s.heat = (s.heat + weapon.sustained_fire_grow_step).min(MAX_HEAT);
+            // Остаток паузы переносим — иначе темп упирается в тики (M4 стрелял бы раз
+            // в 3 тика вместо 8,8 раза в секунду). Но не больше тика: после паузы очереди
+            // «за прошлое» нет.
+            s.cooldown = s.cooldown.max(-dt) + weapon.retrigger_time;
             s.ammo = s.ammo.saturating_sub(1);
             if s.ammo == 0 {
                 s.reload_timer = weapon.reload_time;
             }
+            let kind = match weapon.blast {
+                // Снаряд летит до точки прицела, но не дальше дальности.
+                Some(_) => ProjectileKind::Shell { flight: to.length().min(weapon.range) / weapon.projectile_speed },
+                None => ProjectileKind::Bullet,
+            };
             Some(Projectile {
                 pos: s.pos + dir * (radius + 0.05),
                 vel: dir * weapon.projectile_speed,
                 ttl: weapon.range * 1.2 / weapon.projectile_speed,
                 team: s.team,
                 shooter: i as u32,
-                kind: ProjectileKind::Bullet,
+                weapon: kit.weapon as u8,
+                kind,
             })
         })
         .collect();
     for p in &shots {
-        world.events.push(Event::Shot { shooter: p.shooter, angle: p.vel.y.atan2(p.vel.x) });
+        world.events.push(match p.kind {
+            // Снаряд гранатомёта клиенту показываем как летящую гранату.
+            ProjectileKind::Shell { flight } => {
+                Event::GrenadeThrown { shooter: p.shooter, from: p.pos, to: p.pos + p.vel * flight, fuse: flight }
+            }
+            _ => Event::Shot { shooter: p.shooter, angle: p.vel.y.atan2(p.vel.x) },
+        });
     }
     world.projectiles.extend(shots);
 
@@ -166,6 +188,32 @@ pub(crate) fn update_projectiles(world: &mut World) {
                 }
                 if *fuse <= 0.0 { Outcome::Explode } else { Outcome::Flying }
             }
+            ProjectileKind::Shell { flight } => {
+                let next = p.pos + p.vel * dt;
+                let wall_t = map.cast(p.pos, next).map_or(f32::INFINITY, |(t, _, _)| t);
+                let mut hit_t = f32::INFINITY;
+                let mid = (p.pos + next) * 0.5;
+                let reach = (next - p.pos).length() * 0.5 + radius + 1.0;
+                grid.query(mid, reach, |j| {
+                    let s = &soldiers[j as usize];
+                    if s.team != p.team
+                        && s.alive
+                        && let Some(t) = segment_hits_circle(p.pos, next, s.pos, radius)
+                    {
+                        hit_t = hit_t.min(t);
+                    }
+                });
+                // Взрываемся у стены (чуть не долетев), у врага или в точке прицела.
+                let t = wall_t.min(hit_t);
+                *flight -= dt;
+                if t <= 1.0 {
+                    p.pos += (next - p.pos) * (t - 0.05).max(0.0);
+                    Outcome::Explode
+                } else {
+                    p.pos = next;
+                    if *flight <= 0.0 { Outcome::Explode } else { Outcome::Flying }
+                }
+            }
         })
         .collect();
 
@@ -180,7 +228,7 @@ pub(crate) fn update_projectiles(world: &mut World) {
             Outcome::HitSoldier(victim) => {
                 let shooter = p.shooter;
                 let mut rng = Rng::for_entity(world.seed ^ 0x417, world.tick, index as u32);
-                let weapon = &world.config.weapon;
+                let weapon = &world.config.arsenal.weapons[p.weapon as usize];
                 let s = &mut world.soldiers[victim as usize];
                 // Как в RWR: попадание убивает с некоторой вероятностью, иначе ранит.
                 let killed = s.alive && {
@@ -191,12 +239,18 @@ pub(crate) fn update_projectiles(world: &mut World) {
                     world.kill(victim, shooter);
                 }
             }
-            Outcome::Explode => explosions.push((p.pos, p.shooter, index as u32)),
+            Outcome::Explode => {
+                let blast = match p.kind {
+                    ProjectileKind::Shell { .. } => world.config.arsenal.weapons[p.weapon as usize].blast.clone().unwrap_or_default(),
+                    _ => world.grenade_blast(),
+                };
+                explosions.push((p.pos, p.shooter, index as u32, blast));
+            }
         }
         finished.push(index);
     }
-    for (pos, shooter, salt) in explosions {
-        explode(world, pos, shooter, salt);
+    for (pos, shooter, salt, blast) in explosions {
+        explode(world, pos, shooter, salt, &blast);
     }
     // Удаляем отработавшие снаряды, сохраняя порядок остальных.
     let mut keep = vec![true; world.projectiles.len()];
@@ -210,26 +264,25 @@ pub(crate) fn update_projectiles(world: &mut World) {
     });
 }
 
-fn explode(world: &mut World, pos: Vec2, shooter: u32, salt: u32) {
-    let g = world.config.grenade.clone();
+fn explode(world: &mut World, pos: Vec2, shooter: u32, salt: u32, blast: &BlastSpec) {
     let mut victims = Vec::new();
     let soldiers = &world.soldiers;
-    world.grid.query(pos, g.blast_radius, |j| {
+    world.grid.query(pos, blast.radius, |j| {
         let s = &soldiers[j as usize];
         let d = s.pos.distance(pos);
-        if s.alive && d < g.blast_radius && world.map.line_of_sight(pos, s.pos) {
+        if s.alive && d < blast.radius && world.map.line_of_sight(pos, s.pos) {
             victims.push((j, d));
         }
     });
     let mut rng = Rng::for_entity(world.seed ^ 0xB00, world.tick, salt);
     for (j, d) in victims {
-        let falloff = 1.0 - d / g.blast_radius;
-        if rng.chance(g.kill_probability * falloff) {
+        let falloff = 1.0 - d / blast.radius;
+        if rng.chance(blast.kill_probability * falloff) {
             world.kill(j, shooter);
         }
     }
-    world.map.damage_circle(pos, g.wall_damage_radius, g.wall_damage);
-    world.events.push(Event::Explosion { pos, radius: g.blast_radius });
+    world.map.damage_circle(pos, blast.wall_damage_radius, blast.wall_damage);
+    world.events.push(Event::Explosion { pos, radius: blast.radius });
 }
 
 /// Задевает ли отрезок `a→b` круг. Возвращает долю пути до ближайшей к центру точки.
