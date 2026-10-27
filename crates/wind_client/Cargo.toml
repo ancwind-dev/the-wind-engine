@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 eframe = "0.37.0"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
 wind_audio = { version = "0.1.0", path = "../wind_audio" }
 wind_net = { version = "0.1.0", path = "../wind_net" }
 wind_render = { version = "0.1.0", path = "../wind_render" }
