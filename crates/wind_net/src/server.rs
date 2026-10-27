@@ -7,6 +7,7 @@
 use crate::protocol::{self, Challenge, Hello, InputPacket, Kind, Response, Welcome};
 use crate::replication::{ReplicationConfig, ServerReplica, board, write_board};
 use crate::traffic::Traffic;
+use crate::vision::Vision;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -73,6 +74,8 @@ pub struct NetServer {
     handshakes_total: u32,
     handshake_second: Instant,
     pub guard: Guard,
+    /// Кого видит каждая команда (туман войны на сервере).
+    pub vision: Vision,
 }
 
 impl NetServer {
@@ -95,6 +98,7 @@ impl NetServer {
             handshakes_total: 0,
             handshake_second: Instant::now(),
             guard: Guard::default(),
+            vision: Vision::default(),
         })
     }
 
@@ -274,12 +278,17 @@ impl NetServer {
             write_board(&mut w, &board(world, &names));
             w
         });
+        // Туман войны: клиенту — только тех врагов, кого видит его команда.
+        if !self.clients.is_empty() {
+            self.vision.update(world);
+        }
         // Снимки клиентов независимы — собираем их на всех ядрах.
         let config = &self.config;
+        let vision = &self.vision;
         let packets: Vec<Vec<u8>> = self
             .clients
             .par_iter_mut()
-            .map(|c| c.replica.build_snapshot(world, config, board.as_ref()))
+            .map(|c| c.replica.build_snapshot(world, config, board.as_ref(), Some(vision)))
             .collect();
         for (i, packet) in packets.iter().enumerate() {
             let sealed = protocol::seal(packet, self.clients[i].token);

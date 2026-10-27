@@ -8,6 +8,7 @@
 //! Здесь нет сокетов: на вход и на выход — байты. Поэтому всё это легко тестировать.
 
 use crate::bits::{BitReader, BitWriter, Truncated};
+use crate::vision::Vision;
 use crate::protocol::{self, Kind, Welcome, dq_angle, q_angle, read_pos, write_pos};
 use std::collections::VecDeque;
 use wind_sim::map::Map;
@@ -151,8 +152,9 @@ impl ServerReplica {
     }
 
     /// Снимок для клиента. `board` — таблица бойцов, если пора её разослать
-    /// (собирается одна на всех, см. [`board`]).
-    pub fn build_snapshot(&mut self, world: &World, cfg: &ReplicationConfig, board: Option<&BitWriter>) -> Vec<u8> {
+    /// (собирается одна на всех, см. [`board`]). `vision` — кого видит команда
+    /// клиента (туман войны на сервере); `None` — всех в радиусе интереса.
+    pub fn build_snapshot(&mut self, world: &World, cfg: &ReplicationConfig, board: Option<&BitWriter>, vision: Option<&Vision>) -> Vec<u8> {
         let tick = world.tick as u32;
         let me = &world.soldiers[self.soldier as usize];
         let center = me.pos;
@@ -166,13 +168,15 @@ impl ServerReplica {
         let empty = View::new();
         let base_view = baseline.map_or(&empty, |s| &s.view);
 
-        // Кого клиент должен видеть сейчас.
+        // Кого клиент должен видеть сейчас: в радиусе интереса — своих и тех врагов,
+        // кого видит его команда.
         let r2 = cfg.interest_radius * cfg.interest_radius;
+        let team = me.team;
         let current: View = world
             .soldiers
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.alive && s.pos.distance_squared(center) < r2)
+            .filter(|(i, s)| s.alive && s.pos.distance_squared(center) < r2 && vision.is_none_or(|v| v.sees(world, team, *i as u32)))
             .map(|(i, s)| (i as u32, NetSoldier::from_soldier(s)))
             .collect();
 
@@ -280,12 +284,21 @@ impl ServerReplica {
             let mut scratch = BitWriter::new();
             match *event {
                 Event::Shot { shooter, angle } => {
-                    if !near(world.soldiers[shooter as usize].pos, 60.0) {
+                    let s = &world.soldiers[shooter as usize];
+                    if !near(s.pos, 60.0) {
                         continue;
                     }
                     scratch.write_bits(0, 2);
                     scratch.write_var(shooter);
                     scratch.write_bits(q_angle(angle, 12), 12);
+                    // Стрелка не видно (за стеной, в тумане) — выстрел всё равно слышен:
+                    // шлём, откуда и чей, но не самого солдата.
+                    let hidden = current.binary_search_by_key(&shooter, |e| e.0).is_err();
+                    scratch.write_bool(hidden);
+                    if hidden {
+                        write_pos(&mut scratch, s.pos);
+                        scratch.write_bits(s.team as u32 & 1, 1);
+                    }
                 }
                 Event::GrenadeThrown { from, to, fuse, .. } => {
                     if !near(from, 30.0) && !near(to, 30.0) {
@@ -770,7 +783,8 @@ impl RemoteWorld {
         }
 
         enum Fx {
-            Shot(u32, f32),
+            /// Стрелок, угол и — если его не видно — откуда и чей.
+            Shot(u32, f32, Option<(Vec2, u8)>),
             Grenade(Vec2, Vec2, f32),
             Blast(Vec2, f32),
             Kill(u32, u32, u8),
@@ -779,7 +793,12 @@ impl RemoteWorld {
         let mut effects = Vec::with_capacity(event_count as usize);
         for _ in 0..event_count {
             effects.push(match r.read_bits(2)? {
-                0 => Fx::Shot(r.read_var()?, dq_angle(r.read_bits(12)?, 12)),
+                0 => {
+                    let shooter = r.read_var()?;
+                    let angle = dq_angle(r.read_bits(12)?, 12);
+                    let hidden = if r.read_bool()? { Some((read_pos(&mut r)?, r.read_bits(1)? as u8)) } else { None };
+                    Fx::Shot(shooter, angle, hidden)
+                }
                 1 => Fx::Grenade(read_pos(&mut r)?, read_pos(&mut r)?, r.read_var()? as f32 / 10.0),
                 2 => Fx::Blast(read_pos(&mut r)?, r.read_bits(8)? as f32 / 4.0),
                 _ => Fx::Kill(r.read_var()?, r.read_var()?, r.read_bits(1)? as u8),
@@ -827,17 +846,18 @@ impl RemoteWorld {
         let radius = self.welcome.soldier_radius;
         for fx in effects {
             match fx {
-                Fx::Shot(shooter, angle) => {
+                Fx::Shot(shooter, angle, hidden) => {
                     let own = shooter == self.welcome.soldier;
                     if own {
                         self.own_shots += 1;
                     }
-                    let from = match self.soldiers.get(shooter as usize) {
-                        Some(Some(s)) => Some(if own { self.own_pos.unwrap_or(s.pos) } else { s.pos }),
+                    // Видимый стрелок — из его солдата, скрытый — с места из события.
+                    let from = match (self.soldiers.get(shooter as usize), hidden) {
+                        (Some(Some(s)), _) => Some((if own { self.own_pos.unwrap_or(s.pos) } else { s.pos }, s.net.team())),
+                        (_, Some(at)) => Some(at),
                         _ => None,
                     };
-                    if let Some(from) = from {
-                        let team = self.soldiers[shooter as usize].as_ref().map_or(self.welcome.team, |s| s.net.team());
+                    if let Some((from, team)) = from {
                         self.heard.push(Heard::Shot { pos: from, shooter, team });
                         let weapon = self.arsenal.weapon_of(team, shooter);
                         let (speed, ttl) = (weapon.projectile_speed, weapon.range * 1.2 / weapon.projectile_speed);

@@ -8,6 +8,7 @@ pub mod protocol;
 pub mod replication;
 pub mod server;
 pub mod traffic;
+pub mod vision;
 
 pub use client::{ClientStatus, NetClient};
 pub use pilot::Pilot;

@@ -864,6 +864,12 @@ impl World {
         self.events.push(Event::GrenadeThrown { shooter: soldier, from: s.pos, to: s.pos + to, fuse: spec.fuse });
     }
 
+    /// Живые солдаты около `center` — по сетке, построенной в начале тика. Сетка
+    /// грубая: `f` зовётся и для чуть более дальних, расстояние проверяй сам.
+    pub fn soldiers_near(&self, center: Vec2, radius: f32, f: impl FnMut(u32)) {
+        self.grid.query(center, radius, f);
+    }
+
     /// Оружие солдата.
     pub fn weapon(&self, soldier: u32) -> &WeaponSpec {
         let s = &self.soldiers[soldier as usize];

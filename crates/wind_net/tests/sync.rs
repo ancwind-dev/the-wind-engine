@@ -52,7 +52,7 @@ impl Link {
             },
         );
         self.world.step();
-        let packet = self.replica.build_snapshot(&self.world, &self.config, None);
+        let packet = self.replica.build_snapshot(&self.world, &self.config, None, None);
         self.sizes.push(packet.len());
         if !self.rng.chance(loss) {
             let (_, data) = protocol::parse(&packet).unwrap();
@@ -226,7 +226,7 @@ fn board_with_player_names_reaches_client() {
     let mut w = wind_net::bits::BitWriter::new();
     write_board(&mut w, &rows);
     link.world.step();
-    let packet = link.replica.build_snapshot(&link.world, &link.config, Some(&w));
+    let packet = link.replica.build_snapshot(&link.world, &link.config, Some(&w), None);
     let (_, data) = protocol::parse(&packet).unwrap();
     link.client.apply_snapshot(data, 100.0).unwrap();
     assert_eq!(link.client.board, rows);
@@ -276,3 +276,55 @@ fn prone_soldier_is_prone_on_client() {
     assert!(seen.net.is_prone(), "клиент знает, что он лежит");
 }
 
+
+#[test]
+fn client_never_learns_about_hidden_enemies() {
+    use wind_net::replication::Heard;
+    use wind_net::vision::Vision;
+    let config = ReplicationConfig { packet_budget: 64 * 1024, ..Default::default() };
+    // Обзор короткий: иначе на карте 256 почти каждого врага кто-то из своих видит,
+    // и проверять было бы нечего.
+    let mut link = Link::new(40, config);
+    link.world.config.soldier.vision_range = 20.0;
+    let mut vision = Vision::default();
+    let team = link.world.soldiers[link.soldier as usize].team;
+    let (mut hidden_in_range, mut hidden_shots) = (0, 0);
+    for _ in 0..900 {
+        // Игрок идёт к середине карты — туда, где бой.
+        let me = link.world.soldiers[link.soldier as usize].pos;
+        let input = PlayerInput { move_dir: (Vec2::splat(128.0) - me).normalize_or_zero(), aim: me + Vec2::X, ..Default::default() };
+        link.world.set_input(link.soldier, input);
+        link.world.step();
+        vision.update(&link.world);
+        let packet = link.replica.build_snapshot(&link.world, &link.config, None, Some(&vision));
+        let (_, data) = protocol::parse(&packet).unwrap();
+        let now = link.world.tick as f64 * 0.05;
+        link.client.apply_snapshot(data, now).unwrap();
+        link.replica.on_ack(link.client.tick);
+        // Каждый враг, о котором знает клиент, — виден его команде.
+        for (id, s) in link.client.soldiers.iter().enumerate() {
+            if s.as_ref().is_some_and(|s| s.net.team() != team) {
+                assert!(vision.sees(&link.world, team, id as u32), "клиент знает о скрытом враге #{id}");
+            }
+        }
+        let me = link.world.soldiers[link.soldier as usize].pos;
+        hidden_in_range += link
+            .world
+            .soldiers
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| s.alive && s.team != team && s.pos.distance(me) < link.config.interest_radius && !vision.sees(&link.world, team, *i as u32))
+            .count();
+        // Выстрелы тех, кого не видно, всё равно слышны — с места стрелка.
+        for h in link.client.heard.drain(..) {
+            if let Heard::Shot { shooter, .. } = h
+                && link.client.soldiers[shooter as usize].is_none()
+            {
+                hidden_shots += 1;
+            }
+        }
+    }
+    println!("скрытых врагов в радиусе интереса (сумма по тикам): {hidden_in_range}, выстрелов скрытых стрелков: {hidden_shots}");
+    assert!(hidden_in_range > 100, "проверка что-то значит: враги в радиусе бывают скрыты");
+    assert!(hidden_shots > 0, "выстрелы из-за стен слышны");
+}
