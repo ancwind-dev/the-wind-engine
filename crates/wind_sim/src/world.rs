@@ -10,6 +10,7 @@ use crate::mapgen::{self, Layout};
 use crate::nav::FlowField;
 use crate::rng::Rng;
 use crate::round::{EndReason, Phase, Round};
+use crate::squad::{self, NO_SQUAD, Order, Squad};
 use crate::{ai, combat};
 use glam::Vec2;
 use rayon::prelude::*;
@@ -95,6 +96,8 @@ pub struct Soldier {
     pub kit: u8,
     /// «Нагрев» очереди: разброс растёт с каждым выстрелом и спадает со временем.
     pub heat: f32,
+    /// Номер отряда в `World::squads` (`NO_SQUAD` — без отряда). Не меняется весь матч.
+    pub squad: u32,
 }
 
 impl Soldier {
@@ -191,6 +194,9 @@ pub struct World {
     pub atmosphere: Atmosphere,
     /// Раунд: идёт бой или перерыв, сколько времени, кто держит все точки.
     pub round: Round,
+    /// Отряды обеих команд и приказ каждому солдату на этот тик (по номеру солдата).
+    pub squads: Vec<Squad>,
+    pub orders: Vec<Order>,
     /// Карта в начале — новый раунд начинается с целыми стенами.
     initial_map: Map,
     pub(crate) grid: SpatialGrid,
@@ -234,6 +240,8 @@ impl World {
             map_file: None,
             atmosphere: Atmosphere::default(),
             round: Round::default(),
+            squads: Vec::new(),
+            orders: Vec::new(),
             initial_map: map.clone(),
             map,
             bases,
@@ -260,6 +268,7 @@ impl World {
                 world.soldiers.push(soldier);
             }
         }
+        world.squads = squad::form(&mut world.soldiers, world.config.squad.size);
         world
     }
 
@@ -292,7 +301,9 @@ impl World {
         self.update_navigation();
         stats.nav_ms = ms(t);
 
+        // Строй отрядов и решения ИИ — в одной фазе замера.
         let t = Instant::now();
+        self.plan_squads();
         stats.thinkers = ai::think(self);
         stats.think_ms = ms(t);
 
@@ -331,6 +342,20 @@ impl World {
         self.stats = stats;
     }
 
+    fn plan_squads(&mut self) {
+        let points: Vec<Vec2> = self.points.iter().map(|p| p.pos).collect();
+        squad::plan(
+            &mut self.squads,
+            &self.soldiers,
+            &mut self.orders,
+            &self.map,
+            &self.config.squad,
+            &points,
+            self.config.capture.radius,
+            self.config.soldier.radius,
+        );
+    }
+
     fn rebuild_grid(&mut self) {
         let soldiers = &self.soldiers;
         self.grid.rebuild(soldiers.len(), |i| soldiers[i].alive.then_some(soldiers[i].pos));
@@ -356,6 +381,8 @@ impl World {
         let grid = &self.grid;
         let radius = spec.radius;
         let arsenal = &self.config.arsenal;
+        let orders = &self.orders;
+        let squad_spec = &self.config.squad;
 
         self.soldiers.par_iter_mut().enumerate().for_each(|(i, s)| {
             if !s.alive {
@@ -363,6 +390,13 @@ impl World {
             }
             let mut desired = Vec2::ZERO;
             let mut speed = spec.speed;
+            let order = orders.get(i).copied().unwrap_or_default();
+            // Боец, далеко ушедший от своего места в строю, в бой не ввязывается:
+            // догоняет отряд (стреляет он и на ходу).
+            let fight = match order {
+                Order::Follow { slot, .. } => slot.distance(s.pos) < squad_spec.leash,
+                _ => true,
+            };
 
             if let Controller::Player(input) = s.controller {
                 let look = input.aim - s.pos;
@@ -377,7 +411,7 @@ impl World {
                     return;
                 }
                 desired = input.move_dir.clamp_length_max(1.0);
-            } else if let Some(target) = s.target.filter(|&t| prev[t as usize].1) {
+            } else if let Some(target) = s.target.filter(|&t| fight && prev[t as usize].1) {
                 // Враг виден: подходим на дистанцию огня и стоим.
                 let to = prev[target as usize].0 - s.pos;
                 let d = to.length();
@@ -388,7 +422,21 @@ impl World {
                     desired = to / d;
                     speed *= 0.7;
                 }
+            } else if let Order::Follow { slot, leader_vel, heading } = order
+                && slot.distance(s.pos) < squad_spec.rejoin
+                && map.line_of_sight(s.pos, slot)
+            {
+                // Место в строю: идём вместе с командиром и подтягиваемся к своему месту.
+                let v = (leader_vel + (slot - s.pos) * 1.5).clamp_length_max(spec.speed);
+                desired = v / spec.speed;
+                let look = if v.length_squared() > 0.5 { v } else { heading };
+                if look != Vec2::ZERO {
+                    s.facing = look.y.atan2(look.x);
+                }
             } else if let Some(field) = flow.get(s.objective as usize) {
+                if let Order::Lead { pace } = order {
+                    speed *= pace;
+                }
                 let to_objective = field.target - s.pos;
                 if to_objective.length() > capture_radius * 0.5 {
                     let dir = field.direction(map, s.pos).unwrap_or_else(|| to_objective.normalize_or_zero());
@@ -525,13 +573,18 @@ impl World {
         }
         self.projectiles.clear();
         self.score = [0; 2];
+        for squad in &mut self.squads {
+            squad.leader = None;
+            squad.objective = NO_OBJECTIVE;
+            squad.heading = Vec2::ZERO;
+        }
         let mut rng = Rng::for_entity(self.seed ^ 0x4E57, self.tick, 0);
         let per_team = self.soldiers.iter().filter(|s| s.team == 0).count().max(1) as f32;
         for i in 0..self.soldiers.len() {
             let s = &self.soldiers[i];
             let (team, controller, kit) = (s.team, s.controller, s.kit);
             let pos = self.find_spawn_spot(self.bases[team as usize], per_team.sqrt() * 0.8, &mut rng);
-            let mut fresh = Soldier { controller, ..self.fresh_soldier(team, pos, kit) };
+            let mut fresh = Soldier { controller, squad: s.squad, ..self.fresh_soldier(team, pos, kit) };
             fresh.cooldown = rng.range(0.0, 1.0);
             self.soldiers[i] = fresh;
         }
@@ -558,17 +611,27 @@ impl World {
                     Some(p) if p.owner == Some(team) => p.pos,
                     _ => self.bases[team as usize],
                 },
-                // ИИ — на базе или на любой своей точке.
+                // ИИ — на базе или на своей точке: ближе всего к командиру отряда,
+                // а без него — на любой.
                 Controller::Ai => {
                     let mut spots = vec![self.bases[team as usize]];
                     spots.extend(self.points.iter().filter(|p| p.owner == Some(team)).map(|p| p.pos));
-                    spots[rng.below(spots.len() as u32) as usize]
+                    let leader = self
+                        .squads
+                        .get(self.soldiers[i].squad as usize)
+                        .and_then(|q| q.leader)
+                        .map(|l| &self.soldiers[l as usize])
+                        .filter(|l| l.alive);
+                    match leader {
+                        Some(l) => *spots.iter().min_by(|a, b| a.distance_squared(l.pos).total_cmp(&b.distance_squared(l.pos))).unwrap(),
+                        None => spots[rng.below(spots.len() as u32) as usize],
+                    }
                 }
             };
             let pos = self.find_spawn_spot(spot, 6.0, &mut rng);
             let s = &self.soldiers[i];
-            let (controller, kit, kills, deaths) = (s.controller, s.kit, s.kills, s.deaths);
-            self.soldiers[i] = Soldier { controller, kills, deaths, ..self.fresh_soldier(team, pos, kit) };
+            let (controller, kit, kills, deaths, squad) = (s.controller, s.kit, s.kills, s.deaths, s.squad);
+            self.soldiers[i] = Soldier { controller, kills, deaths, squad, ..self.fresh_soldier(team, pos, kit) };
         }
     }
 
@@ -673,6 +736,7 @@ impl World {
             deaths: 0,
             kit,
             heat: 0.0,
+            squad: NO_SQUAD,
         }
     }
 

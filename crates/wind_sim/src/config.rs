@@ -5,6 +5,7 @@
 
 use crate::arsenal::{Arsenal, WeaponSpec};
 use crate::round::RoundSpec;
+use crate::squad::SquadSpec;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -31,6 +32,8 @@ pub struct SimConfig {
     pub capture: CaptureSpec,
     /// Правила раунда: сколько держать точки, длина раунда, перерыв.
     pub round: RoundSpec,
+    /// Отряды: сколько солдат, как плотно идут строем.
+    pub squad: SquadSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -117,6 +120,7 @@ impl Default for SimConfig {
             grenade: GrenadeSpec::default(),
             capture: CaptureSpec::default(),
             round: RoundSpec::default(),
+            squad: SquadSpec::default(),
             arsenal: Arsenal::default(),
         }
     }

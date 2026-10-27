@@ -2,9 +2,10 @@
 //!
 //! Солдат думает не каждый тик, а раз в `think_interval` тиков, и все — вразнобой.
 //! Сами решения считаются параллельно: каждый поток только читает мир.
+//! К какой точке идти, решает командир отряда — за весь отряд (см. `squad`).
 
 use crate::rng::Rng;
-use crate::world::{Controller, NO_OBJECTIVE, World};
+use crate::world::{CapturePoint, Controller, NO_OBJECTIVE, World};
 use glam::Vec2;
 use rayon::prelude::*;
 
@@ -40,7 +41,47 @@ pub(crate) fn think(world: &mut World) -> u32 {
             world.throw_grenade(d.soldier, at);
         }
     }
+
+    // Отряды думают так же вразнобой: командир выбирает точку для всех.
+    for index in 0..world.squads.len() {
+        let squad = &world.squads[index];
+        let Some(leader) = squad.leader.filter(|_| index as u64 % interval == phase) else { continue };
+        let mut rng = Rng::for_entity(world.seed ^ 0x0050_00AD, world.tick, index as u32);
+        let objective = choose_objective(&world.points, squad.team, world.soldiers[leader as usize].pos, squad.objective, world.config.defend_probability, &mut rng);
+        world.squads[index].objective = objective;
+        for &m in &world.squads[index].members {
+            world.soldiers[m as usize].objective = objective;
+        }
+    }
     decisions.len() as u32
+}
+
+/// К какой точке идти из `pos`: ближайшая (с долей случайности) не наша. На своей
+/// точке остаёмся с вероятностью `defend`, а если наши все — идём к любой.
+fn choose_objective(points: &[CapturePoint], team: u8, pos: Vec2, current: u32, defend: f32, rng: &mut Rng) -> u32 {
+    let ours = |p: &CapturePoint| p.owner == Some(team);
+    let keep = match points.get(current as usize) {
+        Some(p) if !ours(p) => true,
+        Some(_) => rng.chance(defend),
+        None => false,
+    };
+    if keep {
+        return current;
+    }
+    let all_ours = points.iter().all(ours);
+    let mut best = NO_OBJECTIVE;
+    let mut best_score = f32::INFINITY;
+    for (index, p) in points.iter().enumerate() {
+        if ours(p) && !all_ours {
+            continue;
+        }
+        let score = p.pos.distance(pos) * rng.range(0.6, 1.4);
+        if score < best_score {
+            best_score = score;
+            best = index as u32;
+        }
+    }
+    best
 }
 
 fn decide(w: &World, i: usize) -> Decision {
@@ -81,31 +122,13 @@ fn decide(w: &World, i: usize) -> Decision {
             .find(|&j| w.map.line_of_sight(me.pos, w.soldiers[j as usize].pos));
     }
 
-    // --- Цель движения: ближайшая (с долей случайности) не наша точка.
-    // Часть солдат остаётся защищать свою точку, остальные идут дальше.
-    let ours = |p: &crate::world::CapturePoint| p.owner == Some(me.team);
-    let keep = match w.points.get(me.objective as usize) {
-        Some(p) if !ours(p) => true,
-        Some(_) => rng.chance(w.config.defend_probability),
-        None => false,
-    };
-    let objective = if keep {
+    // --- Цель движения. В отряде с командиром её выбирает командир (ниже, в `think`);
+    // без отряда — сам: часть остаётся защищать свою точку, остальные идут дальше.
+    let led = w.squads.get(me.squad as usize).is_some_and(|q| q.leader.is_some());
+    let objective = if led {
         me.objective
     } else {
-        let all_ours = w.points.iter().all(ours);
-        let mut best = NO_OBJECTIVE;
-        let mut best_score = f32::INFINITY;
-        for (index, p) in w.points.iter().enumerate() {
-            if ours(p) && !all_ours {
-                continue;
-            }
-            let score = p.pos.distance(me.pos) * rng.range(0.6, 1.4);
-            if score < best_score {
-                best_score = score;
-                best = index as u32;
-            }
-        }
-        best
+        choose_objective(&w.points, me.team, me.pos, me.objective, w.config.defend_probability, &mut rng)
     };
 
     // --- Граната: если враги сбились в кучу на подходящей дистанции.

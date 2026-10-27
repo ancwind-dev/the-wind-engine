@@ -11,6 +11,7 @@ pub mod mapgen;
 pub mod nav;
 pub mod rng;
 pub mod round;
+pub mod squad;
 pub mod world;
 
 mod ai;

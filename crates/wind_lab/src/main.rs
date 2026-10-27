@@ -896,6 +896,21 @@ impl Lab {
             theme::label(ui, "Цель");
             ui.label(s.target.map_or("—".into(), |t| format!("солдат #{t}")));
             ui.end_row();
+            theme::label(ui, "Отряд");
+            match self.world.squads.get(s.squad as usize) {
+                Some(q) => {
+                    let role = match self.world.orders.get(i as usize) {
+                        Some(wind_sim::squad::Order::Lead { .. }) => "командир".to_string(),
+                        Some(wind_sim::squad::Order::Follow { .. }) => q.leader.map_or("в строю".into(), |l| format!("в строю, командир #{l}")),
+                        _ => "сам по себе".into(),
+                    };
+                    ui.label(format!("№{} · {role}", s.squad + 1));
+                }
+                None => {
+                    ui.label("—");
+                }
+            }
+            ui.end_row();
             theme::label(ui, "Идёт к");
             ui.label(match s.objective {
                 o if (o as usize) < self.world.points.len() => format!("точке {}", (b'A' + o as u8) as char),

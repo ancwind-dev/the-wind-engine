@@ -3,6 +3,7 @@
 use crate::theme;
 use crate::viewport::{Hud, Scene, ScenePoint, SceneSoldier, SelectedInfo};
 use wind_net::NetClient;
+use wind_sim::squad::Order;
 use wind_sim::{Controller, ProjectileKind, Vec2, World};
 
 /// Вспышка взрыва в локальной симуляции.
@@ -38,6 +39,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
         }
     }
     let sel = selected.filter(|&i| world.soldiers[i as usize].alive);
+    let (rings, lines) = sel.map(|i| squad_marks(world, i)).unwrap_or_default();
     Scene {
         title: "Вид сверху · локальная симуляция".into(),
         map: &world.map,
@@ -64,8 +66,8 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
         flow: sel.and_then(|i| world.flow.get(world.soldiers[i as usize].objective as usize)),
         hud: None,
         kill_feed: Vec::new(),
-        rings: Vec::new(),
-        lines: Vec::new(),
+        rings,
+        lines,
         corpses: world
             .soldiers
             .iter()
@@ -82,6 +84,26 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
             .collect(),
         atmosphere: world.atmosphere.clone(),
     }
+}
+
+/// Кольцо на земле: центр, радиус, цвет sRGB 0..1.
+type Ring = (Vec2, f32, [f32; 3]);
+
+/// Отряд выбранного солдата: командир — оранжевое кольцо, места в строю —
+/// маленькие белые кольца, от командира к бойцам — линии (в 2D).
+fn squad_marks(world: &World, selected: u32) -> (Vec<Ring>, Vec<(Vec2, Vec2)>) {
+    let (mut rings, mut lines) = (Vec::new(), Vec::new());
+    let Some(squad) = world.squads.get(world.soldiers[selected as usize].squad as usize) else { return (rings, lines) };
+    let Some(leader) = squad.leader.map(|l| world.soldiers[l as usize].pos) else { return (rings, lines) };
+    rings.push((leader, 1.3, [1.0, 0.63, 0.16]));
+    for &m in &squad.members {
+        let s = &world.soldiers[m as usize];
+        if let (true, Some(Order::Follow { slot, .. })) = (s.alive, world.orders.get(m as usize)) {
+            rings.push((*slot, 0.45, [0.9, 0.9, 0.9]));
+            lines.push((leader, s.pos));
+        }
+    }
+    (rings, lines)
 }
 
 /// `None`, пока сервер не прислал приветствие.
