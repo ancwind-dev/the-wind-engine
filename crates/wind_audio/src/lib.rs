@@ -14,10 +14,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Sender, channel};
 
+/// Что игра просит у потока звука.
+enum Command {
+    Play(Play),
+    Volume(f32),
+}
+
 /// Вывод звука. Команды уходят в поток звуковой карты через канал — игра
 /// не ждёт и не блокируется.
 pub struct Audio {
-    tx: Option<Sender<Play>>,
+    tx: Option<Sender<Command>>,
     _stream: Option<cpal::Stream>,
     /// Частота вывода, Гц (для задержек по расстоянию).
     pub rate: u32,
@@ -74,7 +80,14 @@ impl Audio {
 
     pub fn play(&self, play: Play) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(play);
+            let _ = tx.send(Command::Play(play));
+        }
+    }
+
+    /// Общая громкость 0..1 — меняется сразу, без перезапуска.
+    pub fn set_volume(&self, volume: f32) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Command::Volume(volume.clamp(0.0, 1.0)));
         }
     }
 
@@ -93,7 +106,7 @@ fn build<T: SizedSample + FromSample<f32>>(
     config: &cpal::StreamConfig,
     channels: usize,
     mut mixer: Mixer,
-    rx: std::sync::mpsc::Receiver<Play>,
+    rx: std::sync::mpsc::Receiver<Command>,
     meter: Arc<Meter>,
 ) -> Result<cpal::Stream, String> {
     let mut stereo = Vec::new();
@@ -101,8 +114,11 @@ fn build<T: SizedSample + FromSample<f32>>(
         .build_output_stream(
             *config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                while let Ok(p) = rx.try_recv() {
-                    mixer.play(p);
+                while let Ok(c) = rx.try_recv() {
+                    match c {
+                        Command::Play(p) => mixer.play(p),
+                        Command::Volume(v) => mixer.volume = v,
+                    }
                 }
                 let frames = data.len() / channels.max(1);
                 stereo.resize(frames * 2, 0.0);

@@ -4046,6 +4046,8 @@ name = "wind_client"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "ron",
+ "serde",
  "wind_audio",
  "wind_net",
  "wind_render",
