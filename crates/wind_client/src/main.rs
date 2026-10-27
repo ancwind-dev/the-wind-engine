@@ -5,7 +5,9 @@
 //! cargo run --release -p wind_client -- --bench 15 --soldiers 1000
 //! cargo run --release -p wind_client -- --export-models      — выгрузить модели в .vox
 
+mod fog;
 mod hud;
+mod minimap;
 mod source;
 
 use eframe::egui::{self, Color32};
@@ -168,6 +170,8 @@ struct Game {
     heat: f32,
     /// Где появиться после смерти: 0 — база, 1 + i — точка i (клавиши 1–6).
     spawn: u8,
+    fog: fog::Fog,
+    minimap: minimap::Minimap,
     shots_seen: u32,
     notes: Vec<String>,
     render_state: Option<egui_wgpu::RenderState>,
@@ -251,6 +255,8 @@ impl Game {
             kick: 0.0,
             heat: 0.0,
             spawn: 0,
+            fog: fog::Fog::default(),
+            minimap: minimap::Minimap::default(),
             shots_seen: 0,
             notes,
             render_state,
@@ -380,6 +386,16 @@ impl eframe::App for Game {
                     }
                 }
             }
+            // Туман войны: враги — только те, кого видят свои.
+            let own_team = view.round.own_team.filter(|_| view.has_me && self.bench.is_none());
+            if let Some(map) = self.source.map() {
+                let center = view.me_pos.unwrap_or(self.camera.target);
+                self.fog.update(dt, map, self.source.vision_range(), own_team, center, &view.soldiers);
+            }
+            view.soldiers.retain(|s| self.fog.shows(s, own_team));
+            if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+                self.minimap.big = !self.minimap.big;
+            }
             // Отдача: каждый свой выстрел толкает прицел и камеру, потом всё успокаивается.
             let shots = self.source.own_shots();
             let weapon = self.source.own_weapon().unwrap_or_default();
@@ -440,6 +456,7 @@ impl eframe::App for Game {
                     marker: view.me_pos,
                     rings: &[],
                     corpses: &view.corpses,
+                    own_team,
                     atmosphere: &atmosphere,
                     viewport_px: [rect.left() * ppp, rect.top() * ppp, rect.width() * ppp, rect.height() * ppp],
                     time,
@@ -466,6 +483,15 @@ impl eframe::App for Game {
             let painter = ui.painter_at(rect);
             hud::draw(&painter, rect, &view, self.source.status(), !view.has_me);
             hud::round(&painter, rect, &view);
+            if self.bench.is_none()
+                && let Some(map) = self.source.map()
+            {
+                let facing = self.source.own_id().and_then(|id| view.soldiers.iter().find(|s| s.id == id)).map(|s| s.facing);
+                self.minimap.draw(&ctx, &painter, rect, (map, self.source.map_key()), &view, facing);
+            }
+            if view.has_me && ctx.input(|i| i.key_down(egui::Key::Tab)) {
+                hud::scoreboard(&painter, rect, &view);
+            }
             if view.has_me && !view.me.alive && view.round.round.playing() {
                 hud::spawn_choice(&painter, rect, &view, self.spawn);
             }

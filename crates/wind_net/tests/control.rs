@@ -66,7 +66,7 @@ impl Net {
         while self.next_tick <= self.now {
             self.next_tick += 0.05;
             self.world.step();
-            let snapshot = self.replica.build_snapshot(&self.world, &self.config);
+            let snapshot = self.replica.build_snapshot(&self.world, &self.config, None);
             self.to_client.push_back((self.now + LATENCY, snapshot));
         }
         // Клиент: разбирает дошедшие снимки, двигает своего солдата, шлёт ввод.

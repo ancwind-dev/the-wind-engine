@@ -1,13 +1,16 @@
 //! Сервер: принимает клиентов по UDP, раздаёт им солдат, шлёт снимки.
 
 use crate::protocol::{self, Hello, InputPacket, Kind, Welcome};
-use crate::replication::{ReplicationConfig, ServerReplica};
+use crate::replication::{ReplicationConfig, ServerReplica, board, write_board};
 use crate::traffic::Traffic;
 use rayon::prelude::*;
 use std::io::{self, ErrorKind};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 use wind_sim::World;
+
+/// Как часто (в тиках) рассылать таблицу бойцов.
+const BOARD_TICKS: u64 = 20;
 
 /// Клиент, от которого столько не было пакетов, считается отключившимся.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -163,12 +166,19 @@ impl NetServer {
 
     /// Шлёт каждому клиенту его снимок. Вызывать после тика.
     pub fn send_snapshots(&mut self, world: &World) {
+        // Раз в секунду — таблица бойцов (одна на всех): игроки с именами и лучшие из ИИ.
+        let board = world.tick.is_multiple_of(BOARD_TICKS).then(|| {
+            let names: Vec<(u32, String)> = self.clients.iter().map(|c| (c.replica.soldier, c.name.clone())).collect();
+            let mut w = crate::bits::BitWriter::new();
+            write_board(&mut w, &board(world, &names));
+            w
+        });
         // Снимки клиентов независимы — собираем их на всех ядрах.
         let config = &self.config;
         let packets: Vec<Vec<u8>> = self
             .clients
             .par_iter_mut()
-            .map(|c| c.replica.build_snapshot(world, config))
+            .map(|c| c.replica.build_snapshot(world, config, board.as_ref()))
             .collect();
         for (i, packet) in packets.iter().enumerate() {
             self.send(i, packet);
@@ -210,6 +220,7 @@ pub fn welcome_for(world: &World, client_id: u16, soldier: u32, config: &Replica
         grenade_speed: c.grenade.throw_speed,
         soldier_speed: c.soldier.speed,
         arsenal_fingerprint: c.arsenal.fingerprint(),
+        vision_range: c.soldier.vision_range,
         hold_time: c.round.hold_time,
         time_limit: c.round.time_limit,
         intermission: c.round.intermission,

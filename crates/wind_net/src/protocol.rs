@@ -8,7 +8,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -204,6 +204,8 @@ pub struct Welcome {
     /// Отпечаток оружия и классов (`Arsenal::fingerprint`): у клиента должны быть
     /// те же `weapons.ron` и `factions.ron`, что и на сервере.
     pub arsenal_fingerprint: u64,
+    /// Дальность обзора солдата, м — для тумана войны на клиенте.
+    pub vision_range: f32,
     /// Правила раунда: сколько держать все точки, длина раунда и перерыва, с.
     pub hold_time: f32,
     pub time_limit: f32,
@@ -230,6 +232,7 @@ impl Welcome {
             self.interest_radius,
             self.grenade_speed,
             self.soldier_speed,
+            self.vision_range,
             self.hold_time,
             self.time_limit,
             self.intermission,
@@ -258,6 +261,7 @@ impl Welcome {
             interest_radius: r.read_f32()?,
             grenade_speed: r.read_f32()?,
             soldier_speed: r.read_f32()?,
+            vision_range: r.read_f32()?,
             hold_time: r.read_f32()?,
             time_limit: r.read_f32()?,
             intermission: r.read_f32()?,
