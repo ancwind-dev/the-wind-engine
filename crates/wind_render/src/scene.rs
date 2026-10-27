@@ -105,6 +105,8 @@ pub struct SceneBuilder {
     pub characters: Option<Arc<CharacterSet>>,
     /// Ширина плавного сгиба у суставов, воксели. 0 — части жёсткие.
     pub joint_blend: f32,
+    /// Где в этом кадре рушились стены — для звука (одно место на кусок стены).
+    pub crumbled: Vec<Vec2>,
 }
 
 /// Ширина сгиба по умолчанию, воксели.
@@ -123,6 +125,7 @@ impl Default for SceneBuilder {
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
             characters: None,
             joint_blend: JOINT_BLEND,
+            crumbled: Vec::new(),
         }
     }
 }
@@ -153,6 +156,14 @@ impl SceneBuilder {
             self.effects.reset();
         }
         self.effects.update(input.map, input.dt.min(0.1), input.blasts, &update.broken);
+        // Звук обрушения: заметно сломанные клетки, соседние (ближе 4 м) — одним местом.
+        self.crumbled.clear();
+        for b in update.broken.iter().filter(|b| b.destroyed || b.lost > 0.3) {
+            let p = Vec2::new(b.x as f32 + 0.5, b.y as f32 + 0.5);
+            if self.crumbled.iter().all(|c| c.distance_squared(p) > 16.0) {
+                self.crumbled.push(p);
+            }
+        }
         let ground_key = (input.map_key, input.map.ground_revision);
         let ground_changed = update.reset || self.ground_key != Some(ground_key);
         if update.reset || !update.chunks.is_empty() || ground_changed {

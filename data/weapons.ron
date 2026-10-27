@@ -7,12 +7,14 @@
 // выстрелом очереди, sustained_fire_diminish_rate — сколько долей спадает за секунду
 // (больше чем втрое разброс не вырастает);
 // kill_probability — вероятность убить попаданием, иначе ранит на wound_damage;
-// blast — у гранатомётов: снаряд летит в точку прицела и взрывается.
+// blast — у гранатомётов: снаряд летит в точку прицела и взрывается;
+// sound — звук выстрела: rifle, carbine, smg или launcher.
 (
     weapons: [
         (
             name: "m4",
             model: "weapons/m4",
+            sound: "rifle",
             retrigger_time: 0.113,
             magazine_size: 30,
             reload_time: 2.4,
@@ -27,6 +29,7 @@
         (
             name: "ak74",
             model: "weapons/ak74",
+            sound: "rifle",
             retrigger_time: 0.123,
             magazine_size: 30,
             reload_time: 2.6,
@@ -41,6 +44,7 @@
         (
             name: "aks74u",
             model: "weapons/aks74u",
+            sound: "carbine",
             retrigger_time: 0.098,
             magazine_size: 30,
             reload_time: 2.3,
@@ -55,6 +59,7 @@
         (
             name: "pp2000",
             model: "weapons/pp2000",
+            sound: "smg",
             retrigger_time: 0.07,
             magazine_size: 20,
             reload_time: 2.0,
@@ -70,6 +75,7 @@
         (
             name: "m32_mgl",
             model: "weapons/m32_mgl",
+            sound: "launcher",
             retrigger_time: 0.6,
             magazine_size: 6,
             reload_time: 4.5,
@@ -85,6 +91,7 @@
         (
             name: "gl06",
             model: "weapons/gl06",
+            sound: "launcher",
             retrigger_time: 0.5,
             magazine_size: 1,
             reload_time: 2.2,
@@ -100,6 +107,7 @@
         (
             name: "gm94",
             model: "weapons/gm94",
+            sound: "launcher",
             retrigger_time: 1.2,
             magazine_size: 4,
             reload_time: 3.5,

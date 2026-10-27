@@ -16,6 +16,9 @@ pub struct WeaponSpec {
     pub name: String,
     /// Модель: путь от `data/models` без `.xml`. Симуляции не нужна.
     pub model: String,
+    /// Звук выстрела: `rifle`, `carbine`, `smg`, `launcher` (см. `wind_audio::Gun`).
+    /// Пусто — по виду оружия. Симуляции не нужен.
+    pub sound: String,
     /// Пауза между выстрелами, с.
     pub retrigger_time: f32,
     pub magazine_size: u32,
@@ -64,6 +67,7 @@ impl Default for WeaponSpec {
         WeaponSpec {
             name: "rifle".into(),
             model: String::new(),
+            sound: String::new(),
             retrigger_time: 0.15,
             magazine_size: 30,
             reload_time: 2.5,
@@ -198,7 +202,7 @@ impl Arsenal {
     pub fn fingerprint(&self) -> u64 {
         let mut text = String::new();
         for w in &self.weapons {
-            text += &format!("{:?}", WeaponSpec { model: String::new(), ..w.clone() });
+            text += &format!("{:?}", WeaponSpec { model: String::new(), sound: String::new(), ..w.clone() });
         }
         for team in &self.teams {
             for k in team {
@@ -241,6 +245,7 @@ mod tests {
         let a = Arsenal::load(&data()).unwrap();
         let mut b = a.clone();
         b.weapons[0].model = "другая/модель".into();
+        b.weapons[0].sound = "smg".into();
         assert_eq!(a.fingerprint(), b.fingerprint());
         b.weapons[0].magazine_size += 1;
         assert_ne!(a.fingerprint(), b.fingerprint());
