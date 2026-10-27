@@ -130,7 +130,7 @@ impl Lab {
         }
         let studio = Studio::new(characters, cc.wgpu_render_state.is_some());
         let maps_dir = config_path.parent().map_or_else(|| PathBuf::from("data/maps"), |data| data.join("maps"));
-        let map_ws = MapWorkspace::new(maps_dir, &base_config);
+        let map_ws = MapWorkspace::new(maps_dir.clone(), &base_config);
         let mut lab = Lab {
             world,
             config_mtime: mtime(&config_path),
@@ -181,6 +181,18 @@ impl Lab {
                     if let Some(name) = args.next() {
                         lab.map_ws.open(&name);
                         lab.set_workspace(Workspace::Map);
+                    }
+                }
+                // wind_lab --play-map руины — бой ИИ на карте из data/maps.
+                "--play-map" => {
+                    if let Some(name) = args.next() {
+                        match wind_sim::mapfile::MapFile::load(&maps_dir.join(&name)) {
+                            Ok(file) => {
+                                lab.map_file = Some(file);
+                                lab.restart();
+                            }
+                            Err(e) => lab.log(format!("карта «{name}»: {e}")),
+                        }
                     }
                 }
                 "--editor" => lab.set_workspace(Workspace::Map),
@@ -910,6 +922,16 @@ impl Lab {
                     ui.label("—");
                 }
             }
+            ui.end_row();
+            theme::label(ui, "Укрытие");
+            ui.label(match s.cover {
+                Some(_) if s.reload_timer > 0.0 => "прячется за угол (перезарядка)",
+                Some(_) => "стреляет из-за угла",
+                None => "—",
+            });
+            ui.end_row();
+            theme::label(ui, "Под огнём");
+            ui.label(if s.under_fire > 0.0 { format!("да, ещё {:.1} с", s.under_fire) } else { "нет".into() });
             ui.end_row();
             theme::label(ui, "Идёт к");
             ui.label(match s.objective {

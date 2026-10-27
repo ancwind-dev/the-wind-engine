@@ -131,22 +131,49 @@ enum Outcome {
     Explode,
 }
 
+/// Кого пуля миновала совсем рядом (не больше четырёх — хватит).
+#[derive(Default)]
+struct NearMisses {
+    ids: [u32; 4],
+    count: usize,
+}
+
+impl NearMisses {
+    fn push(&mut self, id: u32) {
+        if self.count < self.ids.len() {
+            self.ids[self.count] = id;
+            self.count += 1;
+        }
+    }
+}
+
+/// Расстояние от точки до отрезка.
+fn distance_to_segment(a: Vec2, b: Vec2, p: Vec2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
 pub(crate) fn update_projectiles(world: &mut World) {
     let dt = world.dt();
     let radius = world.config.soldier.radius;
+    let near_miss = world.config.cover.near_miss;
     let World { projectiles, soldiers, grid, map, .. } = world;
     let (soldiers, grid, map) = (&*soldiers, &*grid, &*map);
 
     // Параллельно двигаем снаряды и ищем попадания, только читая мир.
-    let outcomes: Vec<Outcome> = projectiles
+    let outcomes: Vec<(Outcome, NearMisses)> = projectiles
         .par_iter_mut()
         .map(|p| match &mut p.kind {
             ProjectileKind::Bullet => {
                 let next = p.pos + p.vel * dt;
                 let wall_t = map.cast(p.pos, next).map_or(f32::INFINITY, |(t, _, _)| t);
                 let mid = (p.pos + next) * 0.5;
-                let reach = (next - p.pos).length() * 0.5 + radius + 1.0;
+                let reach = (next - p.pos).length() * 0.5 + (radius + 1.0).max(near_miss);
                 let mut hit: Option<(f32, u32)> = None;
+                let mut near = NearMisses::default();
+                // До стены пуля долетает не вся: свист за стеной не пугает.
+                let end = if wall_t <= 1.0 { p.pos + (next - p.pos) * wall_t } else { next };
                 grid.query(mid, reach, |j| {
                     let s = &soldiers[j as usize];
                     if s.team == p.team || !s.alive {
@@ -158,8 +185,11 @@ pub(crate) fn update_projectiles(world: &mut World) {
                     {
                         hit = Some((t, j));
                     }
+                    if distance_to_segment(p.pos, end, s.pos) < near_miss {
+                        near.push(j);
+                    }
                 });
-                if let Some((_, j)) = hit {
+                let outcome = if let Some((_, j)) = hit {
                     Outcome::HitSoldier(j)
                 } else if wall_t <= 1.0 {
                     Outcome::Gone
@@ -167,7 +197,8 @@ pub(crate) fn update_projectiles(world: &mut World) {
                     p.pos = next;
                     p.ttl -= dt;
                     if p.ttl <= 0.0 { Outcome::Gone } else { Outcome::Flying }
-                }
+                };
+                (outcome, near)
             }
             ProjectileKind::Grenade { fuse, flight } => {
                 *fuse -= dt;
@@ -186,7 +217,7 @@ pub(crate) fn update_projectiles(world: &mut World) {
                         p.pos.y += step.y;
                     }
                 }
-                if *fuse <= 0.0 { Outcome::Explode } else { Outcome::Flying }
+                (if *fuse <= 0.0 { Outcome::Explode } else { Outcome::Flying }, NearMisses::default())
             }
             ProjectileKind::Shell { flight } => {
                 let next = p.pos + p.vel * dt;
@@ -206,21 +237,38 @@ pub(crate) fn update_projectiles(world: &mut World) {
                 // Взрываемся у стены (чуть не долетев), у врага или в точке прицела.
                 let t = wall_t.min(hit_t);
                 *flight -= dt;
-                if t <= 1.0 {
+                let outcome = if t <= 1.0 {
                     p.pos += (next - p.pos) * (t - 0.05).max(0.0);
                     Outcome::Explode
                 } else {
                     p.pos = next;
                     if *flight <= 0.0 { Outcome::Explode } else { Outcome::Flying }
-                }
+                };
+                (outcome, NearMisses::default())
             }
         })
         .collect();
 
+    // По кому стреляли: пуля прошла рядом или попала — солдат запоминает, откуда.
+    let under_fire = world.config.cover.under_fire;
+    for (index, (outcome, near)) in outcomes.iter().enumerate() {
+        let shooter = world.projectiles[index].shooter;
+        let from = world.soldiers[shooter as usize].pos;
+        let hit = match *outcome {
+            Outcome::HitSoldier(v) => Some(v),
+            _ => None,
+        };
+        for &j in near.ids[..near.count].iter().chain(hit.iter()) {
+            let s = &mut world.soldiers[j as usize];
+            s.threat = Some(from);
+            s.under_fire = under_fire;
+        }
+    }
+
     // Последствия применяем по порядку — так результат не зависит от потоков.
     let mut finished = Vec::new();
     let mut explosions = Vec::new();
-    for (index, outcome) in outcomes.iter().enumerate() {
+    for (index, (outcome, _)) in outcomes.iter().enumerate() {
         let p = &world.projectiles[index];
         match *outcome {
             Outcome::Flying => continue,

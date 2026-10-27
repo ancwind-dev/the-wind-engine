@@ -2,6 +2,7 @@
 
 use crate::arsenal::{BlastSpec, WeaponSpec};
 use crate::config::SimConfig;
+use crate::cover::Cover;
 use crate::grid::SpatialGrid;
 use crate::map::Map;
 use crate::atmosphere::Atmosphere;
@@ -98,6 +99,15 @@ pub struct Soldier {
     pub heat: f32,
     /// Номер отряда в `World::squads` (`NO_SQUAD` — без отряда). Не меняется весь матч.
     pub squad: u32,
+    /// Укрытие (угол, из-за которого стреляет) и сколько ещё за него держаться, с.
+    pub cover: Option<Cover>,
+    pub cover_timer: f32,
+    /// Через сколько секунд можно снова искать укрытие.
+    pub cover_search: f32,
+    /// Откуда по солдату стреляли (пуля прошла рядом или попала) и сколько ещё
+    /// он это помнит, с.
+    pub threat: Option<Vec2>,
+    pub under_fire: f32,
 }
 
 impl Soldier {
@@ -397,6 +407,12 @@ impl World {
                 Order::Follow { slot, .. } => slot.distance(s.pos) < squad_spec.leash,
                 _ => true,
             };
+            s.under_fire = (s.under_fire - dt).max(0.0);
+            s.cover_search -= dt;
+            s.cover_timer -= dt;
+            if s.cover_timer <= 0.0 {
+                s.cover = None;
+            }
 
             if let Controller::Player(input) = s.controller {
                 let look = input.aim - s.pos;
@@ -411,6 +427,18 @@ impl World {
                     return;
                 }
                 desired = input.move_dir.clamp_length_max(1.0);
+            } else if let Some(c) = s.cover.filter(|_| fight) {
+                // Укрытие: стреляем из-за угла, перезаряжаемся за ним.
+                let spot = if s.reload_timer > 0.0 { c.hide } else { c.shoot };
+                let to = spot - s.pos;
+                let d = to.length();
+                if d > 0.1 {
+                    desired = to / d * d.min(1.0);
+                }
+                let look = c.threat - s.pos;
+                if look != Vec2::ZERO {
+                    s.facing = look.y.atan2(look.x);
+                }
             } else if let Some(target) = s.target.filter(|&t| fight && prev[t as usize].1) {
                 // Враг виден: подходим на дистанцию огня и стоим.
                 let to = prev[target as usize].0 - s.pos;
@@ -737,6 +765,11 @@ impl World {
             kit,
             heat: 0.0,
             squad: NO_SQUAD,
+            cover: None,
+            cover_timer: 0.0,
+            cover_search: 0.0,
+            threat: None,
+            under_fire: 0.0,
         }
     }
 

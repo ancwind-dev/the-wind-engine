@@ -89,11 +89,19 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
 /// Кольцо на земле: центр, радиус, цвет sRGB 0..1.
 type Ring = (Vec2, f32, [f32; 3]);
 
-/// Отряд выбранного солдата: командир — оранжевое кольцо, места в строю —
-/// маленькие белые кольца, от командира к бойцам — линии (в 2D).
+/// Отряд и укрытие выбранного солдата: командир — оранжевое кольцо, места в строю —
+/// маленькие белые кольца, от командира к бойцам — линии (в 2D). Укрытие: откуда
+/// стрелять — зелёное кольцо, где прятаться — серое, между ними и к угрозе — линии.
 fn squad_marks(world: &World, selected: u32) -> (Vec<Ring>, Vec<(Vec2, Vec2)>) {
     let (mut rings, mut lines) = (Vec::new(), Vec::new());
-    let Some(squad) = world.squads.get(world.soldiers[selected as usize].squad as usize) else { return (rings, lines) };
+    let me = &world.soldiers[selected as usize];
+    if let Some(c) = me.cover {
+        rings.push((c.shoot, 0.55, [0.35, 0.85, 0.35]));
+        rings.push((c.hide, 0.55, [0.55, 0.55, 0.55]));
+        lines.push((c.shoot, c.hide));
+        lines.push((c.shoot, c.threat));
+    }
+    let Some(squad) = world.squads.get(me.squad as usize) else { return (rings, lines) };
     let Some(leader) = squad.leader.map(|l| world.soldiers[l as usize].pos) else { return (rings, lines) };
     rings.push((leader, 1.3, [1.0, 0.63, 0.16]));
     for &m in &squad.members {

@@ -4,6 +4,7 @@
 //! что хочется поменять.
 
 use crate::arsenal::{Arsenal, WeaponSpec};
+use crate::cover::CoverSpec;
 use crate::round::RoundSpec;
 use crate::squad::SquadSpec;
 use serde::Deserialize;
@@ -34,6 +35,8 @@ pub struct SimConfig {
     pub round: RoundSpec,
     /// Отряды: сколько солдат, как плотно идут строем.
     pub squad: SquadSpec,
+    /// Укрытия: где искать, сколько держаться, что значит «по мне стреляют».
+    pub cover: CoverSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -121,6 +124,7 @@ impl Default for SimConfig {
             capture: CaptureSpec::default(),
             round: RoundSpec::default(),
             squad: SquadSpec::default(),
+            cover: CoverSpec::default(),
             arsenal: Arsenal::default(),
         }
     }

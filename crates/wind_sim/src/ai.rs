@@ -3,17 +3,27 @@
 //! Солдат думает не каждый тик, а раз в `think_interval` тиков, и все — вразнобой.
 //! Сами решения считаются параллельно: каждый поток только читает мир.
 //! К какой точке идти, решает командир отряда — за весь отряд (см. `squad`).
+//! Под огнём солдат ищет угол, из-за которого стрелять (см. `cover`).
 
+use crate::cover::{self, Cover, Query};
+use crate::map::Map;
 use crate::rng::Rng;
+use crate::squad::Order;
 use crate::world::{CapturePoint, Controller, NO_OBJECTIVE, World};
 use glam::Vec2;
 use rayon::prelude::*;
+use std::collections::HashMap;
 
 struct Decision {
     soldier: u32,
     target: Option<u32>,
     objective: u32,
     grenade_at: Option<Vec2>,
+    cover: Option<Cover>,
+    /// Искали новое укрытие (дорого — следующий поиск не скоро).
+    searched: bool,
+    /// Враг рядом и укрытие держит — держаться его дальше.
+    refresh: bool,
 }
 
 /// Больше кандидатов на видимость не проверяем: самые дальние всё равно не важны.
@@ -24,19 +34,44 @@ pub(crate) fn think(world: &mut World) -> u32 {
     let interval = world.config.think_interval.max(1) as u64;
     let phase = world.tick % interval;
     let w: &World = world;
+    // Чьи углы уже заняты: двое в одном углу толкаются и оба на виду.
+    let taken: HashMap<(i32, i32), u32> = w
+        .soldiers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| Some((Map::cell_of(s.cover?.shoot), i as u32)))
+        .collect();
     let decisions: Vec<Decision> = (0..w.soldiers.len())
         .into_par_iter()
         .filter(|&i| {
             let s = &w.soldiers[i];
             i as u64 % interval == phase && s.alive && s.controller == Controller::Ai
         })
-        .map(|i| decide(w, i))
+        .map(|i| decide(w, i, &taken))
         .collect();
 
+    let spec = world.config.cover.clone();
+    let mut claimed = HashMap::new();
     for d in &decisions {
         let s = &mut world.soldiers[d.soldier as usize];
         s.target = d.target;
         s.objective = d.objective;
+        let mut cover = d.cover;
+        if d.searched {
+            // Не нашли — следующий поиск не скоро; нашли — нового не понадобится.
+            s.cover_search = if cover.is_some() { 0.5 } else { spec.research };
+            // Двое в этом тике нашли один угол — второй поищет снова чуть позже.
+            if let Some(c) = cover
+                && claimed.insert(Map::cell_of(c.shoot), d.soldier).is_some()
+            {
+                cover = None;
+                s.cover_search = 0.5;
+            }
+        }
+        s.cover = cover;
+        if d.refresh && cover.is_some() {
+            s.cover_timer = spec.hold;
+        }
         if let Some(at) = d.grenade_at {
             world.throw_grenade(d.soldier, at);
         }
@@ -84,7 +119,7 @@ fn choose_objective(points: &[CapturePoint], team: u8, pos: Vec2, current: u32, 
     best
 }
 
-fn decide(w: &World, i: usize) -> Decision {
+fn decide(w: &World, i: usize, taken: &HashMap<(i32, i32), u32>) -> Decision {
     let me = &w.soldiers[i];
     let mut rng = Rng::for_entity(w.seed, w.tick, i as u32);
     let vision = w.config.soldier.vision_range;
@@ -154,5 +189,41 @@ fn decide(w: &World, i: usize) -> Decision {
         }
     }
 
-    Decision { soldier: i as u32, target, objective, grenade_at }
+    // --- Укрытие: от врага, которого видим, или от того, кто по нам стрелял.
+    let spec = &w.config.cover;
+    let threat = target.map(|t| w.soldiers[t as usize].pos).or(me.threat.filter(|_| me.under_fire > 0.0));
+    let mut cover = me.cover;
+    let (mut searched, mut refresh) = (false, false);
+    if let Some(threat) = threat {
+        // Боец отряда ищет укрытие у своего места в строю, остальные — где стоят.
+        let around = match w.orders.get(i) {
+            Some(Order::Follow { slot, .. }) if slot.distance(me.pos) < w.config.squad.leash => *slot,
+            _ => me.pos,
+        };
+        // Враг перебегает — угол держим, пока за ним можно спрятаться; стрелять
+        // из него можно и по другим.
+        if cover.is_some_and(|c| c.shoot.distance(around) <= spec.search_radius * 1.5 && c.shelters(&w.map, threat)) {
+            cover = cover.map(|c| Cover { threat, ..c });
+            refresh = true;
+        } else {
+            cover = None;
+            if spec.search_radius > 0.0 && me.cover_search <= 0.0 {
+                searched = true;
+                let weapon = w.weapon(i as u32);
+                let q = Query {
+                    from: me.pos,
+                    around,
+                    threat,
+                    min_range: weapon.blast.as_ref().map_or(3.0, |b| b.radius * 1.3),
+                    max_range: weapon.range * 0.95,
+                    radius: spec.search_radius,
+                    body: w.config.soldier.radius,
+                };
+                cover = cover::find(&w.map, &q, |x, y| taken.get(&(x, y)).is_some_and(|&o| o != i as u32));
+                refresh = cover.is_some();
+            }
+        }
+    }
+
+    Decision { soldier: i as u32, target, objective, grenade_at, cover, searched, refresh }
 }
