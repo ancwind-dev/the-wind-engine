@@ -110,9 +110,10 @@ pub fn formation_offset(rank: u32, spacing: f32, on_point: bool) -> Vec2 {
 pub(crate) fn plan(squads: &mut [Squad], soldiers: &[Soldier], orders: &mut Vec<Order>, map: &Map, spec: &SquadSpec, points: &[Vec2], radius: f32, body: f32) {
     orders.clear();
     orders.resize(soldiers.len(), Order::Free);
+    // Раненые, отходящие в тыл, не командуют и не держат строй.
     let ai_alive = |i: u32| {
         let s = &soldiers[i as usize];
-        s.alive && s.controller == Controller::Ai
+        s.alive && s.controller == Controller::Ai && s.retreat.is_none()
     };
     for squad in squads.iter_mut() {
         // Командир остаётся, пока жив; иначе — следующий по списку.

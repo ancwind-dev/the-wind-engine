@@ -7,6 +7,7 @@ use crate::arsenal::{Arsenal, WeaponSpec};
 use crate::cover::CoverSpec;
 use crate::round::RoundSpec;
 use crate::squad::SquadSpec;
+use crate::suppression::SuppressionSpec;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -37,6 +38,8 @@ pub struct SimConfig {
     pub squad: SquadSpec,
     /// Укрытия: где искать, сколько держаться, что значит «по мне стреляют».
     pub cover: CoverSpec,
+    /// Подавление огнём, «залечь», огонь на подавление, отход раненых.
+    pub suppression: SuppressionSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -125,6 +128,7 @@ impl Default for SimConfig {
             round: RoundSpec::default(),
             squad: SquadSpec::default(),
             cover: CoverSpec::default(),
+            suppression: SuppressionSpec::default(),
             arsenal: Arsenal::default(),
         }
     }

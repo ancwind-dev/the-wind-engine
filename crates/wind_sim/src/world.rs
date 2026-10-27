@@ -12,6 +12,7 @@ use crate::nav::FlowField;
 use crate::rng::Rng;
 use crate::round::{EndReason, Phase, Round};
 use crate::squad::{self, NO_SQUAD, Order, Squad};
+use crate::suppression::RETREAT_TO_BASE;
 use crate::{ai, combat};
 use glam::Vec2;
 use rayon::prelude::*;
@@ -108,6 +109,20 @@ pub struct Soldier {
     /// он это помнит, с.
     pub threat: Option<Vec2>,
     pub under_fire: f32,
+    /// Подавление огнём, 0..1: пули рядом, спадает само (см. `suppression`).
+    pub suppression: f32,
+    /// Прижат огнём (подавление было выше `prone_at` и ещё не спало до `stand_at`).
+    pub pinned: bool,
+    /// Залёг: прижат огнём в чистом поле — почти не двигается, попасть труднее.
+    /// В укрытии прижатый не ложится, а уходит за угол.
+    pub prone: bool,
+    /// Где последний раз видел врага и сколько ещё туда стрелять на подавление, с.
+    pub last_seen: Option<Vec2>,
+    pub last_seen_timer: f32,
+    /// Сколько секунд нет боя (для заживления ран).
+    pub calm: f32,
+    /// Ранен и отходит: к точке захвата с этим номером или на базу (`RETREAT_TO_BASE`).
+    pub retreat: Option<u32>,
 }
 
 impl Soldier {
@@ -191,6 +206,8 @@ pub struct World {
     pub points: Vec<CapturePoint>,
     /// Поле путей к каждой точке захвата, по индексу точки.
     pub flow: Vec<FlowField>,
+    /// Поле путей к базе каждой команды — для отхода раненых.
+    pub base_flow: Vec<FlowField>,
     pub soldiers: Vec<Soldier>,
     pub projectiles: Vec<Projectile>,
     /// События последнего тика.
@@ -236,6 +253,8 @@ impl World {
         config.capture_points = capture_points.len() as u32;
         let mut flow: Vec<FlowField> = capture_points.iter().map(|&p| FlowField::new(p)).collect();
         flow.par_iter_mut().for_each(|f| f.compute(&map));
+        let mut base_flow: Vec<FlowField> = bases.iter().map(|&p| FlowField::new(p)).collect();
+        base_flow.par_iter_mut().for_each(|f| f.compute(&map));
 
         let points = capture_points
             .iter()
@@ -257,6 +276,7 @@ impl World {
             bases,
             points,
             flow,
+            base_flow,
             soldiers: Vec::new(),
             projectiles: Vec::new(),
             events: Vec::new(),
@@ -375,7 +395,7 @@ impl World {
     /// поля за тик, чтобы взрыв не давал рывка.
     fn update_navigation(&mut self) {
         let map = &self.map;
-        if let Some(field) = self.flow.iter_mut().find(|f| f.is_stale(map)) {
+        if let Some(field) = self.flow.iter_mut().chain(self.base_flow.iter_mut()).find(|f| f.is_stale(map)) {
             field.compute(map);
         }
     }
@@ -393,6 +413,8 @@ impl World {
         let arsenal = &self.config.arsenal;
         let orders = &self.orders;
         let squad_spec = &self.config.squad;
+        let sup = &self.config.suppression;
+        let base_flow = &self.base_flow;
 
         self.soldiers.par_iter_mut().enumerate().for_each(|(i, s)| {
             if !s.alive {
@@ -403,10 +425,30 @@ impl World {
             let order = orders.get(i).copied().unwrap_or_default();
             // Боец, далеко ушедший от своего места в строю, в бой не ввязывается:
             // догоняет отряд (стреляет он и на ходу).
-            let fight = match order {
-                Order::Follow { slot, .. } => slot.distance(s.pos) < squad_spec.leash,
-                _ => true,
-            };
+            // Раненый, отходящий в тыл, в бой тоже не ввязывается.
+            let fight = s.retreat.is_none()
+                && match order {
+                    Order::Follow { slot, .. } => slot.distance(s.pos) < squad_spec.leash,
+                    _ => true,
+                };
+            // Подавление спадает; сильно подавленного солдата ИИ прижимает к земле, пока
+            // не отпустит: в поле он залегает, в укрытии — прячется за угол. Вне боя
+            // раны понемногу заживают.
+            let ai = s.controller == Controller::Ai;
+            s.suppression = (s.suppression - sup.decay * dt).max(0.0);
+            s.pinned = ai && if s.pinned { s.suppression > sup.stand_at } else { s.suppression >= sup.prone_at };
+            s.prone = s.pinned && (s.cover.is_none() || !fight);
+            if s.prone {
+                speed *= sup.crawl;
+            }
+            s.last_seen_timer -= dt;
+            s.calm = if s.under_fire > 0.0 || s.target.is_some() { 0.0 } else { s.calm + dt };
+            if s.calm >= sup.heal_delay {
+                s.health = (s.health + sup.heal_rate * dt).min(1.0);
+            }
+            if !ai || s.health >= sup.return_above {
+                s.retreat = None;
+            }
             s.under_fire = (s.under_fire - dt).max(0.0);
             s.cover_search -= dt;
             s.cover_timer -= dt;
@@ -427,9 +469,19 @@ impl World {
                     return;
                 }
                 desired = input.move_dir.clamp_length_max(1.0);
+            } else if let Some(to) = s.retreat {
+                // Раненый отходит по полю путей к своей точке или на базу и ждёт там.
+                let field = if to == RETREAT_TO_BASE { base_flow.get(s.team as usize & 1) } else { flow.get(to as usize) };
+                if let Some(field) = field {
+                    let off = field.target - s.pos;
+                    if off.length() > capture_radius * 0.5 {
+                        desired = field.direction(map, s.pos).unwrap_or_else(|| off.normalize_or_zero());
+                        s.facing = desired.y.atan2(desired.x);
+                    }
+                }
             } else if let Some(c) = s.cover.filter(|_| fight) {
-                // Укрытие: стреляем из-за угла, перезаряжаемся за ним.
-                let spot = if s.reload_timer > 0.0 { c.hide } else { c.shoot };
+                // Укрытие: стреляем из-за угла, перезаряжаемся и пережидаем огонь за ним.
+                let spot = if s.reload_timer > 0.0 || s.pinned { c.hide } else { c.shoot };
                 let to = spot - s.pos;
                 let d = to.length();
                 if d > 0.1 {
@@ -770,6 +822,13 @@ impl World {
             cover_search: 0.0,
             threat: None,
             under_fire: 0.0,
+            suppression: 0.0,
+            pinned: false,
+            prone: false,
+            last_seen: None,
+            last_seen_timer: 0.0,
+            calm: 0.0,
+            retreat: None,
         }
     }
 

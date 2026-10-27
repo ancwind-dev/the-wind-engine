@@ -309,7 +309,7 @@ fn local_view(l: &Local) -> View {
             .iter()
             .enumerate()
             .filter(|(_, s)| s.alive)
-            .map(|(i, s)| SoldierDraw { id: i as u32, pos: s.drawn_pos(l.accumulator), facing: s.facing, team: s.team, look: None })
+            .map(|(i, s)| SoldierDraw { id: i as u32, pos: s.drawn_pos(l.accumulator), facing: s.facing, team: s.team, look: None, prone: s.prone })
             .collect(),
         blasts: l.blasts.clone(),
         points: w
@@ -393,7 +393,7 @@ fn remote_view(c: &NetClient) -> View {
             .enumerate()
             .filter_map(|(i, s)| {
                 let s = s.as_ref()?;
-                Some(SoldierDraw { id: i as u32, pos: w.render_pos(s, now), facing: s.net.facing(), team: s.net.team(), look: None })
+                Some(SoldierDraw { id: i as u32, pos: w.render_pos(s, now), facing: s.net.facing(), team: s.net.team(), look: None, prone: s.net.is_prone() })
             })
             .collect(),
         bullets: w.tracers.iter().map(|t| (t.pos, t.vel)).collect(),

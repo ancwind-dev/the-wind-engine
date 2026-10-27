@@ -9,6 +9,7 @@ use crate::cover::{self, Cover, Query};
 use crate::map::Map;
 use crate::rng::Rng;
 use crate::squad::Order;
+use crate::suppression::retreat_point;
 use crate::world::{CapturePoint, Controller, NO_OBJECTIVE, World};
 use glam::Vec2;
 use rayon::prelude::*;
@@ -20,6 +21,8 @@ struct Decision {
     objective: u32,
     grenade_at: Option<Vec2>,
     cover: Option<Cover>,
+    /// Ранен — куда отходить.
+    retreat: Option<u32>,
     /// Искали новое укрытие (дорого — следующий поиск не скоро).
     searched: bool,
     /// Враг рядом и укрытие держит — держаться его дальше.
@@ -51,10 +54,18 @@ pub(crate) fn think(world: &mut World) -> u32 {
         .collect();
 
     let spec = world.config.cover.clone();
+    let memory = world.config.suppression.suppress_memory;
     let mut claimed = HashMap::new();
     for d in &decisions {
+        let seen = d.target.map(|t| world.soldiers[t as usize].pos);
         let s = &mut world.soldiers[d.soldier as usize];
         s.target = d.target;
+        s.retreat = d.retreat;
+        // Где видели врага — туда и стрелять на подавление, когда он спрячется.
+        if seen.is_some() {
+            s.last_seen = seen;
+            s.last_seen_timer = memory;
+        }
         s.objective = d.objective;
         let mut cover = d.cover;
         if d.searched {
@@ -194,7 +205,15 @@ fn decide(w: &World, i: usize, taken: &HashMap<(i32, i32), u32>) -> Decision {
     let threat = target.map(|t| w.soldiers[t as usize].pos).or(me.threat.filter(|_| me.under_fire > 0.0));
     let mut cover = me.cover;
     let (mut searched, mut refresh) = (false, false);
-    if let Some(threat) = threat {
+    // --- Раненый отходит от врага; укрытия ему не нужны.
+    let retreat = match me.retreat {
+        Some(r) => Some(r),
+        None if me.health < w.config.suppression.retreat_below => Some(retreat_point(&w.points, me.team, me.pos, threat)),
+        None => None,
+    };
+    if retreat.is_some() {
+        cover = None;
+    } else if let Some(threat) = threat {
         // Боец отряда ищет укрытие у своего места в строю, остальные — где стоят.
         let around = match w.orders.get(i) {
             Some(Order::Follow { slot, .. }) if slot.distance(me.pos) < w.config.squad.leash => *slot,
@@ -225,5 +244,5 @@ fn decide(w: &World, i: usize, taken: &HashMap<(i32, i32), u32>) -> Decision {
         }
     }
 
-    Decision { soldier: i as u32, target, objective, grenade_at, cover, searched, refresh }
+    Decision { soldier: i as u32, target, objective, grenade_at, cover, retreat, searched, refresh }
 }

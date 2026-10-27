@@ -24,6 +24,7 @@ pub const HISTORY: usize = 32;
 const FLAG_TEAM1: u8 = 1;
 const FLAG_PLAYER: u8 = 2;
 const FLAG_RELOADING: u8 = 4;
+const FLAG_PRONE: u8 = 8;
 
 /// Солдат в том виде, в каком он уходит по сети.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +48,9 @@ impl NetSoldier {
         if s.reload_timer > 0.0 {
             flags |= FLAG_RELOADING;
         }
+        if s.prone {
+            flags |= FLAG_PRONE;
+        }
         NetSoldier { x, y, facing: q_angle(s.facing, 8) as u8, flags }
     }
 
@@ -64,6 +68,11 @@ impl NetSoldier {
 
     pub fn is_player(&self) -> bool {
         self.flags & FLAG_PLAYER != 0
+    }
+
+    /// Залёг под огнём.
+    pub fn is_prone(&self) -> bool {
+        self.flags & FLAG_PRONE != 0
     }
 }
 

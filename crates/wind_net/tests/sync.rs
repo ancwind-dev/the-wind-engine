@@ -247,3 +247,24 @@ fn own_shots_are_heard_where_the_shooter_is() {
     // Солдат бегает по кругу: последний выстрел — недалеко от того, где он сейчас.
     assert!(shots.last().unwrap().distance(me) < 2.0);
 }
+
+#[test]
+fn prone_soldier_is_prone_on_client() {
+    let config = ReplicationConfig { packet_budget: 64 * 1024, ..Default::default() };
+    let mut link = Link::new(10, config);
+    link.tick(0.0);
+    // Ближайший к игроку солдат ИИ прижат огнём — залегает.
+    let me = link.world.soldiers[link.soldier as usize].pos;
+    let near = (0..link.world.soldiers.len())
+        .filter(|&i| i as u32 != link.soldier)
+        .min_by(|&a, &b| link.world.soldiers[a].pos.distance(me).total_cmp(&link.world.soldiers[b].pos.distance(me)))
+        .unwrap();
+    for _ in 0..3 {
+        link.world.soldiers[near].suppression = 1.0;
+        link.tick(0.0);
+    }
+    assert!(link.world.soldiers[near].prone);
+    let seen = link.client.soldiers[near].as_ref().expect("клиент видит соседа");
+    assert!(seen.net.is_prone(), "клиент знает, что он лежит");
+}
+

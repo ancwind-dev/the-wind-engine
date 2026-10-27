@@ -22,6 +22,8 @@ pub struct SoldierDraw {
     /// Явный вид — для студии. Без него модель выбирается по номеру солдата,
     /// а шаг — по тому, как он перемещается.
     pub look: Option<Look>,
+    /// Залёг под огнём.
+    pub prone: bool,
 }
 
 /// Модель, оружие и движение солдата, заданные явно.
@@ -85,6 +87,8 @@ struct Anim {
     speed: f32,
     last: Vec2,
     seen: bool,
+    /// 0 — стоит, 1 — лежит; плавно, чтобы солдат ложился и вставал, а не прыгал.
+    prone: f32,
 }
 
 pub struct SceneBuilder {
@@ -235,6 +239,7 @@ impl SceneBuilder {
             {
                 let model = &set.models[look.model];
                 let pose = model.pose(look.motion);
+                let pose = if a.prone > 0.0 { model.lie(&pose, a.prone) } else { pose };
                 let at = to_3d(s.pos, input.map.height_at(s.pos));
                 let lod = lod_at(at);
                 let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-s.facing);
@@ -382,9 +387,11 @@ impl SceneBuilder {
         let moved = s.pos.distance(a.last);
         if !a.seen || moved > 3.0 {
             // Первый кадр или телепорт (возрождение).
-            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true };
+            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone: s.prone as u8 as f32 };
             return 0.0;
         }
+        let goal = if s.prone { 1.0 } else { 0.0 };
+        a.prone += (goal - a.prone).clamp(-dt * 3.0, dt * 3.0);
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };
         a.speed += (speed - a.speed) * 0.25;
         a.phase += moved * 2.4;

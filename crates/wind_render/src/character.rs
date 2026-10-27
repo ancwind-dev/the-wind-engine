@@ -209,6 +209,39 @@ impl CharModel {
         p
     }
 
+    /// Лёжа: поза `pose`, опрокинутая лицом вниз на долю `t` (0 — стоит, 1 — лежит),
+    /// голова — туда, куда смотрит солдат. Ноги вытягиваются, а руки уходят «вверх» —
+    /// после поворота это вперёд, перед головой: оружие лежит вдоль земли и смотрит
+    /// на врага. Так залёгший не похож на убитого.
+    pub fn lie(&self, pose: &Pose, t: f32) -> Pose {
+        let t = t.clamp(0.0, 1.0);
+        let t = t * t * (3.0 - 2.0 * t);
+        let mut p = pose.clone();
+        if let Some(j) = self.joints {
+            let r = &self.rest;
+            for i in [j.knee[0], j.knee[1], j.foot[0], j.foot[1]] {
+                p[i] = p[i].lerp(r[i], t);
+            }
+            let shoulder_y = (p[j.shoulder[0]].y + p[j.shoulder[1]].y) * 0.5;
+            let chest_x = (p[j.shoulder[0]].x + p[j.shoulder[1]].x) * 0.5;
+            let right_hand = Vec3::new(chest_x + 1.0, shoulder_y + 4.0, 2.5);
+            let left_hand = right_hand + Vec3::new(0.0, 12.0, -1.5);
+            for (side, hand, out) in [(0, right_hand, 1.0), (1, left_hand, -1.0)] {
+                let shoulder = p[j.shoulder[side]];
+                let hand = p[j.hand[side]].lerp(hand, t);
+                let upper = r[j.shoulder[side]].distance(r[j.elbow[side]]);
+                let fore = r[j.elbow[side]].distance(r[j.hand[side]]);
+                // Локти — к груди: после поворота это вниз, на землю.
+                let bend = Vec3::new(1.0, 0.0, 0.6 * out * side_sign(r[j.shoulder[side]].z));
+                p[j.elbow[side]] = two_bone(shoulder, hand, upper, fore, bend);
+                p[j.hand[side]] = shoulder + (hand - shoulder).clamp_length_max(upper + fore - 0.01);
+            }
+        }
+        let rot = Mat3::from_rotation_z(-std::f32::consts::FRAC_PI_2 * t);
+        let lift = 3.0 * t;
+        p.iter().map(|&v| rot * v + Vec3::Y * lift).collect()
+    }
+
     /// Убитый: падает назад (или вперёд) за полсекунды и лежит, раскинув руки.
     pub fn corpse(&self, age: f32, forward: bool) -> Pose {
         let t = (age / 0.45).clamp(0.0, 1.0);
@@ -548,6 +581,26 @@ mod tests {
                     assert!(diff < 1e-3, "{}: часть повёрнута не как всё тело ({diff})", m.name);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn prone_soldier_lies_low_and_keeps_weapon() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for m in &set.models {
+            let standing = m.pose(Motion::default());
+            let lying = m.lie(&standing, 1.0);
+            let top = |p: &Pose| p.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+            assert!(top(&lying) < top(&standing) * 0.4, "{}: лежит низко ({} против {})", m.name, top(&lying), top(&standing));
+            // Оружие в руках, вдоль земли и вперёд.
+            let grip = m.weapon_frame(&lying).expect("оружие в руках");
+            let aim = grip.z_axis.truncate();
+            assert!(aim.x > 0.9 && aim.y.abs() < 0.3, "{}: ствол вперёд вдоль земли ({aim:?})", m.name);
+            // Голова — вперёд, туда, куда смотрит солдат (ось x модели).
+            let head = lying.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
+            assert!(head.x > 10.0, "{}: голова впереди ({head:?})", m.name);
+            // Наполовину — как раз посередине между «стоит» и «лежит», без рывков.
+            assert!(top(&m.lie(&standing, 0.5)) < top(&standing) && top(&m.lie(&standing, 0.5)) > top(&lying));
         }
     }
 

@@ -70,6 +70,31 @@
         under_fire: 3.0,
     ),
 
+    // Подавление огнём и раненые (только у ИИ; заживают раны и у игрока).
+    // Пуля ближе near_miss (см. cover) добавляет per_near_miss подавления, попадание —
+    // per_hit; спадает на decay в секунду. Подавленный мажет: разброс × (1 + подавление
+    // × spread_penalty). Выше prone_at солдата прижимает: в поле он залегает (ползёт со
+    // скоростью crawl, мишень меньше — prone_target радиуса), в укрытии прячется за угол;
+    // встаёт ниже stand_at. Автоматчик, потерявший врага, suppress_memory секунд бьёт
+    // туда, где тот был. Раненый (здоровье ниже retreat_below) отходит к своей точке
+    // подальше от врага или на базу; вне боя (heal_delay с) заживает на heal_rate в
+    // секунду и возвращается, когда здоровье выше return_above.
+    suppression: (
+        per_near_miss: 0.12,
+        per_hit: 0.35,
+        decay: 0.25,
+        spread_penalty: 1.5,
+        prone_at: 0.6,
+        stand_at: 0.25,
+        prone_target: 0.55,
+        crawl: 0.25,
+        suppress_memory: 3.0,
+        retreat_below: 0.65,
+        return_above: 0.9,
+        heal_rate: 0.03,
+        heal_delay: 5.0,
+    ),
+
     capture: (
         radius: 10.0,
         time: 12.0,

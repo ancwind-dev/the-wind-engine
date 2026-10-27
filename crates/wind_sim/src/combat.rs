@@ -1,8 +1,9 @@
 //! Стрельба, полёт пуль и гранат, взрывы.
 
-use crate::arsenal::{BlastSpec, MAX_HEAT};
+use crate::arsenal::{BlastSpec, MAX_HEAT, WeaponSpec};
+use crate::suppression::SuppressionSpec;
 use crate::rng::Rng;
-use crate::world::{Controller, Event, Projectile, ProjectileKind, World, snapshot};
+use crate::world::{Controller, Event, Projectile, ProjectileKind, Soldier, World, snapshot};
 use glam::Vec2;
 use rayon::prelude::*;
 
@@ -14,6 +15,7 @@ pub(crate) fn fire(world: &mut World) {
     let (seed, tick) = (world.seed, world.tick);
     let prev = snapshot(&world.soldiers);
     let map = &world.map;
+    let sup = &world.config.suppression;
 
     let shots: Vec<Projectile> = world
         .soldiers
@@ -44,7 +46,25 @@ pub(crate) fn fire(world: &mut World) {
                     input.aim - s.pos
                 }
                 Controller::Ai => {
-                    let target = s.target?;
+                    let Some(target) = s.target else {
+                        // Огонь на подавление: врага не видно, но он только что был вон
+                        // там — автоматчик бьёт туда реже обычного, пока есть патроны.
+                        let spot = s.last_seen.filter(|_| {
+                            s.last_seen_timer > 0.0
+                                && weapon.blast.is_none()
+                                && weapon.retrigger_time <= 0.2
+                                && s.ammo * 3 > weapon.magazine_size
+                        })?;
+                        if s.cooldown > 0.0 {
+                            return None;
+                        }
+                        let to = spot - s.pos;
+                        if to.length() > weapon.range || to.length() < 3.0 || !map.line_of_sight(s.pos, spot) {
+                            return None;
+                        }
+                        s.cooldown = weapon.retrigger_time;
+                        return shoot(s, i, to, weapon, kit.weapon, radius, seed, tick, sup);
+                    };
                     let (target_pos, target_alive) = prev[target as usize];
                     if !target_alive {
                         s.target = None;
@@ -71,32 +91,11 @@ pub(crate) fn fire(world: &mut World) {
             if to == Vec2::ZERO {
                 return None;
             }
-            let mut rng = Rng::for_entity(seed ^ 0xF17E, tick, i as u32);
-            let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * weapon.spread(s.heat);
-            let dir = Vec2::new(angle.cos(), angle.sin());
-            s.heat = (s.heat + weapon.sustained_fire_grow_step).min(MAX_HEAT);
             // Остаток паузы переносим — иначе темп упирается в тики (M4 стрелял бы раз
             // в 3 тика вместо 8,8 раза в секунду). Но не больше тика: после паузы очереди
             // «за прошлое» нет.
-            s.cooldown = s.cooldown.max(-dt) + weapon.retrigger_time;
-            s.ammo = s.ammo.saturating_sub(1);
-            if s.ammo == 0 {
-                s.reload_timer = weapon.reload_time;
-            }
-            let kind = match weapon.blast {
-                // Снаряд летит до точки прицела, но не дальше дальности.
-                Some(_) => ProjectileKind::Shell { flight: to.length().min(weapon.range) / weapon.projectile_speed },
-                None => ProjectileKind::Bullet,
-            };
-            Some(Projectile {
-                pos: s.pos + dir * (radius + 0.05),
-                vel: dir * weapon.projectile_speed,
-                ttl: weapon.range * 1.2 / weapon.projectile_speed,
-                team: s.team,
-                shooter: i as u32,
-                weapon: kit.weapon as u8,
-                kind,
-            })
+            s.cooldown = s.cooldown.max(-dt);
+            shoot(s, i, to, weapon, kit.weapon, radius, seed, tick, sup)
         })
         .collect();
     for p in &shots {
@@ -122,6 +121,37 @@ pub(crate) fn fire(world: &mut World) {
             world.throw_grenade(i as u32, input.aim);
         }
     }
+}
+
+/// Выстрел в направлении `to`: разброс (больше в очереди и под подавлением),
+/// пауза до следующего, патроны, снаряд.
+#[allow(clippy::too_many_arguments)]
+fn shoot(s: &mut Soldier, i: usize, to: Vec2, weapon: &WeaponSpec, weapon_index: usize, radius: f32, seed: u64, tick: u64, sup: &SuppressionSpec) -> Option<Projectile> {
+    let mut rng = Rng::for_entity(seed ^ 0xF17E, tick, i as u32);
+    // Подавленный ИИ мажет; игрок целится сам.
+    let shaken = if s.controller == Controller::Ai { 1.0 + s.suppression * sup.spread_penalty } else { 1.0 };
+    let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * weapon.spread(s.heat) * shaken;
+    let dir = Vec2::new(angle.cos(), angle.sin());
+    s.heat = (s.heat + weapon.sustained_fire_grow_step).min(MAX_HEAT);
+    s.cooldown += weapon.retrigger_time;
+    s.ammo = s.ammo.saturating_sub(1);
+    if s.ammo == 0 {
+        s.reload_timer = weapon.reload_time;
+    }
+    let kind = match weapon.blast {
+        // Снаряд летит до точки прицела, но не дальше дальности.
+        Some(_) => ProjectileKind::Shell { flight: to.length().min(weapon.range) / weapon.projectile_speed },
+        None => ProjectileKind::Bullet,
+    };
+    Some(Projectile {
+        pos: s.pos + dir * (radius + 0.05),
+        vel: dir * weapon.projectile_speed,
+        ttl: weapon.range * 1.2 / weapon.projectile_speed,
+        team: s.team,
+        shooter: i as u32,
+        weapon: weapon_index as u8,
+        kind,
+    })
 }
 
 enum Outcome {
@@ -158,6 +188,7 @@ pub(crate) fn update_projectiles(world: &mut World) {
     let dt = world.dt();
     let radius = world.config.soldier.radius;
     let near_miss = world.config.cover.near_miss;
+    let prone_target = world.config.suppression.prone_target;
     let World { projectiles, soldiers, grid, map, .. } = world;
     let (soldiers, grid, map) = (&*soldiers, &*grid, &*map);
 
@@ -179,7 +210,8 @@ pub(crate) fn update_projectiles(world: &mut World) {
                     if s.team == p.team || !s.alive {
                         return;
                     }
-                    if let Some(t) = segment_hits_circle(p.pos, next, s.pos, radius)
+                    let body = if s.prone { radius * prone_target } else { radius };
+                    if let Some(t) = segment_hits_circle(p.pos, next, s.pos, body)
                         && t <= wall_t
                         && hit.is_none_or(|(best, _)| t < best)
                     {
@@ -251,6 +283,7 @@ pub(crate) fn update_projectiles(world: &mut World) {
 
     // По кому стреляли: пуля прошла рядом или попала — солдат запоминает, откуда.
     let under_fire = world.config.cover.under_fire;
+    let (per_near, per_hit) = (world.config.suppression.per_near_miss, world.config.suppression.per_hit);
     for (index, (outcome, near)) in outcomes.iter().enumerate() {
         let shooter = world.projectiles[index].shooter;
         let from = world.soldiers[shooter as usize].pos;
@@ -258,10 +291,12 @@ pub(crate) fn update_projectiles(world: &mut World) {
             Outcome::HitSoldier(v) => Some(v),
             _ => None,
         };
-        for &j in near.ids[..near.count].iter().chain(hit.iter()) {
+        let near = near.ids[..near.count].iter().filter(|&&j| Some(j) != hit).map(|&j| (j, per_near));
+        for (j, weight) in near.chain(hit.map(|j| (j, per_hit))) {
             let s = &mut world.soldiers[j as usize];
             s.threat = Some(from);
             s.under_fire = under_fire;
+            s.suppression = (s.suppression + weight).min(1.0);
         }
     }
 
@@ -339,4 +374,35 @@ fn segment_hits_circle(a: Vec2, b: Vec2, center: Vec2, radius: f32) -> Option<f3
     let len2 = d.length_squared();
     let t = if len2 > 0.0 { ((center - a).dot(d) / len2).clamp(0.0, 1.0) } else { 0.0 };
     ((a + d * t).distance_squared(center) < radius * radius).then_some(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SimConfig;
+
+    /// Средний промах по углу, радианы: стреляем 400 раз точно вправо.
+    fn mean_error(suppression: f32) -> f32 {
+        let w = World::new(SimConfig { map_size: 128, soldiers_per_team: 1, capture_points: 1, ..Default::default() }, 1);
+        let weapon = w.weapon(0).clone();
+        let sup = SuppressionSpec::default();
+        let mut s = w.soldiers[0].clone();
+        s.suppression = suppression;
+        let mut sum = 0.0;
+        for tick in 0..400 {
+            s.heat = 0.0;
+            s.ammo = 30;
+            let p = shoot(&mut s, 0, Vec2::X, &weapon, 0, 0.35, 7, tick, &sup).unwrap();
+            sum += p.vel.y.atan2(p.vel.x).abs();
+        }
+        sum / 400.0
+    }
+
+    #[test]
+    fn suppressed_soldier_misses_more() {
+        let calm = mean_error(0.0);
+        let shaken = mean_error(1.0);
+        // Полное подавление — разброс в 1 + spread_penalty = 2,5 раза шире.
+        assert!((shaken / calm - 2.5).abs() < 0.05, "спокойный {calm}, подавленный {shaken}");
+    }
 }

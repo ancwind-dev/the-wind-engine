@@ -234,6 +234,7 @@ impl Studio {
                 team: self.team,
                 player: false,
                 look: Some(Look { model, weapon: self.weapon, motion }),
+                prone: false,
             }),
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());

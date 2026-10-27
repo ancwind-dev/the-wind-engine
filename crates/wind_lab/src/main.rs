@@ -933,6 +933,24 @@ impl Lab {
             theme::label(ui, "Под огнём");
             ui.label(if s.under_fire > 0.0 { format!("да, ещё {:.1} с", s.under_fire) } else { "нет".into() });
             ui.end_row();
+            theme::label(ui, "Подавлен");
+            ui.label(format!(
+                "{:.0}%{}",
+                s.suppression * 100.0,
+                if s.prone {
+                    " · залёг"
+                } else if s.pinned {
+                    " · прижат, за углом"
+                } else {
+                    ""
+                }
+            ));
+            ui.end_row();
+            if s.retreat.is_some() {
+                theme::label(ui, "Ранен");
+                ui.label("отходит в тыл");
+                ui.end_row();
+            }
             theme::label(ui, "Идёт к");
             ui.label(match s.objective {
                 o if (o as usize) < self.world.points.len() => format!("точке {}", (b'A' + o as u8) as char),
