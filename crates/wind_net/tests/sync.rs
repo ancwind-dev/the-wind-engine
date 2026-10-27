@@ -52,7 +52,7 @@ impl Link {
             },
         );
         self.world.step();
-        let packet = self.replica.build_snapshot(&self.world, &self.config);
+        let packet = self.replica.build_snapshot(&self.world, &self.config, None);
         self.sizes.push(packet.len());
         if !self.rng.chance(loss) {
             let (_, data) = protocol::parse(&packet).unwrap();
@@ -203,3 +203,25 @@ fn round_state_and_restored_map_reach_client() {
     assert!(link.client.map.solid == link.world.map.solid, "клиент должен получить восстановленные стены");
 }
 
+
+#[test]
+fn board_with_player_names_reaches_client() {
+    use wind_net::replication::{board, write_board};
+    let config = ReplicationConfig { packet_budget: 64 * 1024, ..Default::default() };
+    let mut link = Link::new(40, config);
+    for _ in 0..200 {
+        link.tick(0.0);
+    }
+    // Сервер рассылает таблицу раз в секунду — здесь шлём её вручную.
+    let names = vec![(link.soldier, "Артём".to_string())];
+    let rows = board(&link.world, &names);
+    let mut w = wind_net::bits::BitWriter::new();
+    write_board(&mut w, &rows);
+    link.world.step();
+    let packet = link.replica.build_snapshot(&link.world, &link.config, Some(&w));
+    let (_, data) = protocol::parse(&packet).unwrap();
+    link.client.apply_snapshot(data, 100.0).unwrap();
+    assert_eq!(link.client.board, rows);
+    assert_eq!(link.client.name_of(link.soldier), "Артём");
+    assert!(rows.iter().any(|r| r.soldier == link.soldier), "игрок всегда в таблице");
+}

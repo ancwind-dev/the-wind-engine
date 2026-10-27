@@ -312,6 +312,7 @@ impl Viewport {
             marker: scene.selected.as_ref().map(|s| s.pos),
             rings: &scene.rings,
             corpses: &scene.corpses,
+            own_team: None,
             atmosphere: &scene.atmosphere,
             viewport_px: {
                 let ppp = ui.ctx().pixels_per_point();

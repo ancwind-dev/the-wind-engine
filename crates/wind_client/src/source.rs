@@ -25,6 +25,28 @@ pub struct Me {
     pub kills: u32,
 }
 
+/// Строка ленты убийств.
+#[derive(Clone)]
+pub struct KillLine {
+    pub killer: String,
+    pub killer_team: u8,
+    pub weapon: String,
+    pub victim: String,
+    pub victim_team: u8,
+    /// Убил свой солдат или убили его — строка выделена.
+    pub mine: bool,
+}
+
+/// Строка таблицы бойцов.
+#[derive(Clone)]
+pub struct BoardRow {
+    pub name: String,
+    pub team: u8,
+    pub kills: u32,
+    pub deaths: u32,
+    pub me: bool,
+}
+
 /// Раунд для HUD: идёт ли бой, кто победил, сколько времени, кто держит точки.
 #[derive(Clone, Default)]
 pub struct RoundView {
@@ -50,7 +72,9 @@ pub struct View {
     pub me_pos: Option<Vec2>,
     pub me: Me,
     pub score: [u32; 2],
-    pub kill_feed: Vec<(String, u8)>,
+    pub kill_feed: Vec<KillLine>,
+    /// Таблица бойцов: игроки и лучшие из ИИ, по командам.
+    pub board: Vec<BoardRow>,
     pub corpses: Vec<CorpseDraw>,
     /// Есть свой солдат (иначе мы наблюдатель).
     pub has_me: bool,
@@ -68,8 +92,8 @@ pub struct Local {
     pub me: Option<u32>,
     accumulator: f32,
     blasts: Vec<(Vec2, f32, f32)>,
-    /// Лента убийств: (текст, команда убийцы, возраст).
-    feed: Vec<(String, u8, f32)>,
+    /// Лента убийств: (убийца, убитый, возраст).
+    feed: Vec<(u32, u32, f32)>,
     pub sim_ms: f32,
     /// Сколько раз выстрелил свой солдат — для отдачи прицела.
     own_shots: u32,
@@ -129,8 +153,7 @@ impl Source {
                             Event::Kill { killer, victim } => {
                                 let player = |i: u32| matches!(w.soldiers[i as usize].controller, Controller::Player(_));
                                 if player(killer) || player(victim) {
-                                    let name = |i: u32| if Some(i) == l.me { "Ты".to_string() } else { format!("#{i}") };
-                                    l.feed.insert(0, (format!("{} → {}", name(killer), name(victim)), w.soldiers[killer as usize].team, 0.0));
+                                    l.feed.insert(0, (killer, victim, 0.0));
                                 }
                             }
                             _ => {}
@@ -155,6 +178,14 @@ impl Source {
                 }
                 client.send_input(input);
             }
+        }
+    }
+
+    /// Дальность обзора солдата — для тумана войны.
+    pub fn vision_range(&self) -> f32 {
+        match self {
+            Source::Local(l) => l.world.config.soldier.vision_range,
+            Source::Remote(c) => c.world.as_ref().map_or(55.0, |w| w.welcome.vision_range),
         }
     }
 
@@ -279,7 +310,24 @@ fn local_view(l: &Local) -> View {
             kills: me.kills,
         };
     }
-    v.kill_feed = l.feed.iter().map(|f| (f.0.clone(), f.1)).collect();
+    let name = |i: u32| if Some(i) == l.me { "Ты".to_string() } else { format!("#{i}") };
+    v.kill_feed = l
+        .feed
+        .iter()
+        .map(|&(killer, victim, _)| KillLine {
+            killer: name(killer),
+            killer_team: w.soldiers[killer as usize].team,
+            weapon: w.weapon(killer).name.to_uppercase(),
+            victim: name(victim),
+            victim_team: w.soldiers[victim as usize].team,
+            mine: l.me.is_some_and(|m| m == killer || m == victim),
+        })
+        .collect();
+    let players: Vec<(u32, String)> = l.me.map(|m| vec![(m, "Ты".to_string())]).unwrap_or_default();
+    v.board = wind_net::replication::board(w, &players)
+        .into_iter()
+        .map(|e| BoardRow { name: name(e.soldier), team: e.team, kills: e.kills, deaths: e.deaths, me: Some(e.soldier) == l.me })
+        .collect();
     let spec = &w.config.round;
     v.round = RoundView {
         round: w.round.clone(),
@@ -303,7 +351,8 @@ fn local_view(l: &Local) -> View {
 fn remote_view(c: &NetClient) -> View {
     let Some(w) = &c.world else { return View::default() };
     let now = c.now();
-    let name = |id: u32| if id == w.welcome.soldier { "Ты".to_string() } else { format!("#{id}") };
+    let own = w.welcome.soldier;
+    let name = |id: u32| if id == own { "Ты".to_string() } else { w.name_of(id) };
     View {
         soldiers: w
             .soldiers
@@ -337,7 +386,29 @@ fn remote_view(c: &NetClient) -> View {
             kills: w.me.kills,
         },
         score: w.score,
-        kill_feed: w.kill_feed.iter().map(|k| (format!("{} → {}", name(k.killer), name(k.victim)), k.killer_team)).collect(),
+        kill_feed: w
+            .kill_feed
+            .iter()
+            .map(|k| KillLine {
+                killer: name(k.killer),
+                killer_team: k.killer_team,
+                weapon: w.arsenal.weapon_of(k.killer_team, k.killer).name.to_uppercase(),
+                victim: name(k.victim),
+                victim_team: w.soldiers.get(k.victim as usize).and_then(|s| s.as_ref()).map_or(1 - (k.killer_team & 1), |s| s.net.team()),
+                mine: k.killer == own || k.victim == own,
+            })
+            .collect(),
+        board: w
+            .board
+            .iter()
+            .map(|e| BoardRow {
+                name: if e.name.is_empty() { format!("#{}", e.soldier) } else { e.name.clone() },
+                team: e.team,
+                kills: e.kills,
+                deaths: e.deaths,
+                me: e.soldier == own,
+            })
+            .collect(),
         round: RoundView {
             round: w.round.clone(),
             hold_time: w.welcome.hold_time,

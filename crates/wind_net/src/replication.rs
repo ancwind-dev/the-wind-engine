@@ -141,7 +141,9 @@ impl ServerReplica {
         }
     }
 
-    pub fn build_snapshot(&mut self, world: &World, cfg: &ReplicationConfig) -> Vec<u8> {
+    /// Снимок для клиента. `board` — таблица бойцов, если пора её разослать
+    /// (собирается одна на всех, см. [`board`]).
+    pub fn build_snapshot(&mut self, world: &World, cfg: &ReplicationConfig, board: Option<&BitWriter>) -> Vec<u8> {
         let tick = world.tick as u32;
         let me = &world.soldiers[self.soldier as usize];
         let center = me.pos;
@@ -208,6 +210,10 @@ impl ServerReplica {
             w.write_signed((p.progress * 127.0).round() as i32, 8);
         }
         write_round(&mut w, &world.round);
+        w.write_bool(board.is_some());
+        if let Some(b) = board {
+            w.append(b);
+        }
 
         let mut removed_w = BitWriter::new();
         removed_w.write_var(removed.len() as u32);
@@ -580,6 +586,8 @@ pub struct RemoteWorld {
     pub arsenal: Arsenal,
     /// Раунд по последнему снимку.
     pub round: Round,
+    /// Таблица бойцов (приходит раз в секунду).
+    pub board: Vec<BoardEntry>,
     /// Время клиента, которое вернул сервер в последнем снимке.
     pub echo_time: u32,
     /// Когда (по часам клиента, с) пришёл последний снимок.
@@ -634,6 +642,7 @@ impl RemoteWorld {
             atmosphere,
             arsenal,
             round: Round::default(),
+            board: Vec::new(),
             echo_time: 0,
             snapshot_time: 0.0,
             own_pos: None,
@@ -650,6 +659,14 @@ impl RemoteWorld {
     pub fn render_pos(&self, s: &RemoteSoldier, now: f64) -> Vec2 {
         let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
         s.prev.lerp(s.pos, t)
+    }
+
+    /// Имя бойца: у игрока — его имя, у ИИ — номер.
+    pub fn name_of(&self, soldier: u32) -> String {
+        match self.board.iter().find(|e| e.soldier == soldier && !e.name.is_empty()) {
+            Some(e) => e.name.clone(),
+            None => format!("#{soldier}"),
+        }
     }
 
     /// Оружие своего солдата.
@@ -701,6 +718,7 @@ impl RemoteWorld {
             points.push((owner, progress));
         }
         let round = read_round(&mut r)?;
+        let board = if r.read_bool()? { Some(read_board(&mut r)?) } else { None };
 
         let total = self.soldiers.len() as u32;
         let mut view = base_view;
@@ -839,6 +857,9 @@ impl RemoteWorld {
             self.blasts.clear();
         }
         self.round = round;
+        if let Some(board) = board {
+            self.board = board;
+        }
         self.me = me;
         self.score = score;
         self.echo_time = echo_time;
@@ -927,4 +948,71 @@ fn read_round(r: &mut BitReader) -> Result<Round, Truncated> {
     let time = r.read_var()? as f32 / 10.0;
     let hold = [r.read_var()? as f32 / 10.0, r.read_var()? as f32 / 10.0];
     Ok(Round { number, phase, time, hold })
+}
+
+/// Строка таблицы бойцов. Имя есть только у игроков.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardEntry {
+    pub soldier: u32,
+    pub team: u8,
+    pub kills: u32,
+    pub deaths: u32,
+    pub name: String,
+}
+
+/// Сколько лучших бойцов ИИ каждой команды попадает в таблицу.
+const BOARD_AI: usize = 5;
+
+/// Таблица бойцов: все игроки (`names` — их солдаты и имена) и лучшие из ИИ,
+/// у каждой команды по убийствам.
+pub fn board(world: &World, names: &[(u32, String)]) -> Vec<BoardEntry> {
+    let mut out = Vec::new();
+    for team in 0..2u8 {
+        let entry = |i: usize, name: String| {
+            let s = &world.soldiers[i];
+            BoardEntry { soldier: i as u32, team, kills: s.kills, deaths: s.deaths, name }
+        };
+        let mut rows: Vec<BoardEntry> = names
+            .iter()
+            .filter(|(i, _)| world.soldiers.get(*i as usize).is_some_and(|s| s.team == team))
+            .map(|(i, name)| entry(*i as usize, name.clone()))
+            .collect();
+        let mut ai: Vec<usize> = (0..world.soldiers.len())
+            .filter(|&i| {
+                let s = &world.soldiers[i];
+                s.team == team && s.kills > 0 && !names.iter().any(|(p, _)| *p as usize == i)
+            })
+            .collect();
+        ai.sort_by_key(|&i| std::cmp::Reverse(world.soldiers[i].kills));
+        rows.extend(ai.into_iter().take(BOARD_AI).map(|i| entry(i, String::new())));
+        rows.sort_by_key(|e| std::cmp::Reverse(e.kills));
+        out.extend(rows);
+    }
+    out
+}
+
+pub fn write_board(w: &mut BitWriter, board: &[BoardEntry]) {
+    w.write_var(board.len() as u32);
+    for e in board {
+        w.write_var(e.soldier);
+        w.write_bits(e.team as u32, 1);
+        w.write_var(e.kills);
+        w.write_var(e.deaths);
+        w.write_str(&e.name, 32);
+    }
+}
+
+fn read_board(r: &mut BitReader) -> Result<Vec<BoardEntry>, Truncated> {
+    let n = r.read_var()?.min(256);
+    (0..n)
+        .map(|_| {
+            Ok(BoardEntry {
+                soldier: r.read_var()?,
+                team: r.read_bits(1)? as u8,
+                kills: r.read_var()?,
+                deaths: r.read_var()?,
+                name: r.read_str(32)?,
+            })
+        })
+        .collect()
 }

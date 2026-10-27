@@ -88,7 +88,9 @@ pub struct Soldier {
     pub reload_timer: f32,
     pub grenades: u32,
     pub grenade_timer: f32,
+    /// Убийства и смерти за раунд — для таблицы. При возрождении не сбрасываются.
     pub kills: u32,
+    pub deaths: u32,
     /// Набор (класс): номер в `arsenal.teams[team]`. Выбирается по номеру солдата.
     pub kit: u8,
     /// «Нагрев» очереди: разброс растёт с каждым выстрелом и спадает со временем.
@@ -564,8 +566,9 @@ impl World {
                 }
             };
             let pos = self.find_spawn_spot(spot, 6.0, &mut rng);
-            let (controller, kit) = (self.soldiers[i].controller, self.soldiers[i].kit);
-            self.soldiers[i] = Soldier { controller, ..self.fresh_soldier(team, pos, kit) };
+            let s = &self.soldiers[i];
+            let (controller, kit, kills, deaths) = (s.controller, s.kit, s.kills, s.deaths);
+            self.soldiers[i] = Soldier { controller, kills, deaths, ..self.fresh_soldier(team, pos, kit) };
         }
     }
 
@@ -667,6 +670,7 @@ impl World {
             grenades: self.config.grenade.count,
             grenade_timer: 0.0,
             kills: 0,
+            deaths: 0,
             kit,
             heat: 0.0,
         }
@@ -693,6 +697,7 @@ impl World {
         s.alive = false;
         s.target = None;
         s.respawn_timer = self.config.soldier.respawn_time;
+        s.deaths += 1;
         let victim_team = s.team;
         let k = &mut self.soldiers[killer as usize];
         if k.team != victim_team {

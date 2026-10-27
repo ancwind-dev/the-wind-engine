@@ -72,6 +72,8 @@ pub struct DrawInput<'a> {
     /// Дополнительные кольца на земле: (центр, радиус, цвет sRGB) — например, кисть редактора.
     pub rings: &'a [(Vec2, f32, [f32; 3])],
     pub corpses: &'a [CorpseDraw],
+    /// Наша команда: силуэты сквозь стены — только у неё. `None` — видно всех.
+    pub own_team: Option<u8>,
     pub time: f32,
     /// Время с прошлого кадра, с — для анимации шага.
     pub dt: f32,
@@ -198,7 +200,13 @@ impl SceneBuilder {
         };
         // Цвет команды — для силуэта сквозь стены.
         let team_colors = self.team_colors.map(|c| u32::from_le_bytes([c[0], c[1], c[2], 1.0].map(|v| (v * 255.0) as u8)));
-        let skin = |base: usize, team: u8, weapon: bool| SkinInstance { base: base as u32, flags: weapon as u32, team: team_colors[team as usize & 1], _pad: 0 };
+        // Признаки: бит 0 — оружие, бит 1 — виден силуэт сквозь стены (только у своих:
+        // врагов за стеной видеть нельзя; наблюдатель видит всех).
+        let own_team = input.own_team;
+        let skin = |base: usize, team: u8, weapon: bool| {
+            let ghost = own_team.is_none_or(|t| t == team);
+            SkinInstance { base: base as u32, flags: weapon as u32 | (ghost as u32) << 1, team: team_colors[team as usize & 1], _pad: 0 }
+        };
         let v = SOLDIER_VOXEL;
         for s in input.soldiers {
             let speed = self.animate(s, input.dt);

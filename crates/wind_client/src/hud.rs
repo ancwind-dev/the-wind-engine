@@ -24,11 +24,7 @@ pub fn draw(painter: &Painter, rect: Rect, view: &View, status: Option<String>, 
         painter.text(c, Align2::CENTER_CENTER, (b'A' + i as u8) as char, FontId::proportional(13.0), Color32::BLACK);
     }
 
-    // Лента убийств — справа сверху.
-    for (i, (text, team)) in view.kill_feed.iter().enumerate() {
-        let at = rect.right_top() + vec2(-14.0, 14.0 + i as f32 * 18.0);
-        painter.text(at, Align2::RIGHT_TOP, text, FontId::proportional(13.0), TEAM[*team as usize & 1]);
-    }
+    kill_feed(painter, rect, view);
 
     if let Some(status) = status {
         painter.rect_filled(Rect::from_center_size(rect.center(), vec2(420.0, 44.0)), 8, PANEL);
@@ -69,6 +65,73 @@ pub fn draw(painter: &Painter, rect: Rect, view: &View, status: Option<String>, 
             Color32::from_rgb(240, 120, 100),
         );
     }
+}
+
+/// Лента убийств справа сверху: «убийца  ОРУЖИЕ  убитый», имена цветом команды,
+/// строки со своим солдатом — на светлой подложке.
+fn kill_feed(painter: &Painter, rect: Rect, view: &View) {
+    let font = FontId::proportional(13.0);
+    for (i, line) in view.kill_feed.iter().enumerate() {
+        let parts = [
+            (line.killer.clone(), TEAM[line.killer_team as usize & 1]),
+            (format!("  {}  ", line.weapon), DIM),
+            (line.victim.clone(), TEAM[line.victim_team as usize & 1]),
+        ];
+        let galleys: Vec<_> = parts.iter().map(|(t, c)| painter.layout_no_wrap(t.clone(), font.clone(), *c)).collect();
+        let width: f32 = galleys.iter().map(|g| g.size().x).sum();
+        let y = rect.top() + 14.0 + i as f32 * 22.0;
+        let mut x = rect.right() - 14.0 - width;
+        let back = Rect::from_min_size(pos2(x - 8.0, y - 2.0), vec2(width + 16.0, 20.0));
+        let fill = if line.mine { Color32::from_white_alpha(46) } else { Color32::from_black_alpha(110) };
+        painter.rect_filled(back, 4, fill);
+        for (g, (_, c)) in galleys.into_iter().zip(parts.iter()) {
+            let w = g.size().x;
+            painter.galley(pos2(x, y), g, *c);
+            x += w;
+        }
+    }
+}
+
+/// Таблица бойцов (держать Tab): по командам — счёт, точки, игроки и лучшие из ИИ.
+pub fn scoreboard(painter: &Painter, rect: Rect, view: &View) {
+    let names = &view.round.team_names;
+    let rows = view.board.iter().filter(|r| r.team == 0).count().max(view.board.iter().filter(|r| r.team == 1).count());
+    let panel = Rect::from_center_size(rect.center(), vec2(640.0, 110.0 + rows as f32 * 24.0));
+    painter.rect_filled(panel, 10, Color32::from_black_alpha(200));
+    for team in 0..2u8 {
+        let x0 = panel.left() + 24.0 + team as f32 * 316.0;
+        let held = view.owners.iter().filter(|o| **o == Some(team)).count();
+        let color = TEAM[team as usize];
+        painter.text(pos2(x0, panel.top() + 18.0), Align2::LEFT_TOP, &names[team as usize], FontId::proportional(20.0), color);
+        painter.text(
+            pos2(x0 + 280.0, panel.top() + 22.0),
+            Align2::RIGHT_TOP,
+            format!("убито {} · точек {held}", view.score[team as usize]),
+            FontId::proportional(14.0),
+            DIM,
+        );
+        let head = panel.top() + 56.0;
+        painter.text(pos2(x0, head), Align2::LEFT_TOP, "Боец", FontId::proportional(12.0), DIM);
+        painter.text(pos2(x0 + 230.0, head), Align2::RIGHT_TOP, "Убил", FontId::proportional(12.0), DIM);
+        painter.text(pos2(x0 + 280.0, head), Align2::RIGHT_TOP, "Погиб", FontId::proportional(12.0), DIM);
+        for (k, r) in view.board.iter().filter(|r| r.team == team).enumerate() {
+            let y = head + 22.0 + k as f32 * 24.0;
+            if r.me {
+                painter.rect_filled(Rect::from_min_size(pos2(x0 - 8.0, y - 3.0), vec2(296.0, 22.0)), 4, Color32::from_white_alpha(36));
+            }
+            let font = FontId::proportional(15.0);
+            painter.text(pos2(x0, y), Align2::LEFT_TOP, &r.name, font.clone(), if r.me { TEXT } else { color });
+            painter.text(pos2(x0 + 230.0, y), Align2::RIGHT_TOP, r.kills.to_string(), font.clone(), TEXT);
+            painter.text(pos2(x0 + 280.0, y), Align2::RIGHT_TOP, r.deaths.to_string(), font, DIM);
+        }
+    }
+    painter.text(
+        panel.center_bottom() - vec2(0.0, 14.0),
+        Align2::CENTER_BOTTOM,
+        format!("Раунд {} · игроки и лучшие бойцы ИИ", view.round.round.number),
+        FontId::proportional(12.0),
+        DIM,
+    );
 }
 
 fn clock(seconds: f32) -> String {

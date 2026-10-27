@@ -379,7 +379,9 @@ fn vs_point_outline(v: PIn) -> POut {
 @vertex
 fn vs_point_ghost(v: PIn) -> POut {
     // Ближе к камере на полметра — чтобы земля под ногами не считалась «стеной».
-    var out = point_out(v, 1.0, 0.0, 0.5);
+    // Силуэт врага не рисуем: квадратик нулевого размера (бит 1 признаков снят).
+    let shown = select(0.0, 1.0, (v.inst.y & 2u) != 0u);
+    var out = point_out(v, shown, 0.0, 0.5);
     out.color = unpack4x8unorm(v.inst.z).rgb;
     return out;
 }
