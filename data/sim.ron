@@ -95,6 +95,23 @@
         heal_delay: 5.0,
     ),
 
+    // Штаб команды: раз в interval секунд раздаёт отрядам точки. Своей точке под
+    // угрозой (враги ближе threat_radius м) — подкрепления: enemy_weight бойцов на
+    // врага плюс garrison; ничьей и чужой — enemy_weight на врага плюс attack_extra;
+    // своей спокойной на линии фронта — garrison (в тылу — никого). Атаку не по силам
+    // не начинают; лишние отряды усиливают атаку, где бой жарче. Отряд, уже идущий к
+    // точке, разворачивают неохотно (stickiness м). enabled: false — отряды выбирают
+    // точки сами, как раньше.
+    command: (
+        enabled: true,
+        interval: 5.0,
+        threat_radius: 40.0,
+        garrison: 3.0,
+        attack_extra: 12.0,
+        enemy_weight: 2.5,
+        stickiness: 60.0,
+    ),
+
     capture: (
         radius: 10.0,
         time: 12.0,

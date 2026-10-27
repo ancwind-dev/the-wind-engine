@@ -88,9 +88,13 @@ pub(crate) fn think(world: &mut World) -> u32 {
         }
     }
 
-    // Отряды думают так же вразнобой: командир выбирает точку для всех.
+    // Отряды без штаба думают так же вразнобой: командир выбирает точку для всех.
+    // Со штабом точки раздаёт он (`command`).
     for index in 0..world.squads.len() {
         let squad = &world.squads[index];
+        if world.command_enabled[squad.team as usize & 1] {
+            continue;
+        }
         let Some(leader) = squad.leader.filter(|_| index as u64 % interval == phase) else { continue };
         let mut rng = Rng::for_entity(world.seed ^ 0x0050_00AD, world.tick, index as u32);
         let objective = choose_objective(&world.points, squad.team, world.soldiers[leader as usize].pos, squad.objective, world.config.defend_probability, &mut rng);

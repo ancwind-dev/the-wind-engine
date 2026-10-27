@@ -1,6 +1,7 @@
 //! Мир и тик симуляции.
 
 use crate::arsenal::{BlastSpec, WeaponSpec};
+use crate::command::{self, PointPlan, SquadInfo};
 use crate::config::SimConfig;
 use crate::cover::Cover;
 use crate::grid::SpatialGrid;
@@ -224,6 +225,10 @@ pub struct World {
     /// Отряды обеих команд и приказ каждому солдату на этот тик (по номеру солдата).
     pub squads: Vec<Squad>,
     pub orders: Vec<Order>,
+    /// Есть ли штаб у команды (из настроек; в тестах можно выключить одной команде)
+    /// и как он видит точки на последнем совещании.
+    pub command_enabled: [bool; 2],
+    pub plans: [Vec<PointPlan>; 2],
     /// Карта в начале — новый раунд начинается с целыми стенами.
     initial_map: Map,
     pub(crate) grid: SpatialGrid,
@@ -261,6 +266,7 @@ impl World {
             .map(|&pos| CapturePoint { pos, owner: None, progress: 0.0 })
             .collect();
         let grid = SpatialGrid::new(map.width.max(map.height) as f32, GRID_CELL);
+        let command_on = config.command.enabled;
 
         let mut world = World {
             config,
@@ -271,6 +277,8 @@ impl World {
             round: Round::default(),
             squads: Vec::new(),
             orders: Vec::new(),
+            command_enabled: [command_on; 2],
+            plans: [Vec::new(), Vec::new()],
             initial_map: map.clone(),
             map,
             bases,
@@ -333,6 +341,10 @@ impl World {
 
         // Строй отрядов и решения ИИ — в одной фазе замера.
         let t = Instant::now();
+        let every = (self.config.command.interval * self.config.tick_rate as f32).round().max(1.0) as u64;
+        if self.tick.is_multiple_of(every) {
+            self.run_command();
+        }
         self.plan_squads();
         stats.thinkers = ai::think(self);
         stats.think_ms = ms(t);
@@ -370,6 +382,54 @@ impl World {
         self.tick += 1;
         stats.total_ms = ms(start);
         self.stats = stats;
+    }
+
+    /// Штаб каждой команды раздаёт отрядам точки (см. `command`).
+    fn run_command(&mut self) {
+        let r = self.config.command.threat_radius;
+        for team in 0..2u8 {
+            let t = team as usize;
+            if !self.command_enabled[t] {
+                self.plans[t].clear();
+                continue;
+            }
+            // Сколько своих и врагов у каждой точки.
+            let (mut ours, mut enemies) = (vec![0u32; self.points.len()], vec![0u32; self.points.len()]);
+            for (i, p) in self.points.iter().enumerate() {
+                let soldiers = &self.soldiers;
+                self.grid.query(p.pos, r, |j| {
+                    let s = &soldiers[j as usize];
+                    if s.alive && s.pos.distance_squared(p.pos) < r * r {
+                        if s.team == team { ours[i] += 1 } else { enemies[i] += 1 }
+                    }
+                });
+            }
+            let ready = |m: &u32| {
+                let s = &self.soldiers[*m as usize];
+                s.alive && s.controller == Controller::Ai && s.retreat.is_none()
+            };
+            let mine: Vec<usize> = (0..self.squads.len()).filter(|&q| self.squads[q].team == team && self.squads[q].leader.is_some()).collect();
+            let infos: Vec<SquadInfo> = mine
+                .iter()
+                .map(|&q| {
+                    let squad = &self.squads[q];
+                    SquadInfo {
+                        pos: self.soldiers[squad.leader.unwrap_or(0) as usize].pos,
+                        strength: squad.members.iter().filter(|m| ready(m)).count() as u32,
+                        current: squad.objective,
+                    }
+                })
+                .collect();
+            let (orders, plans) = command::plan(&self.points, team, self.bases[t], &infos, &ours, &enemies, &self.config.command);
+            for (&q, &objective) in mine.iter().zip(&orders) {
+                self.squads[q].objective = objective;
+                for k in 0..self.squads[q].members.len() {
+                    let m = self.squads[q].members[k] as usize;
+                    self.soldiers[m].objective = objective;
+                }
+            }
+            self.plans[t] = plans;
+        }
     }
 
     fn plan_squads(&mut self) {
@@ -658,6 +718,7 @@ impl World {
             squad.objective = NO_OBJECTIVE;
             squad.heading = Vec2::ZERO;
         }
+        self.plans = [Vec::new(), Vec::new()];
         let mut rng = Rng::for_entity(self.seed ^ 0x4E57, self.tick, 0);
         let per_team = self.soldiers.iter().filter(|s| s.team == 0).count().max(1) as f32;
         for i in 0..self.soldiers.len() {
@@ -691,8 +752,7 @@ impl World {
                     Some(p) if p.owner == Some(team) => p.pos,
                     _ => self.bases[team as usize],
                 },
-                // ИИ — на базе или на своей точке: ближе всего к командиру отряда,
-                // а без него — на любой.
+                // ИИ — на базе или на своей точке: ближе всего к командиру отряда.
                 Controller::Ai => {
                     let mut spots = vec![self.bases[team as usize]];
                     spots.extend(self.points.iter().filter(|p| p.owner == Some(team)).map(|p| p.pos));
@@ -702,8 +762,14 @@ impl World {
                         .and_then(|q| q.leader)
                         .map(|l| &self.soldiers[l as usize])
                         .filter(|l| l.alive);
-                    match leader {
-                        Some(l) => *spots.iter().min_by(|a, b| a.distance_squared(l.pos).total_cmp(&b.distance_squared(l.pos))).unwrap(),
+                    // Без командира — ближе к точке, куда штаб послал отряд: туда и
+                    // идут подкрепления.
+                    let goal = leader.map(|l| l.pos).or_else(|| {
+                        let squad = self.squads.get(self.soldiers[i].squad as usize)?;
+                        self.points.get(squad.objective as usize).map(|p| p.pos)
+                    });
+                    match goal {
+                        Some(g) => *spots.iter().min_by(|a, b| a.distance_squared(g).total_cmp(&b.distance_squared(g))).unwrap(),
                         None => spots[rng.below(spots.len() as u32) as usize],
                     }
                 }

@@ -4,6 +4,7 @@
 //! что хочется поменять.
 
 use crate::arsenal::{Arsenal, WeaponSpec};
+use crate::command::CommandSpec;
 use crate::cover::CoverSpec;
 use crate::round::RoundSpec;
 use crate::squad::SquadSpec;
@@ -40,6 +41,8 @@ pub struct SimConfig {
     pub cover: CoverSpec,
     /// Подавление огнём, «залечь», огонь на подавление, отход раненых.
     pub suppression: SuppressionSpec,
+    /// Штаб команды: какой отряд к какой точке.
+    pub command: CommandSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -129,6 +132,7 @@ impl Default for SimConfig {
             squad: SquadSpec::default(),
             cover: CoverSpec::default(),
             suppression: SuppressionSpec::default(),
+            command: CommandSpec::default(),
             arsenal: Arsenal::default(),
         }
     }

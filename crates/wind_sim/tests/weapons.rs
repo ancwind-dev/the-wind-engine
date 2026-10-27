@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use wind_sim::{Event, PlayerInput, SimConfig, Vec2, World};
+use wind_sim::{Event, PlayerInput, ProjectileKind, SimConfig, Vec2, World};
 
 fn config(per_team: u32) -> SimConfig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/sim.ron");
@@ -10,6 +10,9 @@ fn config(per_team: u32) -> SimConfig {
     c.map_size = 256;
     c.soldiers_per_team = per_team;
     c.capture_points = 3;
+    // Раунд не кончается: при конце раунда снаряды в полёте убираются, а тест — про оружие.
+    c.round.hold_time = f32::INFINITY;
+    c.round.time_limit = 0.0;
     c
 }
 
@@ -21,7 +24,9 @@ fn classes_fight_with_their_own_weapons() {
     let mut explosions = 0;
     let mut shell_shooters = Vec::new();
     let mut kills_by_launchers = 0;
-    for _ in 0..1800 {
+    // 3 минуты: со штабом силы расходятся по точкам, и у PP-2000 (короткая дальность)
+    // стычки начинаются не сразу.
+    for _ in 0..3600 {
         world.step();
         for e in &world.events {
             match *e {
@@ -44,7 +49,10 @@ fn classes_fight_with_their_own_weapons() {
     // У гранатомётов — снаряды, а не пули, и они взрываются.
     assert!(!shots.contains_key("m32_mgl") && !shots.contains_key("gm94"), "гранатомёт стрелял пулями");
     assert!(shells > 0, "гранатомётчики не стреляли");
-    assert!(explosions >= shells, "не все снаряды взорвались: {explosions} < {shells}");
+    // Снаряд, выпущенный в последние секунды, может быть ещё в полёте.
+    let flying = world.projectiles.iter().filter(|p| matches!(p.kind, ProjectileKind::Shell { .. })).count();
+    assert!(world.round.playing());
+    assert!(explosions + flying >= shells, "не все снаряды взорвались: {explosions} + {flying} в полёте < {shells}");
     assert!(kills_by_launchers > 0, "гранатомётчики никого не убили");
 }
 

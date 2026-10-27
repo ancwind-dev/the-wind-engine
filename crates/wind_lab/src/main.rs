@@ -569,6 +569,13 @@ impl Lab {
                 if point_label(ui, i, p.owner).clicked() {
                     self.viewport.focus(p.pos);
                 }
+                // Что решил штаб каждой команды: сколько отрядов послал и зачем.
+                for team in 0..2 {
+                    let Some(plan) = self.world.plans[team].get(i) else { continue };
+                    let why = ["гарнизон", "атака", "захват", "подкрепления"][plan.priority.min(3) as usize];
+                    let text = format!("    {} отр. · {why} · врагов рядом {}", plan.squads, plan.enemies);
+                    ui.label(RichText::new(text).small().color(theme::TEAM[team].gamma_multiply(0.85)));
+                }
             }
         });
     }

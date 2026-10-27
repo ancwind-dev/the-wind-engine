@@ -82,9 +82,10 @@ pub struct View {
     pub round: RoundView,
 }
 
+/// Оба варианта большие, а `Source` переезжает при смене боя — держим их в куче.
 pub enum Source {
-    Local(Local),
-    Remote(NetClient),
+    Local(Box<Local>),
+    Remote(Box<NetClient>),
 }
 
 pub struct Local {

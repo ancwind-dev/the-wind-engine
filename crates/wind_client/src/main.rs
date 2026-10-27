@@ -270,7 +270,7 @@ impl Session {
             let file = MapFile::load(&data_dir().join("maps").join(&settings.map_file)).map_err(|e| format!("карта «{}»: {e}", settings.map_file))?;
             World::from_file(config, seed, file)
         };
-        Ok(Session::new(Source::Local(Local::new(world, play))))
+        Ok(Session::new(Source::Local(Box::new(Local::new(world, play)))))
     }
 
     /// Фон меню: небольшой бой ИИ, камера ходит за солдатами.
@@ -286,7 +286,7 @@ impl Session {
         let server = settings.server.trim();
         let mut c = NetClient::connect(server, &settings.name, None).map_err(|e| format!("{server}: {e}"))?;
         c.maps_dir = data_dir().join("maps");
-        Ok(Session::new(Source::Remote(c)))
+        Ok(Session::new(Source::Remote(Box::new(c))))
     }
 
     fn read_input(&mut self, ctx: &egui::Context, mouse_world: Option<Vec2>) -> PlayerInput {
