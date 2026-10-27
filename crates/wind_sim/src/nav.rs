@@ -27,11 +27,13 @@ pub struct FlowField {
     pub dist: Vec<u32>,
     /// Для какой версии карты посчитано поле.
     topology_revision: u64,
+    /// На каком тике мира поле пересчитали в последний раз (см. `World::update_navigation`).
+    pub computed_tick: u64,
 }
 
 impl FlowField {
     pub fn new(target: Vec2) -> Self {
-        FlowField { target, dist: Vec::new(), topology_revision: u64::MAX }
+        FlowField { target, dist: Vec::new(), topology_revision: u64::MAX, computed_tick: 0 }
     }
 
     pub fn is_stale(&self, map: &Map) -> bool {

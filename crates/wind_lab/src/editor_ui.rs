@@ -2,6 +2,7 @@
 //! свойства справа, подсказки снизу — как в Blender.
 
 use crate::editor::{FENCE, HOUSE_WALL, MapEditor, Pointer, TerrainMode, Tool, WallShape};
+use wind_sim::prefab::{self, Prefab};
 use crate::icons::{self, Icon};
 use crate::theme;
 use crate::viewport::{Scene, ScenePoint, ViewportOutput};
@@ -49,6 +50,11 @@ pub struct MapWorkspace {
     pointer: Pointer,
     /// Растёт при открытии другой карты — вьюпорт должен перестроить меши.
     pub generation: u64,
+    /// Готовые здания: встроенные и свои из `data/prefabs.ron`.
+    builtin: Vec<Prefab>,
+    user: Vec<Prefab>,
+    /// Имя, под которым сохранить выделенное как здание.
+    prefab_name: String,
 }
 
 impl MapWorkspace {
@@ -67,6 +73,41 @@ impl MapWorkspace {
             message: (String::new(), theme::TEXT_DIM),
             pointer: Pointer::default(),
             generation: 0,
+            builtin: prefab::builtin(),
+            user: Vec::new(),
+            prefab_name: "моё здание".into(),
+        }
+        .with_user_prefabs()
+    }
+
+    /// Свои здания лежат рядом с картами: `data/prefabs.ron`.
+    fn prefabs_path(&self) -> PathBuf {
+        self.maps_dir.parent().unwrap_or(&self.maps_dir).join("prefabs.ron")
+    }
+
+    fn with_user_prefabs(mut self) -> Self {
+        match prefab::load(&self.prefabs_path()) {
+            Ok(list) => self.user = list,
+            Err(e) => self.error(e),
+        }
+        self
+    }
+
+    /// Выделенное — в свои здания, в `data/prefabs.ron`.
+    fn save_selection_as_prefab(&mut self) {
+        let name = self.prefab_name.trim().to_owned();
+        let Some(mut p) = self.editor.selection_prefab(&name) else { return };
+        // Клетки без стен и с обычной землёй вокруг здания — «не трогать», чтобы
+        // здание не стирало траву там, куда его поставят.
+        p = trim_background(&p);
+        self.user.retain(|u| u.name != name);
+        self.user.push(p.clone());
+        match prefab::save(&self.prefabs_path(), &self.user) {
+            Ok(()) => {
+                self.editor.stamp = Some(p);
+                self.info(format!("Здание «{name}» сохранено в {}", self.prefabs_path().display()));
+            }
+            Err(e) => self.error(e),
         }
     }
 
@@ -138,10 +179,17 @@ impl MapWorkspace {
         }
         let (undo, redo, save, smaller, bigger, tool) = ctx.input(|i| {
             let ctrl = i.modifiers.command;
-            let tool = [(egui::Key::Num1, Tool::Walls), (egui::Key::Num2, Tool::Terrain), (egui::Key::Num3, Tool::Ground), (egui::Key::Num4, Tool::Points)]
-                .into_iter()
-                .find(|(k, _)| i.key_pressed(*k))
-                .map(|(_, t)| t);
+            let tool = [
+                (egui::Key::Num1, Tool::Walls),
+                (egui::Key::Num2, Tool::Terrain),
+                (egui::Key::Num3, Tool::Ground),
+                (egui::Key::Num4, Tool::Points),
+                (egui::Key::Num5, Tool::Select),
+                (egui::Key::Num6, Tool::Buildings),
+            ]
+            .into_iter()
+            .find(|(k, _)| i.key_pressed(*k))
+            .map(|(_, t)| t);
             (
                 ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
                 ctrl && ((i.modifiers.shift && i.key_pressed(egui::Key::Z)) || i.key_pressed(egui::Key::Y)),
@@ -151,6 +199,31 @@ impl MapWorkspace {
                 tool,
             )
         });
+        let (copy, paste, delete, rotate, escape) = ctx.input(|i| {
+            let ctrl = i.modifiers.command;
+            (
+                ctrl && i.key_pressed(egui::Key::C),
+                ctrl && i.key_pressed(egui::Key::V),
+                i.key_pressed(egui::Key::Delete),
+                !ctrl && i.key_pressed(egui::Key::R),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if copy && self.editor.copy() {
+            self.info("Скопировано: Ctrl+V — вставить".into());
+        }
+        if paste && !self.editor.paste() {
+            self.error("Буфер пуст: выдели кусок карты и нажми Ctrl+C".into());
+        }
+        if delete && self.editor.tool == Tool::Select {
+            self.editor.delete_selection();
+        }
+        if rotate && self.editor.tool == Tool::Buildings {
+            self.editor.rotate_stamp();
+        }
+        if escape {
+            self.editor.selection = None;
+        }
         if undo {
             self.editor.undo();
         }
@@ -191,8 +264,28 @@ impl MapWorkspace {
         let e = &self.editor;
         let file = &e.file;
         let mut rings = Vec::new();
+        let mut extra = Vec::new();
+        // Выделение — рамкой.
+        if let Some(s) = e.selection {
+            extra.extend(frame(s.x0, s.y0, s.width(), s.height()));
+        }
+        // Здание под курсором: контур и стены клетками.
+        if e.tool == Tool::Buildings
+            && let (Some(at), Some(stamp)) = (self.pointer.world, &e.stamp)
+            && let Some((x0, y0)) = e.stamp_origin(at)
+        {
+            extra.extend(frame(x0, y0, stamp.width, stamp.height));
+            for y in 0..stamp.height {
+                for x in 0..stamp.width {
+                    if stamp.cell(x, y).wall.is_some_and(|w| w != 0) {
+                        extra.extend(frame(x0 + x, y0 + y, 1, 1));
+                    }
+                }
+            }
+            rings.push((at, 0.6, [1.0, 1.0, 1.0]));
+        }
         if let Some(at) = self.pointer.world
-            && e.tool != Tool::Points
+            && !matches!(e.tool, Tool::Points | Tool::Select | Tool::Buildings)
         {
             let erase = self.pointer.ctrl && matches!(e.tool, Tool::Walls);
             let color = if erase { [1.0, 0.45, 0.4] } else { [1.0, 1.0, 1.0] };
@@ -228,7 +321,7 @@ impl MapWorkspace {
             hud: None,
             kill_feed: Vec::new(),
             rings,
-            lines: lines.unwrap_or_default(),
+            lines: lines.unwrap_or_default().into_iter().chain(extra).collect(),
             corpses: Vec::new(),
             atmosphere: file.atmosphere.clone(),
         }
@@ -244,6 +337,8 @@ impl MapWorkspace {
             Tool::Terrain => "ЛКМ — менять рельеф · Ctrl — наоборот · Shift — сгладить · [ ] — размер кисти",
             Tool::Ground => "ЛКМ — красить землю · [ ] — размер кисти · Ctrl+Z — отмена",
             Tool::Points => "ЛКМ по пустому месту — новая точка · тяни точку или базу — двигать · Ctrl+ЛКМ — удалить точку",
+            Tool::Select => "Тяни ЛКМ — выделить · Ctrl+C — копировать · Ctrl+V — вставить · Delete — стереть стены · Esc — снять",
+            Tool::Buildings => "ЛКМ — поставить здание · R — повернуть · Ctrl+V — вставить скопированное · Ctrl+Z — отмена",
         }
     }
 
@@ -256,6 +351,8 @@ impl MapWorkspace {
             ("2", Tool::Terrain, Icon::Terrain, "Рельеф"),
             ("3", Tool::Ground, Icon::Ground, "Покрытие"),
             ("4", Tool::Points, Icon::Flag, "Точки и базы"),
+            ("5", Tool::Select, Icon::Select, "Выделение"),
+            ("6", Tool::Buildings, Icon::Building, "Здания"),
         ];
         for (key, tool, icon, name) in tools {
             let text = format!("{name}   {key}");
@@ -305,6 +402,11 @@ impl MapWorkspace {
     }
 
     fn tool_panel(&mut self, ui: &mut egui::Ui) {
+        match self.editor.tool {
+            Tool::Select => return self.select_panel(ui),
+            Tool::Buildings => return self.buildings_panel(ui),
+            _ => {}
+        }
         let e = &mut self.editor;
         theme::props(ui, "tool_props", |ui| match e.tool {
             Tool::Walls => {
@@ -371,7 +473,71 @@ impl MapWorkspace {
                 ui.label(format!("{} из {}", e.file.layout.capture_points.len(), crate::editor::MAX_POINTS));
                 ui.end_row();
             }
+            Tool::Select | Tool::Buildings => {}
         });
+        ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
+    }
+
+    fn select_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = self.editor.selection else {
+            ui.label(RichText::new("Протяни мышью по карте, чтобы выделить.").color(theme::TEXT_DIM));
+            ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
+            return;
+        };
+        ui.label(format!("Выделено {}×{} м", s.width(), s.height()));
+        ui.horizontal(|ui| {
+            if ui.button("Копировать  Ctrl+C").clicked() && self.editor.copy() {
+                self.info("Скопировано: Ctrl+V — вставить".into());
+            }
+            if ui.button("Стереть стены  Del").clicked() {
+                self.editor.delete_selection();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("Сохранить как здание").strong());
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.prefab_name).desired_width(150.0));
+            let ok = !self.prefab_name.trim().is_empty() && s.width() <= 64 && s.height() <= 64;
+            if icons::button_enabled(ui, ok, Icon::Save, "Сохранить").clicked() {
+                self.save_selection_as_prefab();
+            }
+        });
+        ui.label(RichText::new("Попадёт в data/prefabs.ron — его можно поправить и руками.").small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
+    }
+
+    fn buildings_panel(&mut self, ui: &mut egui::Ui) {
+        let current = self.editor.stamp.as_ref().map(|p| p.name.clone());
+        let mut chosen = None;
+        let mut list = |ui: &mut egui::Ui, title: &str, items: &[Prefab]| {
+            if items.is_empty() {
+                return;
+            }
+            ui.label(RichText::new(title).strong());
+            for p in items {
+                let text = format!("{}   {}×{}", p.name, p.width, p.height);
+                if ui.selectable_label(current.as_deref() == Some(p.name.as_str()), text).clicked() {
+                    chosen = Some(p.clone());
+                }
+            }
+        };
+        list(ui, "Встроенные", &self.builtin);
+        list(ui, "Свои (data/prefabs.ron)", &self.user);
+        if let Some(clip) = &self.editor.clipboard
+            && ui.selectable_label(current.as_deref() == Some("Копия"), format!("Из буфера   {}×{}", clip.width, clip.height)).clicked()
+        {
+            chosen = Some(clip.clone());
+        }
+        if let Some(p) = chosen {
+            self.editor.stamp = Some(p);
+        }
+        if let Some(stamp) = &self.editor.stamp {
+            ui.add_space(4.0);
+            prefab_preview(ui, stamp);
+            if ui.button("Повернуть  R").clicked() {
+                self.editor.rotate_stamp();
+            }
+        }
         ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
     }
 
@@ -513,11 +679,77 @@ impl MapWorkspace {
     }
 }
 
+/// Контур клеток от (`x`, `y`) размером `w`×`h` — четыре отрезка.
+fn frame(x: i32, y: i32, w: i32, h: i32) -> [(Vec2, Vec2); 4] {
+    let (a, b) = (Vec2::new(x as f32, y as f32), Vec2::new((x + w) as f32, (y + h) as f32));
+    let (c, d) = (Vec2::new(b.x, a.y), Vec2::new(a.x, b.y));
+    [(a, c), (c, b), (b, d), (d, a)]
+}
+
+/// Клетки без стен с обычной землёй (трава, грунт, песок) — «не трогать».
+fn trim_background(p: &Prefab) -> Prefab {
+    let mut cells = Vec::with_capacity((p.width * p.height) as usize);
+    for y in 0..p.height {
+        for x in 0..p.width {
+            let c = p.cell(x, y);
+            let natural = c.wall == Some(0) && c.ground.is_some_and(|g| g < prefab::ASPHALT);
+            cells.push(if natural { prefab::Cell::default() } else { c });
+        }
+    }
+    Prefab::from_cells(&p.name, p.width, p.height, cells)
+}
+
+/// Маленькая картинка здания: стены цветом прочности, пол — серым.
+fn prefab_preview(ui: &mut egui::Ui, p: &Prefab) {
+    let cell = (180.0 / p.width.max(p.height) as f32).clamp(3.0, 12.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(p.width as f32 * cell, p.height as f32 * cell), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2, theme::FIELD);
+    for y in 0..p.height {
+        for x in 0..p.width {
+            let c = p.cell(x, y);
+            let color = match (c.wall, c.ground) {
+                (Some(w), _) if w == INDESTRUCTIBLE => Color32::from_gray(40),
+                (Some(w), _) if w >= 160 => Color32::from_rgb(190, 190, 200),
+                (Some(w), _) if w >= 80 => Color32::from_rgb(230, 220, 200),
+                (Some(w), _) if w > 0 => Color32::from_rgb(160, 120, 70),
+                (_, Some(g)) => GROUND_2D[g.min(5) as usize],
+                // Пусто, земля как была — трава для примера.
+                (Some(_), None) => GROUND_2D[0],
+                (None, _) => continue,
+            };
+            let at = rect.min + egui::vec2(x as f32 * cell, y as f32 * cell);
+            painter.rect_filled(egui::Rect::from_min_size(at, egui::vec2(cell, cell)), 0, color);
+        }
+    }
+}
+
 fn terrain_name(m: TerrainMode) -> &'static str {
     match m {
         TerrainMode::Raise => "Поднять",
         TerrainMode::Lower => "Опустить",
         TerrainMode::Smooth => "Сгладить",
         TerrainMode::Flatten => "Выровнять",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_building_does_not_carry_grass_around() {
+        // Сарай на траве: вокруг — пустые клетки с травой, внутри — пол.
+        let cells: Vec<prefab::Cell> = ["-----", "-###-", "-#.#-", "-----"]
+            .concat()
+            .chars()
+            .map(|c| match c {
+                '#' => prefab::Cell { wall: Some(120), ground: Some(0) },
+                '.' => prefab::Cell { wall: Some(0), ground: Some(prefab::FLOOR) },
+                _ => prefab::Cell { wall: Some(0), ground: Some(0) },
+            })
+            .collect();
+        let p = trim_background(&Prefab::from_cells("сарай", 5, 4, cells));
+        assert_eq!(p.rows(), vec!["     ", " ### ", " #.# ", "     "]);
     }
 }

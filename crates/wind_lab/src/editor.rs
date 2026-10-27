@@ -9,6 +9,7 @@ use wind_sim::map::{CHUNK, EMPTY, INDESTRUCTIBLE, Map};
 use wind_sim::mapfile::MapFile;
 use wind_sim::mapgen::Layout;
 use wind_sim::nav::{FlowField, UNREACHABLE};
+use wind_sim::prefab::{Cell, Prefab};
 use wind_sim::Vec2;
 
 pub const HOUSE_WALL: u8 = 120;
@@ -22,6 +23,34 @@ pub enum Tool {
     Terrain,
     Ground,
     Points,
+    /// Выделить прямоугольник: копировать, удалить, сохранить как здание.
+    Select,
+    /// Ставить готовое здание или скопированный кусок.
+    Buildings,
+}
+
+/// Выделенные клетки: от (`x0`, `y0`) до (`x1`, `y1`) включительно.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Selection {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl Selection {
+    fn between(a: Vec2, b: Vec2) -> Selection {
+        let ((ax, ay), (bx, by)) = (Map::cell_of(a), Map::cell_of(b));
+        Selection { x0: ax.min(bx), y0: ay.min(by), x1: ax.max(bx), y1: ay.max(by) }
+    }
+
+    pub fn width(&self) -> i32 {
+        self.x1 - self.x0 + 1
+    }
+
+    pub fn height(&self) -> i32 {
+        self.y1 - self.y0 + 1
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,6 +131,11 @@ pub struct MapEditor {
     drag_from: Option<Vec2>,
     handle: Option<Handle>,
     flatten_to: f32,
+    pub selection: Option<Selection>,
+    /// Скопированный кусок карты (Ctrl+C).
+    pub clipboard: Option<Prefab>,
+    /// Что ставит инструмент «Здания» — уже повёрнутое.
+    pub stamp: Option<Prefab>,
 }
 
 impl MapEditor {
@@ -125,6 +159,9 @@ impl MapEditor {
             drag_from: None,
             handle: None,
             flatten_to: 0.0,
+            selection: None,
+            clipboard: None,
+            stamp: None,
         };
         editor.validate();
         editor
@@ -178,8 +215,10 @@ impl MapEditor {
             self.stroke = Some(Stroke::default());
             self.drag_from = Some(at);
             self.flatten_to = self.file.map.height_at(at);
-            if self.tool == Tool::Points {
-                self.press_points(at, p.ctrl);
+            match self.tool {
+                Tool::Points => self.press_points(at, p.ctrl),
+                Tool::Buildings => self.place_stamp(at),
+                _ => {}
             }
         }
         if p.down
@@ -205,7 +244,8 @@ impl MapEditor {
                 }
                 Tool::Terrain => self.sculpt(at, p, dt),
                 Tool::Points => self.drag_handle(at),
-                Tool::Walls => {}
+                Tool::Select => self.selection = self.drag_from.map(|from| Selection::between(from, at)),
+                Tool::Walls | Tool::Buildings => {}
             }
         }
         if p.released {
@@ -229,6 +269,92 @@ impl MapEditor {
         (self.tool == Tool::Walls && self.wall_shape != WallShape::Brush && p.down)
             .then_some(())
             .and(self.drag_from.zip(p.world))
+    }
+
+    // --- Выделение, копирование, здания --------------------------------------------
+
+    /// Выделенный кусок карты как здание: стены и земля каждой клетки.
+    pub fn selection_prefab(&self, name: &str) -> Option<Prefab> {
+        let s = self.selection?;
+        let map = &self.file.map;
+        let mut cells = Vec::with_capacity((s.width() * s.height()) as usize);
+        for y in s.y0..=s.y1 {
+            for x in s.x0..=s.x1 {
+                let i = map.index(x, y)?;
+                cells.push(Cell { wall: Some(map.solid[i]), ground: Some(map.ground[i]) });
+            }
+        }
+        Some(Prefab::from_cells(name, s.width(), s.height(), cells))
+    }
+
+    /// Ctrl+C: выделенное — в буфер.
+    pub fn copy(&mut self) -> bool {
+        self.clipboard = self.selection_prefab("Копия");
+        self.clipboard.is_some()
+    }
+
+    /// Ctrl+V: ставить скопированное инструментом «Здания».
+    pub fn paste(&mut self) -> bool {
+        let Some(c) = self.clipboard.clone() else { return false };
+        self.stamp = Some(c);
+        self.tool = Tool::Buildings;
+        true
+    }
+
+    /// R: повернуть то, что ставим, на четверть по часовой.
+    pub fn rotate_stamp(&mut self) {
+        if let Some(s) = &mut self.stamp {
+            *s = s.rotated(1);
+        }
+    }
+
+    /// Delete: стереть стены в выделении (земля остаётся).
+    pub fn delete_selection(&mut self) {
+        let Some(s) = self.selection else { return };
+        self.stroke = Some(Stroke::default());
+        let mut clear = |m: &mut Map, i: usize| {
+            let changed = m.solid[i] != EMPTY;
+            m.solid[i] = EMPTY;
+            changed
+        };
+        let mut unused = false;
+        for y in s.y0..=s.y1 {
+            for x in s.x0..=s.x1 {
+                self.set_cell(x, y, &mut clear, &mut unused);
+            }
+        }
+        self.finish_stroke();
+    }
+
+    /// Где встанет здание, если щёлкнуть в `at`: левый верхний угол (здание — по центру курсора).
+    pub fn stamp_origin(&self, at: Vec2) -> Option<(i32, i32)> {
+        let s = self.stamp.as_ref()?;
+        let (x, y) = Map::cell_of(at);
+        Some((x - s.width / 2, y - s.height / 2))
+    }
+
+    fn place_stamp(&mut self, at: Vec2) {
+        let (Some(stamp), Some((x0, y0))) = (self.stamp.clone(), self.stamp_origin(at)) else { return };
+        let mut ground_changed = false;
+        for y in 0..stamp.height {
+            for x in 0..stamp.width {
+                let c = stamp.cell(x, y);
+                let mut apply = |m: &mut Map, i: usize| {
+                    let before = (m.solid[i], m.ground[i]);
+                    if let Some(w) = c.wall {
+                        m.solid[i] = w;
+                    }
+                    if let Some(g) = c.ground {
+                        m.ground[i] = g;
+                    }
+                    (m.solid[i], m.ground[i]) != before
+                };
+                self.set_cell(x0 + x, y0 + y, &mut apply, &mut ground_changed);
+            }
+        }
+        if ground_changed {
+            self.file.map.ground_revision += 1;
+        }
     }
 
     fn finish_stroke(&mut self) {
@@ -608,6 +734,60 @@ mod tests {
         assert!(e.issues.iter().any(|i| i.contains("не дойти")), "{:?}", e.issues);
         e.undo();
         assert!(e.issues.is_empty());
+    }
+
+    fn press(editor: &mut MapEditor, at: Vec2) {
+        let p = Pointer { world: Some(at), pressed: true, down: true, ..Default::default() };
+        editor.handle(p, 0.016);
+        editor.handle(Pointer { world: Some(at), released: true, ..Default::default() }, 0.016);
+    }
+
+    #[test]
+    fn copy_paste_rotate_and_undo() {
+        let mut e = MapEditor::new(MapEditor::blank("проверка", 128), 10.0);
+        // Ставим встроенный дом в (20, 20).
+        let house = wind_sim::prefab::builtin().into_iter().find(|p| p.name == "Дом малый").unwrap();
+        e.stamp = Some(house.clone());
+        e.tool = Tool::Buildings;
+        let at = Vec2::new(20.0 + house.width as f32 / 2.0, 20.0 + house.height as f32 / 2.0);
+        let (x0, y0) = e.stamp_origin(at).unwrap();
+        press(&mut e, at);
+        assert_eq!(e.file.map.solid[e.file.map.index(x0, y0).unwrap()], HOUSE_WALL);
+        // Выделяем его и копируем — в буфере то же, что поставили.
+        e.tool = Tool::Select;
+        e.handle(Pointer { world: Some(Vec2::new(x0 as f32 + 0.5, y0 as f32 + 0.5)), pressed: true, down: true, ..Default::default() }, 0.016);
+        let far = Vec2::new((x0 + house.width - 1) as f32 + 0.5, (y0 + house.height - 1) as f32 + 0.5);
+        e.handle(Pointer { world: Some(far), down: true, ..Default::default() }, 0.016);
+        e.handle(Pointer { world: Some(far), released: true, ..Default::default() }, 0.016);
+        assert!(e.copy());
+        let copy = e.clipboard.clone().unwrap();
+        assert_eq!((copy.width, copy.height), (house.width, house.height));
+        for y in 0..house.height {
+            for x in 0..house.width {
+                if let Some(w) = house.cell(x, y).wall {
+                    assert_eq!(copy.cell(x, y).wall, Some(w));
+                }
+            }
+        }
+        // Вставляем повёрнутым в другое место.
+        assert!(e.paste());
+        e.rotate_stamp();
+        let stamp = e.stamp.clone().unwrap();
+        assert_eq!((stamp.width, stamp.height), (house.height, house.width));
+        let at2 = Vec2::new(70.0, 70.0);
+        let (x2, y2) = e.stamp_origin(at2).unwrap();
+        press(&mut e, at2);
+        let walls = |e: &MapEditor| e.file.map.solid.iter().filter(|&&v| v == HOUSE_WALL).count();
+        assert_eq!(walls(&e), 2 * house.rows().concat().matches('#').count());
+        assert_eq!(e.file.map.solid[e.file.map.index(x2 + stamp.width - 1, y2).unwrap()], house.cell(0, 0).wall.unwrap());
+        // Удаление выделенного и отмена.
+        e.delete_selection();
+        assert_eq!(walls(&e), house.rows().concat().matches('#').count());
+        e.undo();
+        assert_eq!(walls(&e), 2 * house.rows().concat().matches('#').count());
+        // Отмена вставки.
+        e.undo();
+        assert_eq!(walls(&e), house.rows().concat().matches('#').count());
     }
 
     #[test]

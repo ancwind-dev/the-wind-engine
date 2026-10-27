@@ -22,6 +22,9 @@ use std::time::Instant;
 /// Солдат не идёт ни к какой точке (выберет на следующем «обдумывании»).
 pub const NO_OBJECTIVE: u32 = u32::MAX;
 
+/// Устаревшее поле путей пересчитываем не чаще, тиков (15 с).
+const NAV_REFRESH: u64 = 300;
+
 /// Размер клетки пространственной сетки, м.
 const GRID_CELL: f32 = 8.0;
 
@@ -453,11 +456,30 @@ impl World {
 
     /// После разрушений поля путей устаревают. Пересчитываем не больше одного
     /// поля за тик, чтобы взрыв не давал рывка.
+    /// Поля путей после разрушений устаревают. Но в бою стены только рушатся,
+    /// новых не бывает — устаревшее поле по-прежнему ведёт куда надо, просто не
+    /// знает о новых проломах. Поэтому пересчитываем не больше одного поля за тик
+    /// и каждое — не чаще раза в `NAV_REFRESH` тиков: в застроенном городе стены
+    /// рушатся почти каждый тик, а поле на карте 1024 считается миллисекунды.
     fn update_navigation(&mut self) {
         let map = &self.map;
-        if let Some(field) = self.flow.iter_mut().chain(self.base_flow.iter_mut()).find(|f| f.is_stale(map)) {
+        let tick = self.tick;
+        let due = |f: &FlowField| f.is_stale(map) && tick >= f.computed_tick + NAV_REFRESH;
+        if let Some(field) = self.flow.iter_mut().chain(self.base_flow.iter_mut()).filter(|f| due(f)).min_by_key(|f| f.computed_tick) {
             field.compute(map);
+            field.computed_tick = tick;
         }
+    }
+
+    /// Все поля сразу — когда стены вернулись на место (новый раунд): старые поля
+    /// могут вести сквозь восстановленные стены.
+    fn rebuild_navigation(&mut self) {
+        let map = &self.map;
+        let tick = self.tick;
+        self.flow.par_iter_mut().chain(self.base_flow.par_iter_mut()).for_each(|f| {
+            f.compute(map);
+            f.computed_tick = tick;
+        });
     }
 
     fn move_soldiers(&mut self) {
@@ -707,6 +729,7 @@ impl World {
                 self.map.set_chunk_cells(chunk, &cells, revision);
             }
         }
+        self.rebuild_navigation();
         for p in &mut self.points {
             p.owner = None;
             p.progress = 0.0;

@@ -95,10 +95,18 @@ fn client_converges_under_loss() {
     let mut link = Link::new(150, config);
     for i in 0..600 {
         if i == 300 {
-            // Гарантированно ломаем стены, даже если гранат не было.
-            let center = Vec2::splat(128.0);
-            for k in 0..8 {
-                link.world.map.damage_circle(center + Vec2::new(k as f32 * 12.0 - 48.0, 0.0), 6.0, 250.0);
+            // Гарантированно ломаем стены, даже если гранат не было: у восьми настоящих
+            // разрушаемых стен (где они — зависит от генератора карт).
+            let map = &link.world.map;
+            let walls: Vec<Vec2> = (0..map.solid.len())
+                .filter(|&c| map.solid[c] != 0 && map.solid[c] != wind_sim::map::INDESTRUCTIBLE)
+                .step_by(97)
+                .take(8)
+                .map(|c| Vec2::new((c as u32 % map.width) as f32 + 0.5, (c as u32 / map.width) as f32 + 0.5))
+                .collect();
+            assert_eq!(walls.len(), 8);
+            for at in walls {
+                link.world.map.damage_circle(at, 6.0, 250.0);
             }
         }
         link.tick(0.2);
