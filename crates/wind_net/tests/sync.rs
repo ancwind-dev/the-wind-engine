@@ -225,3 +225,25 @@ fn board_with_player_names_reaches_client() {
     assert_eq!(link.client.name_of(link.soldier), "Артём");
     assert!(rows.iter().any(|r| r.soldier == link.soldier), "игрок всегда в таблице");
 }
+
+#[test]
+fn own_shots_are_heard_where_the_shooter_is() {
+    use wind_net::replication::Heard;
+    let mut link = Link::new(10, ReplicationConfig::default());
+    for _ in 0..40 {
+        link.tick(0.0);
+    }
+    let me = link.client.my_soldier().unwrap().pos;
+    let shots: Vec<Vec2> = link
+        .client
+        .heard
+        .iter()
+        .filter_map(|h| match *h {
+            Heard::Shot { pos, shooter, .. } if shooter == link.soldier => Some(pos),
+            _ => None,
+        })
+        .collect();
+    assert!(!shots.is_empty(), "игрок стрелял каждый тик — выстрелы должны быть слышны");
+    // Солдат бегает по кругу: последний выстрел — недалеко от того, где он сейчас.
+    assert!(shots.last().unwrap().distance(me) < 2.0);
+}

@@ -4,10 +4,12 @@
 //! cargo run --release -p wind_client -- --connect 127.0.0.1:7777
 //! cargo run --release -p wind_client -- --bench 15 --soldiers 1000
 //! cargo run --release -p wind_client -- --export-models      — выгрузить модели в .vox
+//! cargo run --release -p wind_client -- --export-sounds      — звуки в WAV, в notes/Звуки
 
 mod fog;
 mod hud;
 mod minimap;
+mod sound;
 mod source;
 
 use eframe::egui::{self, Color32};
@@ -38,10 +40,12 @@ struct Args {
     /// Карта из `data/maps/<имя>`.
     map_file: Option<String>,
     vsync: bool,
+    /// Громкость 0..1; 0 — без звука.
+    volume: f32,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { connect: None, name: "Игрок".into(), soldiers: None, map: None, seed: 1, bench: None, spectate: false, follow: 0, map_file: None, vsync: false };
+    let mut a = Args { connect: None, name: "Игрок".into(), soldiers: None, map: None, seed: 1, bench: None, spectate: false, follow: 0, map_file: None, vsync: false, volume: 0.8 };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("после {flag} нужно значение"));
@@ -54,6 +58,8 @@ fn parse_args() -> Result<Args, String> {
             "--seed" => a.seed = num(value()?)? as u64,
             "--bench" => a.bench = Some(num(value()?)? as f32),
             "--vsync" => a.vsync = true,
+            "--volume" => a.volume = (num(value()?)? as f32).clamp(0.0, 1.0),
+            "--mute" => a.volume = 0.0,
             "--spectate" => a.spectate = true,
             "--follow" => {
                 a.spectate = true;
@@ -68,12 +74,18 @@ fn parse_args() -> Result<Args, String> {
                 }
                 std::process::exit(0);
             }
+            "--export-sounds" => {
+                export_sounds();
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 println!(
                     "wind_client [--connect адрес] [--name имя] [--soldiers N на команду] [--map сторона] [--map-file имя] [--seed N]\n\
                      wind_client --bench секунд [--soldiers N]   — замер FPS, без игрока\n\
                      wind_client --spectate [--follow N]        — наблюдать за боем (Tab — следующий солдат)\n\
                      wind_client --export-models                — выгрузить модели солдата в data/models/soldier/*.vox\n\
+                     wind_client --export-sounds                — сохранить все звуки в notes/Звуки/*.wav\n\
+                     --volume 0..1 — громкость (0,8), --mute — без звука\n\
                      --vsync — включить вертикальную синхронизацию (по умолчанию выключена, чтобы мерить FPS)"
                 );
                 std::process::exit(0);
@@ -91,6 +103,28 @@ fn data_dir() -> PathBuf {
         return local;
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")
+}
+
+/// Все звуки и их варианты — в WAV, чтобы послушать без игры.
+fn export_sounds() {
+    let dir = data_dir().join("../notes/Звуки");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("{}: {e}", dir.display());
+        return;
+    }
+    let rate = 48_000;
+    for sfx in wind_audio::Sfx::ALL {
+        for v in 0..sfx.variants() {
+            let name = if sfx.variants() > 1 { format!("{}-{}.wav", sfx.name(), v + 1) } else { format!("{}.wav", sfx.name()) };
+            let path = dir.join(name);
+            let samples = wind_audio::synth::render(sfx, v, rate);
+            let saved = std::fs::File::create(&path).and_then(|f| wind_audio::wav::write(&mut std::io::BufWriter::new(f), &samples, rate));
+            match saved {
+                Ok(()) => println!("сохранено: {}", path.display()),
+                Err(e) => eprintln!("{}: {e}", path.display()),
+            }
+        }
+    }
 }
 
 fn main() -> eframe::Result {
@@ -173,6 +207,8 @@ struct Game {
     fog: fog::Fog,
     minimap: minimap::Minimap,
     shots_seen: u32,
+    audio: wind_audio::Audio,
+    sound: sound::Sound,
     notes: Vec<String>,
     render_state: Option<egui_wgpu::RenderState>,
 }
@@ -229,6 +265,12 @@ impl Game {
             }
         };
 
+        // В замере звук ни к чему.
+        let audio = if args.volume > 0.0 && args.bench.is_none() { wind_audio::Audio::open(args.volume) } else { wind_audio::Audio::silent() };
+        if !audio.is_on() {
+            notes.push("звук выключен".into());
+        }
+
         let mut camera = Camera::default();
         let bench = args.bench.map(|seconds| {
             // Смотрим на всю карту сразу — в кадре почти все солдаты.
@@ -258,6 +300,8 @@ impl Game {
             fog: fog::Fog::default(),
             minimap: minimap::Minimap::default(),
             shots_seen: 0,
+            audio,
+            sound: sound::Sound::default(),
             notes,
             render_state,
         }
@@ -466,6 +510,21 @@ impl eframe::App for Game {
                 ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, WorldPaint(Arc::new(frame))));
             }
 
+            // Звук: слышно и тех, кого не видно за туманом.
+            let heard = self.source.take_heard();
+            if self.audio.is_on() {
+                let ears = sound::Ears {
+                    pos: view.me_pos.unwrap_or(self.camera.target),
+                    right: self.camera.screen_axes().1,
+                    own_id: self.source.own_id().filter(|_| view.has_me),
+                    own_pos: view.me_pos,
+                };
+                let source = &self.source;
+                let gun_of = |team: u8, shooter: u32| source.weapon_of(team, shooter).map_or(wind_audio::Gun::Rifle, sound::gun);
+                let plays = self.sound.frame(&ears, &view, &heard, &self.scene.crumbled, gun_of);
+                sound::play_all(&self.audio, plays);
+            }
+
             if let Some(b) = &mut self.bench {
                 b.samples.push(dt * 1000.0);
                 let vp = self.camera.view_proj(aspect);
@@ -540,6 +599,10 @@ impl Game {
             format!("Камера: {:.0} м", self.camera.distance),
             format!("Свой солдат: возвратов на место сервера {}", self.pilot.snaps),
         ];
+        if self.audio.is_on() {
+            let (voices, peak) = self.audio.meter();
+            lines.push(format!("Звук: голосов {voices} из {}, пик {peak:.2}", wind_audio::mixer::MAX_VOICES));
+        }
         match &self.source {
             Source::Local(l) => {
                 lines.push(format!("Симуляция: {:.2} мс на тик, {:.2} мс за кадр", l.world.stats.total_ms, l.sim_ms));

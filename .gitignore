@@ -3,3 +3,6 @@
 # Obsidian: личные настройки окна не храним
 notes/.obsidian/workspace*.json
 notes/.obsidian/cache
+
+# Звуки пересоздаются: wind_client --export-sounds
+notes/Звуки/*.wav

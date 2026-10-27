@@ -1,0 +1,8 @@
+[package]
+name = "wind_audio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cpal = "0.18.2"
+glam = "0.34.1"

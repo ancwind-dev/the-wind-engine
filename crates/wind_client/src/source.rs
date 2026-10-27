@@ -2,6 +2,7 @@
 //! Здесь же — превращение мира в списки для отрисовки и данные для HUD.
 
 use std::time::Instant;
+use wind_net::replication::{Heard, MAX_HEARD};
 use wind_net::{ClientStatus, NetClient};
 use wind_render::{CorpseDraw, PointDraw, SoldierDraw};
 use wind_sim::arsenal::WeaponSpec;
@@ -97,12 +98,14 @@ pub struct Local {
     pub sim_ms: f32,
     /// Сколько раз выстрелил свой солдат — для отдачи прицела.
     own_shots: u32,
+    /// Что слышно с прошлого кадра.
+    heard: Vec<Heard>,
 }
 
 impl Local {
     pub fn new(mut world: World, play: bool) -> Self {
         let me = if play { world.take_control(0) } else { None };
-        Local { world, me, accumulator: 0.0, blasts: Vec::new(), feed: Vec::new(), sim_ms: 0.0, own_shots: 0 }
+        Local { world, me, accumulator: 0.0, blasts: Vec::new(), feed: Vec::new(), sim_ms: 0.0, own_shots: 0, heard: Vec::new() }
     }
 }
 
@@ -147,8 +150,18 @@ impl Source {
                     let w = &l.world;
                     for e in &w.events {
                         match *e {
-                            Event::Explosion { pos, radius } => l.blasts.push((pos, radius, 0.0)),
-                            Event::Shot { shooter, .. } if Some(shooter) == l.me => l.own_shots += 1,
+                            Event::Explosion { pos, radius } => {
+                                l.blasts.push((pos, radius, 0.0));
+                                l.heard.push(Heard::Blast { pos, radius });
+                            }
+                            Event::Shot { shooter, .. } => {
+                                if Some(shooter) == l.me {
+                                    l.own_shots += 1;
+                                }
+                                let s = &w.soldiers[shooter as usize];
+                                l.heard.push(Heard::Shot { pos: s.pos, shooter, team: s.team });
+                            }
+                            Event::GrenadeThrown { from, .. } => l.heard.push(Heard::Throw { pos: from }),
                             // Только убийства с участием игроков — иначе ленту не прочитать.
                             Event::Kill { killer, victim } => {
                                 let player = |i: u32| matches!(w.soldiers[i as usize].controller, Controller::Player(_));
@@ -161,6 +174,10 @@ impl Source {
                     }
                 }
                 l.sim_ms = started.elapsed().as_secs_f32() * 1000.0;
+                if l.heard.len() > MAX_HEARD {
+                    let extra = l.heard.len() - MAX_HEARD;
+                    l.heard.drain(..extra);
+                }
                 for b in &mut l.blasts {
                     b.2 += dt;
                 }
@@ -228,6 +245,22 @@ impl Source {
         match self {
             Source::Local(l) => l.me.map(|i| l.world.weapon(i).clone()),
             Source::Remote(c) => c.world.as_ref().map(|w| w.my_weapon().clone()),
+        }
+    }
+
+    /// Что слышно с прошлого вызова.
+    pub fn take_heard(&mut self) -> Vec<Heard> {
+        match self {
+            Source::Local(l) => std::mem::take(&mut l.heard),
+            Source::Remote(c) => c.world.as_mut().map(|w| std::mem::take(&mut w.heard)).unwrap_or_default(),
+        }
+    }
+
+    /// Оружие солдата `shooter` команды `team`.
+    pub fn weapon_of(&self, team: u8, shooter: u32) -> Option<&WeaponSpec> {
+        match self {
+            Source::Local(l) => (l.world.soldiers.len() > shooter as usize).then(|| l.world.weapon(shooter)),
+            Source::Remote(c) => c.world.as_ref().map(|w| w.arsenal.weapon_of(team, shooter)),
         }
     }
 

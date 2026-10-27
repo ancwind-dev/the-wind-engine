@@ -563,6 +563,17 @@ impl From<Truncated> for SnapshotError {
     }
 }
 
+/// Что слышно: события боя с местом — для звука. Клиент забирает их каждый кадр.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Heard {
+    Shot { pos: Vec2, shooter: u32, team: u8 },
+    Throw { pos: Vec2 },
+    Blast { pos: Vec2, radius: f32 },
+}
+
+/// Больше событий в очереди не держим: если звук их не забирает, старые выбрасываются.
+pub const MAX_HEARD: usize = 256;
+
 /// Мир глазами клиента: только то, что прислал сервер, плюс эффекты.
 pub struct RemoteWorld {
     pub welcome: Welcome,
@@ -597,6 +608,8 @@ pub struct RemoteWorld {
     pub own_pos: Option<Vec2>,
     /// Сколько своих выстрелов пришло — для отдачи прицела.
     pub own_shots: u32,
+    /// Что слышно с прошлого кадра (см. [`Heard`]).
+    pub heard: Vec<Heard>,
     history: Vec<Option<(u32, View)>>,
 }
 
@@ -647,6 +660,7 @@ impl RemoteWorld {
             snapshot_time: 0.0,
             own_pos: None,
             own_shots: 0,
+            heard: Vec::new(),
             history: (0..HISTORY).map(|_| None).collect(),
         })
     }
@@ -815,6 +829,7 @@ impl RemoteWorld {
                     };
                     if let Some(from) = from {
                         let team = self.soldiers[shooter as usize].as_ref().map_or(self.welcome.team, |s| s.net.team());
+                        self.heard.push(Heard::Shot { pos: from, shooter, team });
                         let weapon = self.arsenal.weapon_of(team, shooter);
                         let (speed, ttl) = (weapon.projectile_speed, weapon.range * 1.2 / weapon.projectile_speed);
                         let dir = Vec2::new(angle.cos(), angle.sin());
@@ -824,6 +839,7 @@ impl RemoteWorld {
                 Fx::Grenade(from, to, fuse) => {
                     let d = to - from;
                     let throw = self.welcome.grenade_speed;
+                    self.heard.push(Heard::Throw { pos: from });
                     self.grenades.push(RemoteGrenade {
                         pos: from,
                         vel: d.normalize_or_zero() * throw,
@@ -831,12 +847,19 @@ impl RemoteWorld {
                         fuse,
                     });
                 }
-                Fx::Blast(pos, radius) => self.blasts.push((pos, radius, 0.0)),
+                Fx::Blast(pos, radius) => {
+                    self.blasts.push((pos, radius, 0.0));
+                    self.heard.push(Heard::Blast { pos, radius });
+                }
                 Fx::Kill(killer, victim, killer_team) => {
                     self.kill_feed.push_front(KillNote { killer, victim, killer_team, age: 0.0 });
                     self.kill_feed.truncate(6);
                 }
             }
+        }
+        if self.heard.len() > MAX_HEARD {
+            let extra = self.heard.len() - MAX_HEARD;
+            self.heard.drain(..extra);
         }
         for (chunk, rev, cells) in chunks {
             if rev > self.map.chunk_revisions[chunk] {
