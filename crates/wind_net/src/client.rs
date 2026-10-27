@@ -1,6 +1,6 @@
 //! Клиент: подключается к серверу, шлёт ввод, собирает мир из снимков.
 
-use crate::protocol::{self, Hello, InputPacket, Kind, Welcome};
+use crate::protocol::{self, Challenge, Hello, InputPacket, Kind, Response, Welcome};
 use crate::replication::{RemoteWorld, SnapshotError};
 use crate::traffic::Traffic;
 use std::io::{self, ErrorKind};
@@ -38,6 +38,8 @@ pub struct NetClient {
     pub simulated_loss: f32,
     /// Снимки, которые не удалось разобрать (нет базы или битые).
     pub decode_errors: u32,
+    /// Снимки с чужим токеном — кто-то шлёт пакеты «от сервера».
+    pub forged: u32,
     /// Где искать карты, которые сервер называет по имени.
     pub maps_dir: PathBuf,
     started: Instant,
@@ -47,6 +49,10 @@ pub struct NetClient {
     seq: u32,
     rng: Rng,
     buf: Vec<u8>,
+    /// Соль подключения, вызов сервера (когда пришёл) и токен сессии (из `Welcome`).
+    salt: u64,
+    challenge: Option<Challenge>,
+    token: u64,
 }
 
 impl NetClient {
@@ -60,6 +66,8 @@ impl NetClient {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_nanos() as u64);
+        let mut rng = Rng::new(seed ^ socket.local_addr().map_or(0, |a| a.port() as u64) << 48);
+        let salt = (rng.next_u32() as u64) << 32 | rng.next_u32() as u64;
         Ok(NetClient {
             socket,
             server,
@@ -70,14 +78,18 @@ impl NetClient {
             rtt_ms: 0.0,
             simulated_loss: 0.0,
             decode_errors: 0,
+            forged: 0,
             maps_dir: PathBuf::from("data/maps"),
             started: Instant::now(),
             last_hello: None,
             last_heard: Instant::now(),
             last_input: None,
             seq: 0,
-            rng: Rng::new(seed),
+            rng,
             buf: vec![0; protocol::MAX_PACKET],
+            salt,
+            challenge: None,
+            token: 0,
         })
     }
 
@@ -91,12 +103,17 @@ impl NetClient {
     }
 
     pub fn poll(&mut self) {
+        // Подключение: «привет» с солью, пока не придёт вызов, потом ответ на вызов,
+        // пока не придёт приветствие (пакеты могут теряться — повторяем).
         if self.status == ClientStatus::Connecting
             && self.last_hello.is_none_or(|t| t.elapsed() > HELLO_INTERVAL)
         {
             self.last_hello = Some(Instant::now());
-            let hello = self.hello.encode();
-            self.send(&hello);
+            let packet = match self.challenge {
+                None => protocol::hello(self.salt),
+                Some(challenge) => Response { challenge, hello: self.hello.clone() }.encode(),
+            };
+            self.send(&packet);
         }
         loop {
             match self.socket.recv_from(&mut self.buf) {
@@ -128,10 +145,22 @@ impl NetClient {
     fn handle(&mut self, packet: &[u8]) {
         let Some((kind, data)) = protocol::parse(packet) else { return };
         match kind {
+            Kind::Challenge => {
+                if self.challenge.is_none()
+                    && let Ok(c) = Challenge::decode(data)
+                    && c.salt == self.salt
+                {
+                    self.challenge = Some(c);
+                    // Отвечаем сразу, не дожидаясь следующего повтора.
+                    self.last_hello = None;
+                }
+            }
             Kind::Welcome => {
                 if self.world.is_none()
+                    && self.challenge.is_some()
                     && let Ok(welcome) = Welcome::decode(data)
                 {
+                    self.token = welcome.token;
                     match RemoteWorld::new(welcome, &self.maps_dir) {
                         Ok(world) => {
                             self.world = Some(world);
@@ -139,7 +168,7 @@ impl NetClient {
                         }
                         Err(e) => {
                             // Без своей копии карты играть нельзя — уходим сразу.
-                            let bye = protocol::bye();
+                            let bye = protocol::seal(&protocol::bye(), self.token);
                             self.send(&bye);
                             self.status = ClientStatus::Rejected(e);
                         }
@@ -149,6 +178,11 @@ impl NetClient {
             Kind::Snapshot => {
                 let now = self.now();
                 let now_ms = (now * 1000.0) as u32;
+                let Some((token, data)) = protocol::unseal(data) else { return };
+                if token != self.token {
+                    self.forged += 1;
+                    return;
+                }
                 let Some(world) = &mut self.world else { return };
                 match world.apply_snapshot(data, now) {
                     Ok(()) => {
@@ -163,7 +197,7 @@ impl NetClient {
                 }
             }
             Kind::Reject => self.status = ClientStatus::Rejected(protocol::decode_reject(data)),
-            Kind::Hello | Kind::Input | Kind::Bye => {}
+            Kind::Hello | Kind::Input | Kind::Bye | Kind::Response => {}
         }
     }
 
@@ -182,12 +216,13 @@ impl NetClient {
             input,
         }
         .encode();
+        let packet = protocol::seal(&packet, self.token);
         self.send(&packet);
     }
 
     pub fn disconnect(&mut self) {
         if self.status == ClientStatus::Connected {
-            let bye = protocol::bye();
+            let bye = protocol::seal(&protocol::bye(), self.token);
             self.send(&bye);
             self.send(&bye);
         }

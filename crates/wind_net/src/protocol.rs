@@ -2,13 +2,24 @@
 //!
 //! Каждый пакет начинается с 4 байт: «WN», версия протокола, тип пакета.
 //! Дальше — данные по битам.
+//!
+//! Подключение — в три шага, чтобы нельзя было подставить чужой адрес:
+//! 1. Клиент → `Hello`: случайная «соль», пакет добит до `HELLO_MIN` байт.
+//! 2. Сервер → `Challenge`: соль и печать (ключевой хэш адреса, соли и времени).
+//!    Сервер ничего не запоминает, а ответ не больше запроса — подставив чужой адрес,
+//!    атаку не усилить.
+//! 3. Клиент → `Response`: соль, печать, имя. Печать сходится — адрес настоящий:
+//!    сервер выделяет место и шлёт `Welcome` с токеном сессии.
+//!
+//! Дальше `Input`, `Bye` клиента и `Snapshot` сервера несут токен сразу за заголовком
+//! (`seal`): без него пакет «от имени» игрока не примут ни сервер, ни клиент.
 
 use crate::bits::{BitReader, BitWriter, Truncated};
 use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 7;
+pub const VERSION: u8 = 8;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -20,9 +31,11 @@ pub enum Kind {
     Hello = 1,
     Input = 2,
     Bye = 3,
+    Response = 4,
     Welcome = 10,
     Snapshot = 11,
     Reject = 12,
+    Challenge = 13,
 }
 
 impl Kind {
@@ -31,9 +44,11 @@ impl Kind {
             1 => Kind::Hello,
             2 => Kind::Input,
             3 => Kind::Bye,
+            4 => Kind::Response,
             10 => Kind::Welcome,
             11 => Kind::Snapshot,
             12 => Kind::Reject,
+            13 => Kind::Challenge,
             _ => return None,
         })
     }
@@ -53,6 +68,95 @@ pub fn parse(packet: &[u8]) -> Option<(Kind, &[u8])> {
         return None;
     }
     Some((Kind::from_u8(packet[3])?, &packet[4..]))
+}
+
+/// Длина заголовка пакета, байт.
+pub const HEADER: usize = 4;
+
+/// Пакет с токеном сессии сразу за заголовком.
+pub fn seal(packet: &[u8], token: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(packet.len() + 8);
+    out.extend_from_slice(&packet[..HEADER]);
+    out.extend_from_slice(&token.to_le_bytes());
+    out.extend_from_slice(&packet[HEADER..]);
+    out
+}
+
+/// Токен и данные после него (`data` — то, что вернул `parse`).
+pub fn unseal(data: &[u8]) -> Option<(u64, &[u8])> {
+    let token = u64::from_le_bytes(data.get(..8)?.try_into().ok()?);
+    Some((token, &data[8..]))
+}
+
+// --- Подключение -------------------------------------------------------------
+
+/// `Hello` не короче: ответ сервера (`Challenge`) не больше запроса.
+pub const HELLO_MIN: usize = 64;
+
+pub fn hello(salt: u64) -> Vec<u8> {
+    let mut w = begin(Kind::Hello);
+    w.write_u64(salt);
+    let mut p = w.finish();
+    p.resize(HELLO_MIN, 0);
+    p
+}
+
+/// Соль из `Hello`; короткий (недобитый) `Hello` не принимаем.
+pub fn decode_hello(data: &[u8]) -> Option<u64> {
+    if data.len() + HEADER < HELLO_MIN {
+        return None;
+    }
+    BitReader::new(data).read_u64().ok()
+}
+
+/// Вызов сервера: соль клиента и печать.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Challenge {
+    pub salt: u64,
+    pub cookie: u64,
+}
+
+impl Challenge {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = begin(Kind::Challenge);
+        w.write_u64(self.salt);
+        w.write_u64(self.cookie);
+        w.finish()
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
+        let mut r = BitReader::new(data);
+        Ok(Challenge { salt: r.read_u64()?, cookie: r.read_u64()? })
+    }
+}
+
+/// Ответ клиента на вызов: печать и с чем пришёл.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Response {
+    pub challenge: Challenge,
+    pub hello: Hello,
+}
+
+impl Response {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = begin(Kind::Response);
+        w.write_u64(self.challenge.salt);
+        w.write_u64(self.challenge.cookie);
+        w.write_str(&self.hello.name, MAX_NAME);
+        w.write_bits(self.hello.team.map_or(0, |t| t as u32 + 1), 2);
+        w.finish()
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
+        let mut r = BitReader::new(data);
+        let challenge = Challenge { salt: r.read_u64()?, cookie: r.read_u64()? };
+        let name = r.read_str(MAX_NAME)?;
+        let team = match r.read_bits(2)? {
+            0 => None,
+            t => Some((t - 1).min(1) as u8),
+        };
+        Ok(Response { challenge, hello: Hello { name, team } })
+    }
 }
 
 // --- Сжатие чисел ---------------------------------------------------------
@@ -100,30 +204,12 @@ pub fn read_pos(r: &mut BitReader) -> Result<Vec2, Truncated> {
 
 // --- Клиент → сервер -------------------------------------------------------
 
+/// С чем клиент приходит на сервер (идёт в `Response`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hello {
     pub name: String,
     /// `None` — в команду, где меньше игроков.
     pub team: Option<u8>,
-}
-
-impl Hello {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = begin(Kind::Hello);
-        w.write_str(&self.name, MAX_NAME);
-        w.write_bits(self.team.map_or(0, |t| t as u32 + 1), 2);
-        w.finish()
-    }
-
-    pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
-        let mut r = BitReader::new(data);
-        let name = r.read_str(MAX_NAME)?;
-        let team = match r.read_bits(2)? {
-            0 => None,
-            t => Some((t - 1).min(1) as u8),
-        };
-        Ok(Hello { name, team })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -187,6 +273,8 @@ pub fn bye() -> Vec<u8> {
 /// Всё, что клиенту нужно знать о матче. Карту клиент строит сам из seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Welcome {
+    /// Токен сессии: с ним клиент шлёт ввод, с ним сервер шлёт снимки.
+    pub token: u64,
     pub client_id: u16,
     pub soldier: u32,
     pub team: u8,
@@ -218,6 +306,7 @@ pub struct Welcome {
 impl Welcome {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = begin(Kind::Welcome);
+        w.write_u64(self.token);
         w.write_bits(self.client_id as u32, 16);
         w.write_var(self.soldier);
         w.write_bits(self.team as u32, 1);
@@ -248,6 +337,7 @@ impl Welcome {
     pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
         let mut r = BitReader::new(data);
         Ok(Welcome {
+            token: r.read_u64()?,
             client_id: r.read_bits(16)? as u16,
             soldier: r.read_var()?,
             team: r.read_bits(1)? as u8,
@@ -312,6 +402,35 @@ mod tests {
         assert!((back.input.move_dir.x - 1.0).abs() < 0.01);
         assert_eq!(back.input.pos, Some(Vec2::new(12.0, 34.5)));
         assert_eq!(back.input.spawn, 3);
+    }
+
+    #[test]
+    fn handshake_packets_round_trip() {
+        let h = hello(0xABCD_0123_4567_89EF);
+        assert_eq!(h.len(), HELLO_MIN);
+        let (kind, data) = parse(&h).unwrap();
+        assert_eq!(kind, Kind::Hello);
+        assert_eq!(decode_hello(data), Some(0xABCD_0123_4567_89EF));
+        // Недобитый Hello не принимаем.
+        assert_eq!(decode_hello(&data[..20]), None);
+        let c = Challenge { salt: 7, cookie: 99 };
+        let enc = c.encode();
+        assert!(enc.len() <= HELLO_MIN, "ответ не больше запроса");
+        assert_eq!(Challenge::decode(parse(&enc).unwrap().1).unwrap(), c);
+        let r = Response { challenge: c, hello: Hello { name: "Артём".into(), team: Some(1) } };
+        assert_eq!(Response::decode(parse(&r.encode()).unwrap().1).unwrap(), r);
+    }
+
+    #[test]
+    fn sealed_packet_carries_token() {
+        let p = bye();
+        let sealed = seal(&p, 0x1122_3344_5566_7788);
+        let (kind, data) = parse(&sealed).unwrap();
+        assert_eq!(kind, Kind::Bye);
+        let (token, rest) = unseal(data).unwrap();
+        assert_eq!(token, 0x1122_3344_5566_7788);
+        assert_eq!(rest, &p[HEADER..]);
+        assert!(unseal(&[1, 2, 3]).is_none());
     }
 
     #[test]

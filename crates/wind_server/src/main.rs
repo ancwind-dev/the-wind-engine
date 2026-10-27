@@ -110,6 +110,8 @@ fn serve(config: SimConfig, args: &Args) {
     let mut next = Instant::now();
     let mut last_report = Instant::now();
     let mut worst_ms = 0.0f32;
+    // Сколько чужих пакетов отбито — пишем, когда число меняется.
+    let mut guard_seen = net.guard;
     loop {
         let started = Instant::now();
         net.poll(&mut world);
@@ -143,6 +145,14 @@ fn serve(config: SimConfig, args: &Args) {
                 );
             }
             worst_ms = 0.0;
+            if net.guard != guard_seen {
+                guard_seen = net.guard;
+                let g = net.guard;
+                println!(
+                    "  отбито всего: с чужим токеном {}, с неверной печатью {}, слишком частых подключений {}",
+                    g.forged, g.bad_cookie, g.throttled
+                );
+            }
         }
 
         next += dt;
