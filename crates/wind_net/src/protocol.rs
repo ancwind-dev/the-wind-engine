@@ -8,18 +8,19 @@
 //! 2. Сервер → `Challenge`: соль и печать (ключевой хэш адреса, соли и времени).
 //!    Сервер ничего не запоминает, а ответ не больше запроса — подставив чужой адрес,
 //!    атаку не усилить.
-//! 3. Клиент → `Response`: соль, печать, имя. Печать сходится — адрес настоящий:
-//!    сервер выделяет место и шлёт `Welcome` с токеном сессии.
+//! 3. Клиент → `Response`: соль, печать, имя и открытый ключ. Печать сходится —
+//!    адрес настоящий: сервер выделяет место и шлёт `Welcome` со своим открытым ключом.
 //!
-//! Дальше `Input`, `Bye` клиента и `Snapshot` сервера несут токен сразу за заголовком
-//! (`seal`): без него пакет «от имени» игрока не примут ни сервер, ни клиент.
+//! Дальше `Input`, `Bye` клиента и `Snapshot` сервера зашифрованы ключами сессии
+//! (см. `crypto`): прочитать их со стороны нельзя, а подделанный или изменённый пакет
+//! не расшифруется.
 
 use crate::bits::{BitReader, BitWriter, Truncated};
 use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 9;
+pub const VERSION: u8 = 10;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Больше этого UDP-пакет не читаем.
@@ -73,21 +74,6 @@ pub fn parse(packet: &[u8]) -> Option<(Kind, &[u8])> {
 /// Длина заголовка пакета, байт.
 pub const HEADER: usize = 4;
 
-/// Пакет с токеном сессии сразу за заголовком.
-pub fn seal(packet: &[u8], token: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(packet.len() + 8);
-    out.extend_from_slice(&packet[..HEADER]);
-    out.extend_from_slice(&token.to_le_bytes());
-    out.extend_from_slice(&packet[HEADER..]);
-    out
-}
-
-/// Токен и данные после него (`data` — то, что вернул `parse`).
-pub fn unseal(data: &[u8]) -> Option<(u64, &[u8])> {
-    let token = u64::from_le_bytes(data.get(..8)?.try_into().ok()?);
-    Some((token, &data[8..]))
-}
-
 // --- Подключение -------------------------------------------------------------
 
 /// `Hello` не короче: ответ сервера (`Challenge`) не больше запроса.
@@ -130,11 +116,26 @@ impl Challenge {
     }
 }
 
-/// Ответ клиента на вызов: печать и с чем пришёл.
+/// Ответ клиента на вызов: печать, с чем пришёл и открытый ключ для шифрования.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Response {
     pub challenge: Challenge,
     pub hello: Hello,
+    pub key: [u8; 32],
+}
+
+fn write_key(w: &mut BitWriter, key: &[u8; 32]) {
+    for chunk in key.chunks(8) {
+        w.write_u64(u64::from_le_bytes(chunk.try_into().unwrap()));
+    }
+}
+
+fn read_key(r: &mut BitReader) -> Result<[u8; 32], Truncated> {
+    let mut key = [0u8; 32];
+    for chunk in key.chunks_mut(8) {
+        chunk.copy_from_slice(&r.read_u64()?.to_le_bytes());
+    }
+    Ok(key)
 }
 
 impl Response {
@@ -144,6 +145,7 @@ impl Response {
         w.write_u64(self.challenge.cookie);
         w.write_str(&self.hello.name, MAX_NAME);
         w.write_bits(self.hello.team.map_or(0, |t| t as u32 + 1), 2);
+        write_key(&mut w, &self.key);
         w.finish()
     }
 
@@ -155,7 +157,8 @@ impl Response {
             0 => None,
             t => Some((t - 1).min(1) as u8),
         };
-        Ok(Response { challenge, hello: Hello { name, team } })
+        let key = read_key(&mut r)?;
+        Ok(Response { challenge, hello: Hello { name, team }, key })
     }
 }
 
@@ -273,8 +276,8 @@ pub fn bye() -> Vec<u8> {
 /// Всё, что клиенту нужно знать о матче. Карту клиент строит сам из seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Welcome {
-    /// Токен сессии: с ним клиент шлёт ввод, с ним сервер шлёт снимки.
-    pub token: u64,
+    /// Открытый ключ сервера для этой сессии (см. `crypto`).
+    pub server_key: [u8; 32],
     pub client_id: u16,
     pub soldier: u32,
     pub team: u8,
@@ -306,7 +309,7 @@ pub struct Welcome {
 impl Welcome {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = begin(Kind::Welcome);
-        w.write_u64(self.token);
+        write_key(&mut w, &self.server_key);
         w.write_bits(self.client_id as u32, 16);
         w.write_var(self.soldier);
         w.write_bits(self.team as u32, 1);
@@ -337,7 +340,7 @@ impl Welcome {
     pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
         let mut r = BitReader::new(data);
         Ok(Welcome {
-            token: r.read_u64()?,
+            server_key: read_key(&mut r)?,
             client_id: r.read_bits(16)? as u16,
             soldier: r.read_var()?,
             team: r.read_bits(1)? as u8,
@@ -417,20 +420,8 @@ mod tests {
         let enc = c.encode();
         assert!(enc.len() <= HELLO_MIN, "ответ не больше запроса");
         assert_eq!(Challenge::decode(parse(&enc).unwrap().1).unwrap(), c);
-        let r = Response { challenge: c, hello: Hello { name: "Артём".into(), team: Some(1) } };
+        let r = Response { challenge: c, hello: Hello { name: "Артём".into(), team: Some(1) }, key: [7; 32] };
         assert_eq!(Response::decode(parse(&r.encode()).unwrap().1).unwrap(), r);
-    }
-
-    #[test]
-    fn sealed_packet_carries_token() {
-        let p = bye();
-        let sealed = seal(&p, 0x1122_3344_5566_7788);
-        let (kind, data) = parse(&sealed).unwrap();
-        assert_eq!(kind, Kind::Bye);
-        let (token, rest) = unseal(data).unwrap();
-        assert_eq!(token, 0x1122_3344_5566_7788);
-        assert_eq!(rest, &p[HEADER..]);
-        assert!(unseal(&[1, 2, 3]).is_none());
     }
 
     #[test]

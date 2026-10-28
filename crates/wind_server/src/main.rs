@@ -149,7 +149,7 @@ fn serve(config: SimConfig, args: &Args) {
                 guard_seen = net.guard;
                 let g = net.guard;
                 println!(
-                    "  отбито всего: с чужим токеном {}, с неверной печатью {}, слишком частых подключений {}",
+                    "  отбито всего: не расшифровались {}, с неверной печатью {}, слишком частых подключений {}",
                     g.forged, g.bad_cookie, g.throttled
                 );
             }

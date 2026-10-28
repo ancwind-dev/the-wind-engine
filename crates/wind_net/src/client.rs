@@ -1,5 +1,6 @@
 //! Клиент: подключается к серверу, шлёт ввод, собирает мир из снимков.
 
+use crate::crypto::{Keypair, Session};
 use crate::protocol::{self, Challenge, Hello, InputPacket, Kind, Response, Welcome};
 use crate::replication::{RemoteWorld, SnapshotError};
 use crate::traffic::Traffic;
@@ -38,7 +39,7 @@ pub struct NetClient {
     pub simulated_loss: f32,
     /// Снимки, которые не удалось разобрать (нет базы или битые).
     pub decode_errors: u32,
-    /// Снимки с чужим токеном — кто-то шлёт пакеты «от сервера».
+    /// Снимки, которые не расшифровались, — кто-то шлёт пакеты «от сервера».
     pub forged: u32,
     /// Где искать карты, которые сервер называет по имени.
     pub maps_dir: PathBuf,
@@ -49,10 +50,12 @@ pub struct NetClient {
     seq: u32,
     rng: Rng,
     buf: Vec<u8>,
-    /// Соль подключения, вызов сервера (когда пришёл) и токен сессии (из `Welcome`).
+    /// Соль подключения, вызов сервера (когда пришёл), своя пара ключей и ключи
+    /// сессии (когда пришло приветствие).
     salt: u64,
     challenge: Option<Challenge>,
-    token: u64,
+    keys: Keypair,
+    session: Option<Session>,
 }
 
 impl NetClient {
@@ -89,7 +92,8 @@ impl NetClient {
             buf: vec![0; protocol::MAX_PACKET],
             salt,
             challenge: None,
-            token: 0,
+            keys: Keypair::generate(),
+            session: None,
         })
     }
 
@@ -111,7 +115,7 @@ impl NetClient {
             self.last_hello = Some(Instant::now());
             let packet = match self.challenge {
                 None => protocol::hello(self.salt),
-                Some(challenge) => Response { challenge, hello: self.hello.clone() }.encode(),
+                Some(challenge) => Response { challenge, hello: self.hello.clone(), key: self.keys.public }.encode(),
             };
             self.send(&packet);
         }
@@ -160,7 +164,11 @@ impl NetClient {
                     && self.challenge.is_some()
                     && let Ok(welcome) = Welcome::decode(data)
                 {
-                    self.token = welcome.token;
+                    let Some(session) = Session::client(&self.keys, welcome.server_key) else {
+                        self.status = ClientStatus::Rejected("сервер прислал негодный ключ шифрования".into());
+                        return;
+                    };
+                    self.session = Some(session);
                     match RemoteWorld::new(welcome, &self.maps_dir) {
                         Ok(world) => {
                             self.world = Some(world);
@@ -168,7 +176,7 @@ impl NetClient {
                         }
                         Err(e) => {
                             // Без своей копии карты играть нельзя — уходим сразу.
-                            let bye = protocol::seal(&protocol::bye(), self.token);
+                            let bye = self.sealed(&protocol::bye());
                             self.send(&bye);
                             self.status = ClientStatus::Rejected(e);
                         }
@@ -178,11 +186,11 @@ impl NetClient {
             Kind::Snapshot => {
                 let now = self.now();
                 let now_ms = (now * 1000.0) as u32;
-                let Some((token, data)) = protocol::unseal(data) else { return };
-                if token != self.token {
+                let Some(plain) = self.session.as_ref().and_then(|s| s.open(packet)) else {
                     self.forged += 1;
                     return;
-                }
+                };
+                let data = &plain[protocol::HEADER..];
                 let Some(world) = &mut self.world else { return };
                 match world.apply_snapshot(data, now) {
                     Ok(()) => {
@@ -216,17 +224,25 @@ impl NetClient {
             input,
         }
         .encode();
-        let packet = protocol::seal(&packet, self.token);
+        let packet = self.sealed(&packet);
         self.send(&packet);
     }
 
     pub fn disconnect(&mut self) {
         if self.status == ClientStatus::Connected {
-            let bye = protocol::seal(&protocol::bye(), self.token);
+            let bye = self.sealed(&protocol::bye());
             self.send(&bye);
             self.send(&bye);
         }
         self.status = ClientStatus::TimedOut;
+    }
+
+    /// Пакет, зашифрованный ключом сессии (до приветствия — как есть).
+    fn sealed(&mut self, packet: &[u8]) -> Vec<u8> {
+        match &mut self.session {
+            Some(s) => s.seal(packet),
+            None => packet.to_vec(),
+        }
     }
 
     fn send(&mut self, packet: &[u8]) {

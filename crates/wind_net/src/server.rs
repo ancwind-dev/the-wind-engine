@@ -1,9 +1,10 @@
 //! Сервер: принимает клиентов по UDP, раздаёт им солдат, шлёт снимки.
 //!
 //! Подключение — с проверкой адреса (см. `protocol`): место на сервере достаётся
-//! только тому, кто ответил на вызов со своего настоящего адреса, а ввод и выход
-//! принимаются только с токеном сессии.
+//! только тому, кто ответил на вызов со своего настоящего адреса. Дальше ввод, выход
+//! и снимки зашифрованы ключами сессии (см. `crypto`).
 
+use crate::crypto::{Keypair, Session};
 use crate::protocol::{self, Challenge, Hello, InputPacket, Kind, Response, Welcome};
 use crate::replication::{ReplicationConfig, ServerReplica, board, write_board};
 use crate::traffic::Traffic;
@@ -32,7 +33,7 @@ const HANDSHAKES_TOTAL: u32 = 500;
 /// Сколько чужих пакетов сервер отбил — для журнала и проверки.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Guard {
-    /// Ввод или выход с неверным токеном — кто-то подставил чужой адрес.
+    /// Ввод или выход, который не расшифровался, — подделан или изменён в пути.
     pub forged: u32,
     /// Ответ на вызов с неверной или просроченной печатью.
     pub bad_cookie: u32,
@@ -47,8 +48,8 @@ pub struct RemoteClient {
     pub team: u8,
     pub replica: ServerReplica,
     pub traffic: Traffic,
-    /// Токен сессии: без него ввод и выход не принимаем.
-    token: u64,
+    /// Ключи сессии: расшифровать ввод, зашифровать снимки.
+    session: Session,
     last_seq: u32,
     last_heard: Instant,
     welcome: Vec<u8>,
@@ -67,7 +68,6 @@ pub struct NetServer {
     buf: Vec<u8>,
     /// Случайный ключ сервера: им подписываются печати и рождаются токены.
     secret: RandomState,
-    minted: u64,
     started: Instant,
     /// Сколько пакетов подключения пришло с каждого IP в этой секунде, и всего.
     handshakes: HashMap<IpAddr, u32>,
@@ -92,7 +92,6 @@ impl NetServer {
             next_id: 1,
             buf: vec![0; protocol::MAX_PACKET],
             secret: RandomState::new(),
-            minted: 0,
             started: Instant::now(),
             handshakes: HashMap::new(),
             handshakes_total: 0,
@@ -146,12 +145,6 @@ impl NetServer {
         self.started.elapsed().as_secs() / COOKIE_PERIOD
     }
 
-    /// Случайный токен сессии (не ноль).
-    fn mint(&mut self) -> u64 {
-        self.minted += 1;
-        self.secret.hash_one((self.minted, self.started.elapsed().as_nanos(), "token")).max(1)
-    }
-
     /// Можно ли ответить на пакет подключения с этого адреса: не больше
     /// `HANDSHAKES_PER_IP` в секунду с одного IP и `HANDSHAKES_TOTAL` всего.
     fn allow_handshake(&mut self, addr: SocketAddr) -> bool {
@@ -201,17 +194,17 @@ impl NetServer {
                     self.guard.bad_cookie += 1;
                     return;
                 }
-                self.accept(response.hello, addr, world);
+                self.accept(response.hello, response.key, addr, world);
             }
             Kind::Input | Kind::Bye => {
-                // Только свой клиент и только со своим токеном: иначе кто-то подставил
-                // его адрес, чтобы управлять чужим солдатом или выкинуть игрока.
+                // Только свой клиент и только зашифрованное его ключом: иначе кто-то
+                // подставил адрес, чтобы управлять чужим солдатом или выкинуть игрока.
                 let Some(i) = index else { return };
-                let Some((token, data)) = protocol::unseal(data) else { return };
-                if token != self.clients[i].token {
+                let Some(plain) = self.clients[i].session.open(packet) else {
                     self.guard.forged += 1;
                     return;
-                }
+                };
+                let data = &plain[protocol::HEADER..];
                 self.clients[i].last_heard = Instant::now();
                 self.clients[i].traffic.on_recv(packet.len());
                 if kind == Kind::Bye {
@@ -233,7 +226,13 @@ impl NetServer {
         }
     }
 
-    fn accept(&mut self, hello: Hello, addr: SocketAddr, world: &mut World) {
+    fn accept(&mut self, hello: Hello, client_key: [u8; 32], addr: SocketAddr, world: &mut World) {
+        // Своя пара ключей на каждое подключение; негодный ключ клиента — не пускаем.
+        let keys = Keypair::generate();
+        let Some(session) = Session::server(&keys, client_key) else {
+            self.guard.forged += 1;
+            return;
+        };
         if self.clients.len() >= self.max_clients {
             self.send_to(addr, &protocol::reject("сервер заполнен"));
             return;
@@ -249,8 +248,7 @@ impl NetServer {
         };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        let token = self.mint();
-        let welcome = Welcome { token, ..welcome_for(world, id, soldier, &self.config) }.encode();
+        let welcome = Welcome { server_key: keys.public, ..welcome_for(world, id, soldier, &self.config) }.encode();
         let name = if hello.name.trim().is_empty() { format!("Игрок {id}") } else { hello.name };
         self.log.push(format!("{name} подключился ({addr}), солдат #{soldier}"));
         self.clients.push(RemoteClient {
@@ -260,7 +258,7 @@ impl NetServer {
             team,
             replica: ServerReplica::new(soldier, world),
             traffic: Traffic::default(),
-            token,
+            session,
             last_seq: 0,
             last_heard: Instant::now(),
             welcome: welcome.clone(),
@@ -291,7 +289,7 @@ impl NetServer {
             .map(|c| c.replica.build_snapshot(world, config, board.as_ref(), Some(vision)))
             .collect();
         for (i, packet) in packets.iter().enumerate() {
-            let sealed = protocol::seal(packet, self.clients[i].token);
+            let sealed = self.clients[i].session.seal(packet);
             self.send(i, &sealed);
         }
         self.traffic.roll();
@@ -317,7 +315,7 @@ impl NetServer {
 pub fn welcome_for(world: &World, client_id: u16, soldier: u32, config: &ReplicationConfig) -> Welcome {
     let c = &world.config;
     Welcome {
-        token: 0,
+        server_key: [0; 32],
         client_id,
         soldier,
         team: world.soldiers[soldier as usize].team,
@@ -372,8 +370,9 @@ mod tests {
         server.handle(&packet, from, w);
     }
 
-    /// Полное подключение: привет → вызов → ответ → приветствие с токеном.
-    fn join(server: &mut NetServer, w: &mut World, sock: &UdpSocket, addr: SocketAddr) -> Welcome {
+    /// Полное подключение: привет → вызов → ответ → приветствие с ключом сервера.
+    /// Возвращает ключи сессии клиента.
+    fn join(server: &mut NetServer, w: &mut World, sock: &UdpSocket, addr: SocketAddr) -> Session {
         let hello = protocol::hello(42);
         feed(server, w, &hello, addr);
         let reply = recv(sock).expect("вызов");
@@ -383,34 +382,36 @@ mod tests {
         let challenge = Challenge::decode(data).unwrap();
         assert_eq!(challenge.salt, 42);
         assert!(server.clients.is_empty(), "на привет место не выделяем");
-        let response = Response { challenge, hello: Hello { name: "Игрок".into(), team: Some(0) } };
+        let keys = Keypair::generate();
+        let response = Response { challenge, hello: Hello { name: "Игрок".into(), team: Some(0) }, key: keys.public };
         feed(server, w, &response.encode(), addr);
         let (kind, data) = protocol::parse(&recv(sock).expect("приветствие")).map(|(k, d)| (k, d.to_vec())).unwrap();
         assert_eq!(kind, Kind::Welcome);
-        Welcome::decode(&data).unwrap()
+        let welcome = Welcome::decode(&data).unwrap();
+        Session::client(&keys, welcome.server_key).expect("ключ сервера годный")
     }
 
-    fn input(token: u64, seq: u32, fire: bool) -> Vec<u8> {
+    fn input(seq: u32, fire: bool) -> Vec<u8> {
         let p = InputPacket { seq, ack_tick: 0, time_ms: 1, input: PlayerInput { fire, aim: Vec2::ONE, ..Default::default() } };
-        protocol::seal(&p.encode(), token)
+        p.encode()
     }
 
     #[test]
     fn honest_client_joins_and_plays() {
         let (mut s, mut w) = (server(), world());
         let (sock, addr) = player();
-        let welcome = join(&mut s, &mut w, &sock, addr);
+        let mut session = join(&mut s, &mut w, &sock, addr);
         assert_eq!(s.clients.len(), 1);
-        assert_ne!(welcome.token, 0);
-        feed(&mut s, &mut w, &input(welcome.token, 1, true), addr);
+        feed(&mut s, &mut w, &session.seal(&input(1, true)), addr);
         let soldier = s.clients[0].replica.soldier as usize;
-        assert!(matches!(w.soldiers[soldier].controller, wind_sim::Controller::Player(i) if i.fire), "ввод с токеном принят");
-        // Снимки приходят с тем же токеном.
+        assert!(matches!(w.soldiers[soldier].controller, wind_sim::Controller::Player(i) if i.fire), "зашифрованный ввод принят");
+        // Снимки приходят зашифрованными, и клиент их открывает.
         s.send_snapshots(&w);
         let snap = recv(&sock).unwrap();
-        let (kind, data) = protocol::parse(&snap).unwrap();
+        let (kind, _) = protocol::parse(&snap).unwrap();
         assert_eq!(kind, Kind::Snapshot);
-        assert_eq!(protocol::unseal(data).unwrap().0, welcome.token);
+        let plain = session.open(&snap).expect("снимок расшифровывается");
+        assert_eq!(protocol::parse(&plain).unwrap().0, Kind::Snapshot);
         assert_eq!(s.guard, Guard::default());
     }
 
@@ -418,17 +419,24 @@ mod tests {
     fn forged_input_and_bye_are_ignored() {
         let (mut s, mut w) = (server(), world());
         let (sock, addr) = player();
-        let welcome = join(&mut s, &mut w, &sock, addr);
-        // Кто-то подставил адрес игрока, но токена не знает.
-        feed(&mut s, &mut w, &input(welcome.token ^ 1, 5, true), addr);
+        let mut session = join(&mut s, &mut w, &sock, addr);
+        // Кто-то подставил адрес игрока, но его ключей не знает: шифрует своими или
+        // не шифрует вовсе.
+        let (_, attacker) = {
+            let (c, srv) = (Keypair::generate(), Keypair::generate());
+            (Session::server(&srv, c.public).unwrap(), Session::client(&c, srv.public).unwrap())
+        };
+        let mut attacker = attacker;
+        feed(&mut s, &mut w, &attacker.seal(&input(5, true)), addr);
+        feed(&mut s, &mut w, &input(6, true), addr);
         let soldier = s.clients[0].replica.soldier as usize;
         assert!(matches!(w.soldiers[soldier].controller, wind_sim::Controller::Player(i) if !i.fire), "чужой ввод не принят");
-        feed(&mut s, &mut w, &protocol::seal(&protocol::bye(), 12345), addr);
+        feed(&mut s, &mut w, &attacker.seal(&protocol::bye()), addr);
         feed(&mut s, &mut w, &protocol::bye(), addr);
         assert_eq!(s.clients.len(), 1, "игрока не выкинули");
-        assert_eq!(s.guard.forged, 2);
+        assert_eq!(s.guard.forged, 4);
         // А свой выход — работает.
-        feed(&mut s, &mut w, &protocol::seal(&protocol::bye(), welcome.token), addr);
+        feed(&mut s, &mut w, &session.seal(&protocol::bye()), addr);
         assert!(s.clients.is_empty());
     }
 
@@ -442,10 +450,10 @@ mod tests {
         let (_, data) = protocol::parse(&recv(&attacker_sock).unwrap()).map(|(k, d)| (k, d.to_vec())).unwrap();
         let challenge = Challenge::decode(&data).unwrap();
         // ...но с ней не войти «от имени» жертвы: печать привязана к адресу.
-        let response = Response { challenge, hello: Hello { name: "x".into(), team: None } };
+        let response = Response { challenge, hello: Hello { name: "x".into(), team: None }, key: Keypair::generate().public };
         feed(&mut s, &mut w, &response.encode(), victim);
         // Выдуманная печать — тоже нет.
-        let fake = Response { challenge: Challenge { salt: 7, cookie: 0xDEAD }, hello: Hello { name: "x".into(), team: None } };
+        let fake = Response { challenge: Challenge { salt: 7, cookie: 0xDEAD }, hello: Hello { name: "x".into(), team: None }, key: [1; 32] };
         feed(&mut s, &mut w, &fake.encode(), attacker);
         assert!(s.clients.is_empty());
         assert_eq!(s.guard.bad_cookie, 2);

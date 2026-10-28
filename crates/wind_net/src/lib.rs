@@ -3,6 +3,7 @@
 
 pub mod bits;
 pub mod client;
+pub mod crypto;
 pub mod pilot;
 pub mod protocol;
 pub mod replication;
