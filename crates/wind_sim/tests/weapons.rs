@@ -86,3 +86,44 @@ fn long_burst_spreads_wider() {
     println!("отклонение: первые выстрелы до {:.1}°, конец очереди до {:.1}°", first.to_degrees(), late.to_degrees());
     assert!(late > first, "в длинной очереди разброс должен расти");
 }
+
+#[test]
+fn player_reloads_on_demand() {
+    let mut world = World::new(config(20), 9);
+    let me = (0..world.soldiers.len() as u32).find(|&i| world.soldiers[i as usize].team == 0 && world.weapon(i).name == "m4").unwrap();
+    world.take_control(0);
+    let s = &mut world.soldiers[me as usize];
+    s.controller = wind_sim::Controller::Player(PlayerInput::default());
+    s.cooldown = 0.0;
+    let full = world.weapon(me).magazine_size;
+    let aim = |w: &World| w.soldiers[me as usize].pos + Vec2::new(30.0, 0.0);
+
+    // С полным магазином R ничего не делает.
+    world.set_input(me, PlayerInput { aim: aim(&world), reload: true, ..Default::default() });
+    world.step();
+    assert_eq!(world.soldiers[me as usize].reload_timer, 0.0, "полный магазин не перезаряжают");
+
+    // Пара выстрелов — и R, не дожидаясь пустого магазина.
+    for _ in 0..4 {
+        world.set_input(me, PlayerInput { aim: aim(&world), fire: true, ..Default::default() });
+        world.step();
+    }
+    let left = world.soldiers[me as usize].ammo;
+    assert!(left > 0 && left < full, "патронов: {left} из {full}");
+    world.set_input(me, PlayerInput { aim: aim(&world), reload: true, fire: true, ..Default::default() });
+    world.step();
+    assert!(world.soldiers[me as usize].reload_timer > 0.0, "перезарядка не началась");
+
+    // Во время перезарядки не стреляет, после — магазин полный.
+    let mut shots = 0;
+    for _ in 0..200 {
+        world.set_input(me, PlayerInput { aim: aim(&world), fire: world.soldiers[me as usize].reload_timer > 0.0, ..Default::default() });
+        world.step();
+        shots += world.events.iter().filter(|e| matches!(e, Event::Shot { shooter, .. } if *shooter == me)).count();
+        if world.soldiers[me as usize].reload_timer <= 0.0 {
+            break;
+        }
+    }
+    assert_eq!(shots, 0, "стрелял во время перезарядки");
+    assert_eq!(world.soldiers[me as usize].ammo, full);
+}

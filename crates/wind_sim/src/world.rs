@@ -37,6 +37,8 @@ pub struct PlayerInput {
     pub aim: Vec2,
     pub fire: bool,
     pub grenade: bool,
+    /// Перезарядить, не дожидаясь конца магазина (R).
+    pub reload: bool,
     /// Где появиться после смерти: 0 — на базе, 1 + i — на точке i, если она наша
     /// (иначе на базе).
     pub spawn: u8,

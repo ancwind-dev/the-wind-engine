@@ -231,6 +231,9 @@ struct Session {
     heat: f32,
     /// Где появиться после смерти: 0 — база, 1 + i — точка i (клавиши 1–6).
     spawn: u8,
+    /// Сколько ещё секунд просить перезарядку после нажатия R: короткое нажатие
+    /// не должно потеряться между пакетами ввода и тиками сервера.
+    reload_hold: f32,
     fog: fog::Fog,
     minimap: minimap::Minimap,
     shots_seen: u32,
@@ -249,6 +252,7 @@ impl Session {
             kick: 0.0,
             heat: 0.0,
             spawn: 0,
+            reload_hold: 0.0,
             fog: fog::Fog::default(),
             minimap: minimap::Minimap::default(),
             shots_seen: 0,
@@ -289,11 +293,12 @@ impl Session {
         Ok(Session::new(Source::Remote(Box::new(c))))
     }
 
-    fn read_input(&mut self, ctx: &egui::Context, mouse_world: Option<Vec2>) -> PlayerInput {
+    fn read_input(&mut self, ctx: &egui::Context, mouse_world: Option<Vec2>, dt: f32) -> PlayerInput {
         let (forward, right) = self.camera.screen_axes();
         if let Some(m) = mouse_world {
             self.aim = m;
         }
+        self.reload_hold = if ctx.input(|i| i.key_pressed(egui::Key::R)) { 0.25 } else { (self.reload_hold - dt).max(0.0) };
         // Где появиться: 1 — база, 2…6 — точки A…E.
         let keys = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6];
         if let Some(k) = ctx.input(|i| keys.iter().position(|&k| i.key_pressed(k))) {
@@ -319,6 +324,7 @@ impl Session {
                 aim: self.aim,
                 fire: i.pointer.primary_down(),
                 grenade: i.key_down(egui::Key::G),
+                reload: self.reload_hold > 0.0 || i.key_down(egui::Key::R),
                 spawn: self.spawn,
                 // Заполняет пилот своего солдата.
                 pos: None,
@@ -590,10 +596,16 @@ impl Game {
         ui.painter().rect_filled(rect, 0, SKY);
         let aspect = rect.width() / rect.height().max(1.0);
 
-        // Колесо — приблизить/отдалить.
-        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-        if controls && response.hovered() && scroll != 0.0 {
-            s.camera.distance = (s.camera.distance * (-scroll * 0.0015).exp()).clamp(12.0, 260.0);
+        // Со своим солдатом камера, как в RWR, на одном расстоянии (36 м); колесо
+        // приближает и отдаляет только у наблюдателя и пока ждёшь появления.
+        if s.pilot.pos().is_some() && s.source.own_id().is_some() {
+            let k = 1.0 - (-dt * 8.0).exp();
+            s.camera.distance += (Camera::default().distance - s.camera.distance) * k;
+        } else {
+            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+            if controls && response.hovered() && scroll != 0.0 {
+                s.camera.distance = (s.camera.distance * (-scroll * 0.0015).exp()).clamp(12.0, 260.0);
+            }
         }
         let mouse_world = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)).and_then(|p| {
             let ndc = Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0);
@@ -603,7 +615,7 @@ impl Game {
             }
         });
 
-        let mut input = if controls { s.read_input(ctx, mouse_world) } else { PlayerInput { aim: s.aim, spawn: s.spawn, ..Default::default() } };
+        let mut input = if controls { s.read_input(ctx, mouse_world, dt) } else { PlayerInput { aim: s.aim, spawn: s.spawn, ..Default::default() } };
         if self.fire_lock {
             if input.fire {
                 input.fire = false;
@@ -616,6 +628,7 @@ impl Game {
             input.move_dir = Vec2::ZERO;
             input.fire = false;
             input.grenade = false;
+            input.reload = false;
         }
         // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
         if self.bench.is_none() {
@@ -650,7 +663,8 @@ impl Game {
         if controls && ctx.input(|i| i.key_pressed(egui::Key::M)) {
             s.minimap.big = !s.minimap.big;
         }
-        // Отдача: каждый свой выстрел толкает прицел и камеру, потом всё успокаивается.
+        // Отдача: каждый свой выстрел раздвигает прицел, потом он успокаивается. Камеру
+        // отдача не трогает — тряска мешала целиться.
         let shots = s.source.own_shots();
         let weapon = s.source.own_weapon().unwrap_or_default();
         s.heat = (s.heat - weapon.sustained_fire_diminish_rate * dt).max(0.0);
@@ -686,9 +700,6 @@ impl Game {
             // Фон меню — медленнее, чтобы не дёргало.
             let k = 1.0 - (-dt * if s.backdrop { 1.5 } else { 8.0 }).exp();
             s.camera.target += (me + ahead - s.camera.target) * k;
-            // Отдача чуть вздрагивает камерой.
-            let t = self.started.elapsed().as_secs_f32();
-            s.camera.target += Vec2::new((t * 91.0).sin(), (t * 73.0).cos()) * s.kick * 0.06;
             if let Some(map) = s.source.map() {
                 let h = map.height_at(s.camera.target);
                 s.camera.target_height += (h - s.camera.target_height) * k;

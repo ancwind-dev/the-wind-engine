@@ -365,7 +365,7 @@ impl Lab {
             self.aim = m;
         }
         let typing = ctx.egui_wants_keyboard_input();
-        let (mut move_dir, grenade) = ctx.input(|i| {
+        let (mut move_dir, grenade, reload) = ctx.input(|i| {
             let mut d = Vec2::ZERO;
             if !typing {
                 if i.key_down(egui::Key::W) {
@@ -381,10 +381,10 @@ impl Lab {
                     d.x += 1.0;
                 }
             }
-            (d, !typing && i.key_down(egui::Key::G))
+            (d, !typing && i.key_down(egui::Key::G), !typing && i.key_down(egui::Key::R))
         });
         move_dir = move_dir.normalize_or_zero();
-        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade, spawn: 0, pos: None });
+        client.send_input(PlayerInput { move_dir, aim: self.aim, fire: primary_down, grenade, reload, ..Default::default() });
     }
 
     /// Раз в полсекунды смотрим, не изменился ли файл с параметрами.

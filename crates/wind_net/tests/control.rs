@@ -85,7 +85,7 @@ impl Net {
         };
         let claim = if predict { cheat.or(shown) } else { None };
         self.seq += 1;
-        let input = PlayerInput { move_dir, aim: shown.unwrap_or_default() + Vec2::X, fire: false, grenade: false, spawn: 0, pos: claim };
+        let input = PlayerInput { move_dir, aim: shown.unwrap_or_default() + Vec2::X, pos: claim, ..Default::default() };
         let packet = InputPacket { seq: self.seq, ack_tick: w.tick, time_ms: 1, input }.encode();
         self.to_server.push_back((self.now + LATENCY, packet));
         shown

@@ -37,6 +37,14 @@ pub(crate) fn fire(world: &mut World) {
                 }
                 return None;
             }
+            // Игрок перезаряжается сам, когда захочет, — если магазин не полон.
+            if let Controller::Player(input) = s.controller
+                && input.reload
+                && s.ammo < weapon.magazine_size
+            {
+                s.reload_timer = weapon.reload_time;
+                return None;
+            }
             let to = match s.controller {
                 // Игрок стреляет куда целится, видимость не проверяем.
                 Controller::Player(input) => {

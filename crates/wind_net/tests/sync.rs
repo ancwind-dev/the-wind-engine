@@ -46,9 +46,7 @@ impl Link {
                 move_dir: Vec2::new(t.cos(), t.sin()),
                 aim: me + Vec2::new(10.0, 0.0),
                 fire: true,
-                grenade: false,
-                spawn: 0,
-                pos: None,
+                ..Default::default()
             },
         );
         self.world.step();
