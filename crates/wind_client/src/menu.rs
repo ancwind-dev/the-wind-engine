@@ -216,6 +216,9 @@ impl Menu {
                 ui.label("Имя");
                 ui.add(egui::TextEdit::singleline(&mut s.name).char_limit(24).desired_width(190.0));
                 ui.end_row();
+                ui.label("Пароль");
+                ui.add(egui::TextEdit::singleline(&mut s.password).password(true).hint_text("если сервер просит").desired_width(190.0));
+                ui.end_row();
                 address
             })
             .inner;

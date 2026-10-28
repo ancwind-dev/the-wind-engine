@@ -1,7 +1,13 @@
 //! Выделенный сервер.
 //!
 //! cargo run --release -p wind_server                    — сервер на порту 7777
+//! cargo run --release -p wind_server -- --name "Сервер Артёма" --password тайна
 //! cargo run --release -p wind_server -- --bench         — замер симуляции без сети
+//!
+//! Пока сервер работает, в консоль можно писать команды: игроки, кик, бан, пароль…
+//! («помощь» — список).
+
+mod admin;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -20,6 +26,11 @@ struct Args {
     bench: bool,
     /// Карта из `data/maps/<имя>`. Без неё — процедурная.
     map_file: Option<String>,
+    name: String,
+    password: String,
+    max_players: usize,
+    /// Файл банов.
+    bans: PathBuf,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -33,6 +44,10 @@ fn parse_args() -> Result<Args, String> {
         port: DEFAULT_PORT,
         bench: false,
         map_file: None,
+        name: "The Wind Engine".into(),
+        password: String::new(),
+        max_players: 24,
+        bans: PathBuf::from("data/bans.txt"),
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -47,11 +62,17 @@ fn parse_args() -> Result<Args, String> {
             "--port" => args.port = number(&value()?)?,
             "--bench" => args.bench = true,
             "--map-file" => args.map_file = Some(value()?),
+            "--name" => args.name = value()?,
+            "--password" => args.password = value()?,
+            "--max-players" => args.max_players = number(&value()?)?,
+            "--bans" => args.bans = PathBuf::from(value()?),
             "--help" | "-h" => {
                 println!(
                     "wind_server [--host 0.0.0.0] [--port 7777] [--config data/sim.ron] [--soldiers N на команду] \
                      [--map сторона, м] [--map-file имя из data/maps] [--seed N]\n\
-                     wind_server --bench [--ticks N] ...   — замер симуляции без сети"
+                     \x20           [--name имя сервера] [--password пароль] [--max-players 24] [--bans data/bans.txt]\n\
+                     wind_server --bench [--ticks N] ...   — замер симуляции без сети\n\
+                     Пока сервер работает, команды в консоли: игроки, кик, бан, разбан, баны, пароль, имя, стоп («помощь»)."
                 );
                 std::process::exit(0);
             }
@@ -98,13 +119,35 @@ fn serve(config: SimConfig, args: &Args) {
         eprintln!("не удалось открыть порт {}: {e}", args.port);
         std::process::exit(1);
     });
+    net.name = args.name.chars().take(wind_net::protocol::MAX_SERVER_NAME).collect();
+    net.password = args.password.clone();
+    net.max_clients = args.max_players.max(1);
+    let mut bans = admin::Bans::load(&args.bans).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
+    net.banned = bans.ips();
+    // Консоль хозяина: строки читаем в отдельном потоке, чтобы тик не ждал ввода.
+    let (lines_tx, lines) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if lines_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     println!(
-        "Сервер слушает порт {}. Карта {1}×{1} м, {2} солдат, {3} Гц. Остановить — Ctrl+C.",
+        "Сервер «{}» слушает порт {}. Карта {2}×{2} м, {3} солдат, {4} Гц, игроков до {5}{6}. Банов: {7}.",
+        net.name,
         args.port,
         world.config.map_size,
         world.soldiers.len(),
-        world.config.tick_rate
+        world.config.tick_rate,
+        net.max_clients,
+        if net.password.is_empty() { ", без пароля" } else { ", с паролем" },
+        bans.list.len()
     );
+    println!("Команды — в консоль («помощь»). Остановить — «стоп» или Ctrl+C.");
 
     let dt = Duration::from_secs_f32(world.dt());
     let mut next = Instant::now();
@@ -120,6 +163,23 @@ fn serve(config: SimConfig, args: &Args) {
         worst_ms = worst_ms.max(started.elapsed().as_secs_f32() * 1000.0);
         for line in net.log.drain(..) {
             println!("  {line}");
+        }
+        while let Ok(line) = lines.try_recv() {
+            let out = admin::command(&line, &mut net, &mut world, &mut bans);
+            for l in &out.lines {
+                println!("{l}");
+            }
+            for l in net.log.drain(..) {
+                println!("  {l}");
+            }
+            if out.quit {
+                // Игроки узнают, что сервер закрылся, а не ждут таймаута.
+                let ids: Vec<u16> = net.clients.iter().map(|c| c.id).collect();
+                for id in ids {
+                    net.kick(id, "сервер остановлен", &mut world);
+                }
+                return;
+            }
         }
 
         if last_report.elapsed() >= Duration::from_secs(2) {
@@ -149,8 +209,8 @@ fn serve(config: SimConfig, args: &Args) {
                 guard_seen = net.guard;
                 let g = net.guard;
                 println!(
-                    "  отбито всего: не расшифровались {}, с неверной печатью {}, слишком частых подключений {}",
-                    g.forged, g.bad_cookie, g.throttled
+                    "  отбито всего: не расшифровались {}, с неверной печатью {}, слишком частых подключений {}, неверных паролей {}",
+                    g.forged, g.bad_cookie, g.throttled, g.wrong_password
                 );
             }
         }

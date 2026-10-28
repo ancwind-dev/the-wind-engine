@@ -56,10 +56,13 @@ pub struct NetClient {
     challenge: Option<Challenge>,
     keys: Keypair,
     session: Option<Session>,
+    /// Пароль сервера (уходит зашифрованным для ключа сервера).
+    password: String,
 }
 
 impl NetClient {
-    pub fn connect(server: &str, name: &str, team: Option<u8>) -> io::Result<Self> {
+    /// Подключиться к серверу. `password` — пароль сервера (пустой, если его нет).
+    pub fn connect(server: &str, name: &str, team: Option<u8>, password: &str) -> io::Result<Self> {
         let server = server
             .to_socket_addrs()?
             .find(|a| a.is_ipv4())
@@ -94,6 +97,7 @@ impl NetClient {
             challenge: None,
             keys: Keypair::generate(),
             session: None,
+            password: password.chars().take(protocol::MAX_PASSWORD).collect(),
         })
     }
 
@@ -115,7 +119,11 @@ impl NetClient {
             self.last_hello = Some(Instant::now());
             let packet = match self.challenge {
                 None => protocol::hello(self.salt),
-                Some(challenge) => Response { challenge, hello: self.hello.clone(), key: self.keys.public }.encode(),
+                Some(challenge) => {
+                    // Пароль — только для ключа этого сервера и только к этому вызову.
+                    let password = self.keys.seal_for(challenge.server_key, &challenge.aad(), self.password.as_bytes()).unwrap_or_default();
+                    Response { challenge, hello: self.hello.clone(), key: self.keys.public, password }.encode()
+                }
             };
             self.send(&packet);
         }
@@ -204,7 +212,20 @@ impl NetClient {
                     }
                 }
             }
-            Kind::Reject => self.status = ClientStatus::Rejected(protocol::decode_reject(data)),
+            // Открытый отказ слушаем только при подключении: потом его мог бы
+            // подделать кто угодно, чтобы выкинуть игрока. Сервер выкидывает
+            // зашифрованным пакетом.
+            Kind::Reject => {
+                if self.status == ClientStatus::Connecting {
+                    self.status = ClientStatus::Rejected(protocol::decode_reject(data));
+                }
+            }
+            Kind::Kick => {
+                if let Some(plain) = self.session.as_ref().and_then(|s| s.open(packet)) {
+                    let reason = protocol::decode_reject(&plain[protocol::HEADER..]);
+                    self.status = ClientStatus::Rejected(format!("Сервер вас выкинул: {reason}"));
+                }
+            }
             Kind::Hello | Kind::Input | Kind::Bye | Kind::Response => {}
         }
     }

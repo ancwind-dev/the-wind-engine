@@ -18,6 +18,9 @@ pub struct Settings {
     pub map_file: String,
     /// Последний сервер, к которому подключались.
     pub server: String,
+    /// Пароль сервера — только на этот запуск: в файл настроек не пишем.
+    #[serde(skip)]
+    pub password: String,
 }
 
 impl Default for Settings {
@@ -29,6 +32,7 @@ impl Default for Settings {
             map_size: 512,
             map_file: String::new(),
             server: format!("127.0.0.1:{}", wind_net::DEFAULT_PORT),
+            password: String::new(),
         }
     }
 }
@@ -93,9 +97,14 @@ mod tests {
     #[test]
     fn saved_settings_come_back() {
         let path = temp("roundtrip");
-        let s = Settings { name: "Артём".into(), volume: 0.35, soldiers_per_team: 120, map_size: 256, map_file: "пример".into(), server: "10.0.0.2:7777".into() };
+        let s = Settings { name: "Артём".into(), volume: 0.35, soldiers_per_team: 120, map_size: 256, map_file: "пример".into(), server: "10.0.0.2:7777".into(), password: String::new() };
         s.save(&path).unwrap();
-        assert_eq!(Settings::load(&path, Settings::default()), (s, None));
+        assert_eq!(Settings::load(&path, Settings::default()), (s.clone(), None));
+        // Пароль сервера в файл не попадает.
+        let with_password = Settings { password: "тайна".into(), ..s.clone() };
+        with_password.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("тайна"));
+        assert_eq!(Settings::load(&path, Settings::default()).0.password, "");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

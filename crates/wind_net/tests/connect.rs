@@ -10,7 +10,7 @@ fn client_joins_over_udp_and_gets_snapshots() {
     let mut world = World::new(SimConfig { map_size: 128, soldiers_per_team: 6, capture_points: 1, ..Default::default() }, 3);
     let mut server = NetServer::bind("127.0.0.1:0", ReplicationConfig::default()).unwrap();
     let addr = server.local_addr().unwrap().to_string();
-    let mut client = NetClient::connect(&addr, "Проверка", None).unwrap();
+    let mut client = NetClient::connect(&addr, "Проверка", None, "").unwrap();
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(3) {
         client.poll();

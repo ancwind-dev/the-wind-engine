@@ -5,11 +5,12 @@
 //!
 //! Подключение — в три шага, чтобы нельзя было подставить чужой адрес:
 //! 1. Клиент → `Hello`: случайная «соль», пакет добит до `HELLO_MIN` байт.
-//! 2. Сервер → `Challenge`: соль и печать (ключевой хэш адреса, соли и времени).
-//!    Сервер ничего не запоминает, а ответ не больше запроса — подставив чужой адрес,
-//!    атаку не усилить.
-//! 3. Клиент → `Response`: соль, печать, имя и открытый ключ. Печать сходится —
-//!    адрес настоящий: сервер выделяет место и шлёт `Welcome` со своим открытым ключом.
+//! 2. Сервер → `Challenge`: соль, печать (ключевой хэш адреса, соли и времени) и
+//!    постоянный открытый ключ сервера. Сервер ничего не запоминает, а ответ не больше
+//!    запроса — подставив чужой адрес, атаку не усилить.
+//! 3. Клиент → `Response`: соль, печать, имя, открытый ключ и пароль, зашифрованный
+//!    для ключа сервера. Печать сходится — адрес настоящий; пароль верный — сервер
+//!    выделяет место и шлёт `Welcome` с ключом сессии и именем сервера.
 //!
 //! Дальше `Input`, `Bye` клиента и `Snapshot` сервера зашифрованы ключами сессии
 //! (см. `crypto`): прочитать их со стороны нельзя, а подделанный или изменённый пакет
@@ -20,9 +21,12 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 10;
+pub const VERSION: u8 = 11;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
+/// Пароль сервера и имя сервера — не длиннее, байт.
+pub const MAX_PASSWORD: usize = 64;
+pub const MAX_SERVER_NAME: usize = 48;
 /// Больше этого UDP-пакет не читаем.
 pub const MAX_PACKET: usize = 64 * 1024;
 
@@ -37,6 +41,8 @@ pub enum Kind {
     Snapshot = 11,
     Reject = 12,
     Challenge = 13,
+    /// Сервер выкинул игрока (зашифрован ключом сессии — не подделать).
+    Kick = 14,
 }
 
 impl Kind {
@@ -50,6 +56,7 @@ impl Kind {
             11 => Kind::Snapshot,
             12 => Kind::Reject,
             13 => Kind::Challenge,
+            14 => Kind::Kick,
             _ => return None,
         })
     }
@@ -95,11 +102,13 @@ pub fn decode_hello(data: &[u8]) -> Option<u64> {
     BitReader::new(data).read_u64().ok()
 }
 
-/// Вызов сервера: соль клиента и печать.
+/// Вызов сервера: соль клиента, печать и постоянный ключ сервера.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Challenge {
     pub salt: u64,
     pub cookie: u64,
+    /// Постоянный открытый ключ сервера — для пароля.
+    pub server_key: [u8; 32],
 }
 
 impl Challenge {
@@ -107,12 +116,21 @@ impl Challenge {
         let mut w = begin(Kind::Challenge);
         w.write_u64(self.salt);
         w.write_u64(self.cookie);
+        write_key(&mut w, &self.server_key);
         w.finish()
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
         let mut r = BitReader::new(data);
-        Ok(Challenge { salt: r.read_u64()?, cookie: r.read_u64()? })
+        Ok(Challenge { salt: r.read_u64()?, cookie: r.read_u64()?, server_key: read_key(&mut r)? })
+    }
+
+    /// Доп. данные для пароля: пароль привязан к этому вызову.
+    pub fn aad(&self) -> [u8; 16] {
+        let mut a = [0u8; 16];
+        a[..8].copy_from_slice(&self.salt.to_le_bytes());
+        a[8..].copy_from_slice(&self.cookie.to_le_bytes());
+        a
     }
 }
 
@@ -122,6 +140,8 @@ pub struct Response {
     pub challenge: Challenge,
     pub hello: Hello,
     pub key: [u8; 32],
+    /// Пароль, зашифрованный для ключа сервера (пустой пароль — тоже зашифрован).
+    pub password: Vec<u8>,
 }
 
 fn write_key(w: &mut BitWriter, key: &[u8; 32]) {
@@ -146,19 +166,25 @@ impl Response {
         w.write_str(&self.hello.name, MAX_NAME);
         w.write_bits(self.hello.team.map_or(0, |t| t as u32 + 1), 2);
         write_key(&mut w, &self.key);
+        w.write_var(self.password.len() as u32);
+        for &b in &self.password {
+            w.write_bits(b as u32, 8);
+        }
         w.finish()
     }
 
     pub fn decode(data: &[u8]) -> Result<Self, Truncated> {
         let mut r = BitReader::new(data);
-        let challenge = Challenge { salt: r.read_u64()?, cookie: r.read_u64()? };
+        let challenge = Challenge { salt: r.read_u64()?, cookie: r.read_u64()?, server_key: [0; 32] };
         let name = r.read_str(MAX_NAME)?;
         let team = match r.read_bits(2)? {
             0 => None,
             t => Some((t - 1).min(1) as u8),
         };
         let key = read_key(&mut r)?;
-        Ok(Response { challenge, hello: Hello { name, team }, key })
+        let len = (r.read_var()? as usize).min(MAX_PASSWORD + 16);
+        let password = (0..len).map(|_| r.read_bits(8).map(|b| b as u8)).collect::<Result<_, _>>()?;
+        Ok(Response { challenge, hello: Hello { name, team }, key, password })
     }
 }
 
@@ -304,6 +330,8 @@ pub struct Welcome {
     /// Карта из файла: имя папки в `data/maps` и отпечаток. Пустое имя — карта из seed.
     pub map_name: String,
     pub map_fingerprint: u64,
+    /// Как называется сервер.
+    pub server_name: String,
 }
 
 impl Welcome {
@@ -334,6 +362,7 @@ impl Welcome {
         w.write_u64(self.arsenal_fingerprint);
         w.write_str(&self.map_name, 128);
         w.write_u64(self.map_fingerprint);
+        w.write_str(&self.server_name, MAX_SERVER_NAME);
         w.finish()
     }
 
@@ -361,12 +390,20 @@ impl Welcome {
             arsenal_fingerprint: r.read_u64()?,
             map_name: r.read_str(128)?,
             map_fingerprint: r.read_u64()?,
+            server_name: r.read_str(MAX_SERVER_NAME)?,
         })
     }
 }
 
 pub fn reject(reason: &str) -> Vec<u8> {
     let mut w = begin(Kind::Reject);
+    w.write_str(reason, 128);
+    w.finish()
+}
+
+/// Сервер выкинул игрока: причина (пакет потом шифруется ключом сессии).
+pub fn kick(reason: &str) -> Vec<u8> {
+    let mut w = begin(Kind::Kick);
     w.write_str(reason, 128);
     w.finish()
 }
@@ -416,12 +453,14 @@ mod tests {
         assert_eq!(decode_hello(data), Some(0xABCD_0123_4567_89EF));
         // Недобитый Hello не принимаем.
         assert_eq!(decode_hello(&data[..20]), None);
-        let c = Challenge { salt: 7, cookie: 99 };
+        let c = Challenge { salt: 7, cookie: 99, server_key: [3; 32] };
         let enc = c.encode();
         assert!(enc.len() <= HELLO_MIN, "ответ не больше запроса");
         assert_eq!(Challenge::decode(parse(&enc).unwrap().1).unwrap(), c);
-        let r = Response { challenge: c, hello: Hello { name: "Артём".into(), team: Some(1) }, key: [7; 32] };
-        assert_eq!(Response::decode(parse(&r.encode()).unwrap().1).unwrap(), r);
+        let r = Response { challenge: c, hello: Hello { name: "Артём".into(), team: Some(1) }, key: [7; 32], password: vec![1, 2, 3] };
+        let back = Response::decode(parse(&r.encode()).unwrap().1).unwrap();
+        // Ключ сервера в ответе не повторяется — он уже есть у сервера.
+        assert_eq!(back, Response { challenge: Challenge { server_key: [0; 32], ..c }, ..r });
     }
 
     #[test]

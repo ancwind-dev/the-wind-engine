@@ -34,6 +34,32 @@ pub struct Keypair {
 }
 
 impl Keypair {
+    /// Ключ для одного короткого сообщения между этой парой и ключом `peer`
+    /// (пароль в «ответе»). `client` — с какой стороны мы: ключ одинаков у обеих.
+    fn box_key(&self, peer: [u8; 32], client: bool) -> Option<ChaCha20Poly1305> {
+        let shared = self.secret.diffie_hellman(&PublicKey::from(peer));
+        if !shared.was_contributory() {
+            return None;
+        }
+        let (c, s) = if client { (self.public, peer) } else { (peer, self.public) };
+        let mut material = Vec::with_capacity(96);
+        material.extend_from_slice(shared.as_bytes());
+        material.extend_from_slice(&c);
+        material.extend_from_slice(&s);
+        Some(ChaCha20Poly1305::new(Key::from_slice(&blake3::derive_key("The Wind Engine 2026 пароль", &material))))
+    }
+
+    /// Зашифровать сообщение для сервера с ключом `server`. Пара клиента — своя на
+    /// каждое подключение, поэтому нулевой nonce не повторится.
+    pub fn seal_for(&self, server: [u8; 32], aad: &[u8], msg: &[u8]) -> Option<Vec<u8>> {
+        self.box_key(server, true)?.encrypt(Nonce::from_slice(&[0; 12]), Payload { msg, aad }).ok()
+    }
+
+    /// Открыть сообщение клиента с ключом `client`. `None` — подделано или не нам.
+    pub fn open_from(&self, client: [u8; 32], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+        self.box_key(client, false)?.decrypt(Nonce::from_slice(&[0; 12]), Payload { msg: sealed, aad }).ok()
+    }
+
     /// Свежая пара из случайности операционной системы.
     pub fn generate() -> Keypair {
         let mut bytes = [0u8; 32];
@@ -137,6 +163,20 @@ mod tests {
         assert_eq!(server.open(&client.seal(&packet)).unwrap(), packet);
         // Номера растут: два одинаковых пакета шифруются по-разному.
         assert_ne!(client.seal(&packet), client.seal(&packet));
+    }
+
+    #[test]
+    fn password_box_opens_only_for_the_server() {
+        let (client, server) = (Keypair::generate(), Keypair::generate());
+        let sealed = client.seal_for(server.public, b"salt", "пароль".as_bytes()).unwrap();
+        assert!(!sealed.windows(4).any(|w| w == &"пароль".as_bytes()[..4]));
+        assert_eq!(server.open_from(client.public, b"salt", &sealed).unwrap(), "пароль".as_bytes());
+        // Другие доп. данные, другой сервер, изменённый байт — не открывается.
+        assert!(server.open_from(client.public, b"other", &sealed).is_none());
+        assert!(Keypair::generate().open_from(client.public, b"salt", &sealed).is_none());
+        let mut bad = sealed.clone();
+        bad[0] ^= 1;
+        assert!(server.open_from(client.public, b"salt", &bad).is_none());
     }
 
     #[test]

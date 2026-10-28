@@ -79,6 +79,8 @@ struct Lab {
     client: Option<NetClient>,
     connect_addr: String,
     player_name: String,
+    /// Пароль сервера, к которому подключаемся.
+    connect_password: String,
     last_input: Instant,
     aim: Vec2,
     net_log: VecDeque<String>,
@@ -151,6 +153,7 @@ impl Lab {
             client: None,
             connect_addr: format!("127.0.0.1:{DEFAULT_PORT}"),
             player_name: "Игрок".into(),
+            connect_password: String::new(),
             last_input: Instant::now(),
             aim: Vec2::ZERO,
             net_log: VecDeque::new(),
@@ -247,7 +250,7 @@ impl Lab {
     }
 
     fn connect(&mut self) {
-        match NetClient::connect(&self.connect_addr, &self.player_name, None) {
+        match NetClient::connect(&self.connect_addr, &self.player_name, None, &self.connect_password) {
             Ok(mut client) => {
                 client.maps_dir = self.map_ws.maps_dir().to_path_buf();
                 self.log(format!("Подключаюсь к {}…", client.server_addr()));
@@ -593,6 +596,7 @@ impl Lab {
             );
         }
         let visible = w.soldiers.iter().flatten().count();
+        ui.label(RichText::new(format!("Сервер «{}»", w.welcome.server_name)).color(theme::TEXT));
         ui.label(RichText::new(format!("Видно солдат: {visible}")).color(theme::TEXT_DIM));
         egui::CollapsingHeader::new("Точки захвата").default_open(true).show(ui, |ui| {
             for (i, p) in w.points.iter().enumerate() {
@@ -759,6 +763,9 @@ impl Lab {
             ui.end_row();
             theme::label(ui, "Имя");
             ui.add(egui::TextEdit::singleline(&mut self.player_name).desired_width(150.0));
+            ui.end_row();
+            theme::label(ui, "Пароль");
+            ui.add(egui::TextEdit::singleline(&mut self.connect_password).password(true).desired_width(150.0));
             ui.end_row();
         });
         if icons::wide_button(ui, Icon::Network, "Подключиться и играть").clicked() {

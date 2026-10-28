@@ -80,6 +80,8 @@ pub struct View {
     /// Есть свой солдат (иначе мы наблюдатель).
     pub has_me: bool,
     pub round: RoundView,
+    /// Как называется сервер (в своей игре — пусто).
+    pub server_name: String,
 }
 
 /// Оба варианта большие, а `Source` переезжает при смене боя — держим их в куче.
@@ -456,5 +458,6 @@ fn remote_view(c: &NetClient) -> View {
             .iter()
             .map(|c| CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, model: None })
             .collect(),
+        server_name: w.welcome.server_name.clone(),
     }
 }

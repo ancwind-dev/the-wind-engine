@@ -29,6 +29,10 @@ const COOKIE_PERIOD: u64 = 10;
 /// игрока — два пакета (привет и ответ), а за одним роутером бывает целая компания.
 const HANDSHAKES_PER_IP: u32 = 32;
 const HANDSHAKES_TOTAL: u32 = 500;
+/// После стольких неверных паролей подряд IP не пускаем `PASSWORD_LOCKOUT` —
+/// подбирать пароль перебором бессмысленно.
+const PASSWORD_TRIES: u32 = 5;
+const PASSWORD_LOCKOUT: Duration = Duration::from_secs(60);
 
 /// Сколько чужих пакетов сервер отбил — для журнала и проверки.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +43,8 @@ pub struct Guard {
     pub bad_cookie: u32,
     /// Слишком часто подключаются — не отвечаем.
     pub throttled: u32,
+    /// Неверный пароль.
+    pub wrong_password: u32,
 }
 
 pub struct RemoteClient {
@@ -76,6 +82,16 @@ pub struct NetServer {
     pub guard: Guard,
     /// Кого видит каждая команда (туман войны на сервере).
     pub vision: Vision,
+    /// Как называется сервер — показывается игрокам.
+    pub name: String,
+    /// Пароль сервера; пустой — без пароля.
+    pub password: String,
+    /// Запрещённые адреса (баны). Хранит их хозяин сервера (`wind_server`).
+    pub banned: Vec<IpAddr>,
+    /// Постоянный ключ сервера: им клиенты шифруют пароль.
+    identity: Keypair,
+    /// Неверные пароли подряд с IP и когда был последний.
+    wrong_passwords: HashMap<IpAddr, (u32, Instant)>,
 }
 
 impl NetServer {
@@ -98,6 +114,11 @@ impl NetServer {
             handshake_second: Instant::now(),
             guard: Guard::default(),
             vision: Vision::default(),
+            name: "The Wind Engine".into(),
+            password: String::new(),
+            banned: Vec::new(),
+            identity: Keypair::generate(),
+            wrong_passwords: HashMap::new(),
         })
     }
 
@@ -173,7 +194,7 @@ impl NetServer {
                 if index.is_some() || !self.allow_handshake(addr) {
                     return;
                 }
-                let challenge = Challenge { salt, cookie: self.cookie(addr, salt, self.period()) };
+                let challenge = Challenge { salt, cookie: self.cookie(addr, salt, self.period()), server_key: self.identity.public };
                 self.send_to(addr, &challenge.encode());
             }
             Kind::Response => {
@@ -187,13 +208,38 @@ impl NetServer {
                 if !self.allow_handshake(addr) {
                     return;
                 }
-                let Challenge { salt, cookie } = response.challenge;
+                let Challenge { salt, cookie, .. } = response.challenge;
                 let period = self.period();
                 let fresh = [period, period.saturating_sub(1)].iter().any(|&p| self.cookie(addr, salt, p) == cookie);
                 if !fresh {
                     self.guard.bad_cookie += 1;
                     return;
                 }
+                // Адрес настоящий — теперь можно и отказать: бан, перебор пароля, пароль.
+                if self.banned.contains(&addr.ip()) {
+                    self.send_to(addr, &protocol::reject("вход на этот сервер вам закрыт"));
+                    return;
+                }
+                if let Some(&(tries, last)) = self.wrong_passwords.get(&addr.ip())
+                    && tries >= PASSWORD_TRIES
+                    && last.elapsed() < PASSWORD_LOCKOUT
+                {
+                    self.send_to(addr, &protocol::reject("слишком много неверных паролей — попробуйте через минуту"));
+                    return;
+                }
+                let password = self.identity.open_from(response.key, &response.challenge.aad(), &response.password);
+                let Some(password) = password else {
+                    self.guard.forged += 1;
+                    return;
+                };
+                if !self.password.is_empty() && !same(&password, self.password.as_bytes()) {
+                    self.guard.wrong_password += 1;
+                    let entry = self.wrong_passwords.entry(addr.ip()).or_insert((0, Instant::now()));
+                    *entry = (if entry.1.elapsed() < PASSWORD_LOCKOUT { entry.0 + 1 } else { 1 }, Instant::now());
+                    self.send_to(addr, &protocol::reject("неверный пароль"));
+                    return;
+                }
+                self.wrong_passwords.remove(&addr.ip());
                 self.accept(response.hello, response.key, addr, world);
             }
             Kind::Input | Kind::Bye => {
@@ -222,7 +268,7 @@ impl NetServer {
                     world.set_input(c.replica.soldier, input.input);
                 }
             }
-            Kind::Welcome | Kind::Snapshot | Kind::Reject | Kind::Challenge => {}
+            Kind::Welcome | Kind::Snapshot | Kind::Reject | Kind::Challenge | Kind::Kick => {}
         }
     }
 
@@ -248,7 +294,7 @@ impl NetServer {
         };
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        let welcome = Welcome { server_key: keys.public, ..welcome_for(world, id, soldier, &self.config) }.encode();
+        let welcome = Welcome { server_key: keys.public, server_name: self.name.clone(), ..welcome_for(world, id, soldier, &self.config) }.encode();
         let name = if hello.name.trim().is_empty() { format!("Игрок {id}") } else { hello.name };
         self.log.push(format!("{name} подключился ({addr}), солдат #{soldier}"));
         self.clients.push(RemoteClient {
@@ -265,6 +311,31 @@ impl NetServer {
         });
         let i = self.clients.len() - 1;
         self.send(i, &welcome);
+    }
+
+    /// Выкинуть игрока с сервера: он узнает причину (пакет зашифрован — подделать
+    /// такой нельзя), его солдат вернётся к ИИ. `false` — такого игрока нет.
+    pub fn kick(&mut self, id: u16, reason: &str, world: &mut World) -> bool {
+        let Some(i) = self.clients.iter().position(|c| c.id == id) else { return false };
+        let packet = self.clients[i].session.seal(&protocol::kick(reason));
+        // Дважды — пакет может потеряться.
+        self.send(i, &packet);
+        self.send(i, &packet);
+        let c = self.clients.remove(i);
+        world.release_control(c.replica.soldier);
+        self.log.push(format!("{} выкинут: {reason}", c.name));
+        true
+    }
+
+    /// Забанить игрока: его адрес больше не пустят, а сам он выкинут.
+    /// Возвращает его адрес (чтобы записать в список банов).
+    pub fn ban(&mut self, id: u16, reason: &str, world: &mut World) -> Option<SocketAddr> {
+        let addr = self.clients.iter().find(|c| c.id == id)?.addr;
+        if !self.banned.contains(&addr.ip()) {
+            self.banned.push(addr.ip());
+        }
+        self.kick(id, &format!("бан: {reason}"), world);
+        Some(addr)
     }
 
     /// Шлёт каждому клиенту его снимок. Вызывать после тика.
@@ -311,11 +382,18 @@ impl NetServer {
     }
 }
 
+/// Сравнение без раннего выхода: по времени ответа нельзя угадать, сколько первых
+/// букв пароля совпало.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Приветствие для клиента, которому достался солдат `soldier`.
 pub fn welcome_for(world: &World, client_id: u16, soldier: u32, config: &ReplicationConfig) -> Welcome {
     let c = &world.config;
     Welcome {
         server_key: [0; 32],
+        server_name: String::new(),
         client_id,
         soldier,
         team: world.soldiers[soldier as usize].team,
@@ -372,7 +450,19 @@ mod tests {
 
     /// Полное подключение: привет → вызов → ответ → приветствие с ключом сервера.
     /// Возвращает ключи сессии клиента.
+    /// Ответ на вызов с паролем, зашифрованным для ключа сервера.
+    fn response_with(keys: &Keypair, challenge: Challenge, password: &str) -> Response {
+        let sealed = keys.seal_for(challenge.server_key, &challenge.aad(), password.as_bytes()).unwrap();
+        Response { challenge, hello: Hello { name: "Игрок".into(), team: Some(0) }, key: keys.public, password: sealed }
+    }
+
     fn join(server: &mut NetServer, w: &mut World, sock: &UdpSocket, addr: SocketAddr) -> Session {
+        join_with(server, w, sock, addr, "").expect("впустили")
+    }
+
+    /// Подключение с паролем; `None` — сервер отказал.
+    fn join_with(server: &mut NetServer, w: &mut World, sock: &UdpSocket, addr: SocketAddr, password: &str) -> Option<Session> {
+        let before = server.clients.len();
         let hello = protocol::hello(42);
         feed(server, w, &hello, addr);
         let reply = recv(sock).expect("вызов");
@@ -381,14 +471,18 @@ mod tests {
         assert_eq!(kind, Kind::Challenge);
         let challenge = Challenge::decode(data).unwrap();
         assert_eq!(challenge.salt, 42);
-        assert!(server.clients.is_empty(), "на привет место не выделяем");
+        assert_eq!(server.clients.len(), before, "на привет место не выделяем");
         let keys = Keypair::generate();
-        let response = Response { challenge, hello: Hello { name: "Игрок".into(), team: Some(0) }, key: keys.public };
+        let response = response_with(&keys, challenge, password);
         feed(server, w, &response.encode(), addr);
         let (kind, data) = protocol::parse(&recv(sock).expect("приветствие")).map(|(k, d)| (k, d.to_vec())).unwrap();
+        if kind == Kind::Reject {
+            return None;
+        }
         assert_eq!(kind, Kind::Welcome);
         let welcome = Welcome::decode(&data).unwrap();
-        Session::client(&keys, welcome.server_key).expect("ключ сервера годный")
+        assert_eq!(welcome.server_name, server.name);
+        Some(Session::client(&keys, welcome.server_key).expect("ключ сервера годный"))
     }
 
     fn input(seq: u32, fire: bool) -> Vec<u8> {
@@ -450,10 +544,10 @@ mod tests {
         let (_, data) = protocol::parse(&recv(&attacker_sock).unwrap()).map(|(k, d)| (k, d.to_vec())).unwrap();
         let challenge = Challenge::decode(&data).unwrap();
         // ...но с ней не войти «от имени» жертвы: печать привязана к адресу.
-        let response = Response { challenge, hello: Hello { name: "x".into(), team: None }, key: Keypair::generate().public };
+        let response = response_with(&Keypair::generate(), challenge, "");
         feed(&mut s, &mut w, &response.encode(), victim);
         // Выдуманная печать — тоже нет.
-        let fake = Response { challenge: Challenge { salt: 7, cookie: 0xDEAD }, hello: Hello { name: "x".into(), team: None }, key: [1; 32] };
+        let fake = response_with(&Keypair::generate(), Challenge { salt: 7, cookie: 0xDEAD, server_key: challenge.server_key }, "");
         feed(&mut s, &mut w, &fake.encode(), attacker);
         assert!(s.clients.is_empty());
         assert_eq!(s.guard.bad_cookie, 2);
@@ -478,5 +572,54 @@ mod tests {
         }
         assert_eq!(answered, HANDSHAKES_PER_IP);
         assert_eq!(s.guard.throttled, 50 - HANDSHAKES_PER_IP);
+    }
+
+    #[test]
+    fn password_is_checked_and_guessing_is_locked_out() {
+        let (mut s, mut w) = (server(), world());
+        s.password = "секрет".into();
+        let (sock, addr) = player();
+        assert!(join_with(&mut s, &mut w, &sock, addr, "").is_none(), "без пароля — нет");
+        assert!(join_with(&mut s, &mut w, &sock, addr, "Секрет").is_none(), "неверный — нет");
+        assert!(join_with(&mut s, &mut w, &sock, addr, "секрет").is_some(), "верный — да");
+        assert_eq!(s.clients.len(), 1);
+        assert_eq!(s.guard.wrong_password, 2);
+        // Перебор: после пяти неверных подряд даже верный пароль минуту не примут.
+        let (sock2, addr2) = player();
+        let _ = sock2.local_addr();
+        for k in 0..PASSWORD_TRIES {
+            assert!(join_with(&mut s, &mut w, &sock2, addr2, &format!("угадай{k}")).is_none());
+        }
+        // Тот же IP (127.0.0.1) — и первый игрок с него уже внутри, но новых не пустят.
+        let (sock3, addr3) = player();
+        assert!(join_with(&mut s, &mut w, &sock3, addr3, "секрет").is_none(), "IP на минуту закрыт");
+    }
+
+    #[test]
+    fn kick_and_ban() {
+        let (mut s, mut w) = (server(), world());
+        let (sock, addr) = player();
+        let session = join(&mut s, &mut w, &sock, addr);
+        let id = s.clients[0].id;
+        assert!(s.kick(id, "проверка", &mut w));
+        assert!(s.clients.is_empty());
+        // Игрок узнаёт причину — из зашифрованного пакета.
+        let packet = recv(&sock).expect("пакет «выкинут»");
+        let plain = session.open(&packet).expect("кик зашифрован ключом сессии");
+        let (kind, data) = protocol::parse(&plain).unwrap();
+        assert_eq!(kind, Kind::Kick);
+        assert_eq!(protocol::decode_reject(data), "проверка");
+        assert!(!s.kick(id, "ещё раз", &mut w), "второй раз выкидывать некого");
+        // Бан: выкинут и больше не войдёт с этого адреса.
+        while recv(&sock).is_some() {}
+        let (sock2, addr2) = player();
+        join(&mut s, &mut w, &sock2, addr2);
+        let id2 = s.clients[0].id;
+        assert_eq!(s.ban(id2, "читы", &mut w), Some(addr2));
+        assert!(s.banned.contains(&addr2.ip()));
+        while recv(&sock2).is_some() {}
+        assert!(join_with(&mut s, &mut w, &sock2, addr2, "").is_none(), "забаненный не входит");
+        s.banned.clear();
+        assert!(join_with(&mut s, &mut w, &sock2, addr2, "").is_some(), "разбан — входит");
     }
 }

@@ -98,6 +98,9 @@ pub fn scoreboard(painter: &Painter, rect: Rect, view: &View) {
     let rows = view.board.iter().filter(|r| r.team == 0).count().max(view.board.iter().filter(|r| r.team == 1).count());
     let panel = Rect::from_center_size(rect.center(), vec2(640.0, 110.0 + rows as f32 * 24.0));
     painter.rect_filled(panel, 10, Color32::from_black_alpha(200));
+    if !view.server_name.is_empty() {
+        painter.text(panel.center_top() - vec2(0.0, 8.0), Align2::CENTER_BOTTOM, &view.server_name, FontId::proportional(15.0), TEXT);
+    }
     for team in 0..2u8 {
         let x0 = panel.left() + 24.0 + team as f32 * 316.0;
         let held = view.owners.iter().filter(|o| **o == Some(team)).count();

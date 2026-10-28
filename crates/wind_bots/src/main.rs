@@ -13,10 +13,12 @@ struct Args {
     count: u32,
     seconds: f32,
     loss: f32,
+    /// Пароль сервера.
+    password: String,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut args = Args { server: format!("127.0.0.1:{DEFAULT_PORT}"), count: 24, seconds: 30.0, loss: 0.0 };
+    let mut args = Args { server: format!("127.0.0.1:{DEFAULT_PORT}"), count: 24, seconds: 30.0, loss: 0.0, password: String::new() };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("после {flag} нужно значение"));
@@ -26,8 +28,9 @@ fn parse_args() -> Result<Args, String> {
             "--count" => args.count = number(value()?)? as u32,
             "--seconds" => args.seconds = number(value()?)?,
             "--loss" => args.loss = number(value()?)?,
+            "--password" => args.password = value()?,
             "--help" | "-h" => {
-                println!("wind_bots [--server 127.0.0.1:7777] [--count 24] [--seconds 30] [--loss 0.1]");
+                println!("wind_bots [--server 127.0.0.1:7777] [--count 24] [--seconds 30] [--loss 0.1] [--password пароль]");
                 std::process::exit(0);
             }
             other => return Err(format!("неизвестный флаг {other}, см. --help")),
@@ -95,7 +98,7 @@ fn main() {
     });
     let mut bots: Vec<Bot> = (0..args.count)
         .map(|i| {
-            let mut client = NetClient::connect(&args.server, &format!("Бот {}", i + 1), None).unwrap_or_else(|e| {
+            let mut client = NetClient::connect(&args.server, &format!("Бот {}", i + 1), None, &args.password).unwrap_or_else(|e| {
                 eprintln!("не удалось подключиться к {}: {e}", args.server);
                 std::process::exit(1);
             });

@@ -284,7 +284,7 @@ impl Session {
 
     fn remote(settings: &Settings) -> Result<Session, String> {
         let server = settings.server.trim();
-        let mut c = NetClient::connect(server, &settings.name, None).map_err(|e| format!("{server}: {e}"))?;
+        let mut c = NetClient::connect(server, &settings.name, None, &settings.password).map_err(|e| format!("{server}: {e}"))?;
         c.maps_dir = data_dir().join("maps");
         Ok(Session::new(Source::Remote(Box::new(c))))
     }
