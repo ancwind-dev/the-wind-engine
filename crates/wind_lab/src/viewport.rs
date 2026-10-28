@@ -209,6 +209,11 @@ impl Viewport {
     }
 
     /// Ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
+    /// Солдаты «точно как RWR» или «как было» (см. `SceneBuilder::rwr_exact`).
+    pub fn set_rwr_exact(&mut self, on: bool) {
+        self.scene_3d.rwr_exact = on;
+    }
+
     pub fn set_joint_blend(&mut self, width: f32) {
         self.scene_3d.joint_blend = width;
     }

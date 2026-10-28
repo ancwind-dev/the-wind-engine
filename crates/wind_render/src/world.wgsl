@@ -333,15 +333,25 @@ struct POut {
 // Размер вокселя модели, м.
 const CHAR_VOXEL: f32 = 1.0 / 32.0;
 
+// Солдаты «точно как RWR» (g.skin.y = 1, по умолчанию) или «как было» (0) — сверено
+// с soldier_skin.cg и материалами RWR 2026-10-28:
+// - размеры точек — в пикселях экрана при любом разрешении (2,6; обводка 4,2;
+//   силуэт 3,0; в проходе нормалей 2,3), а не «как при 1080p»;
+// - оружие без света, нижняя половина точки × 0,55.
+fn rwr_exact() -> bool {
+    return g.skin.y > 0.5;
+}
+
 // `scale` — множитель размера точки, `extra` — сколько пикселей добавить (при 1080p),
 // `push` — сдвиг к камере, м (минус — от камеры).
 fn point_out(v: PIn, scale: f32, extra: f32, push: f32) -> POut {
     let world = skinned(v);
     let to_eye = normalize(g.eye.xyz - world);
     var clip = g.view_proj * vec4<f32>(world + to_eye * push, 1.0);
-    // У RWR точка — 2,6 пикселя при 1080p и не зависит от расстояния. Вблизи мы не
-    // даём ей стать меньше полутора вокселей, иначе между точками появятся щели.
-    let res = g.screen.w / 1080.0;
+    // У RWR точка — 2,6 пикселя экрана и не зависит ни от расстояния, ни от разрешения
+    // («как было» — 2,6 пикселя при 1080p). Вблизи мы не даём ей стать меньше полутора
+    // вокселей, иначе между точками появятся щели (у RWR так близко камера не бывает).
+    let res = select(g.screen.w / 1080.0, 1.0, rwr_exact());
     let voxel_px = CHAR_VOXEL * g.tint.w / max(clip.w, 0.01);
     // На уровне детализации n точка заменяет кубик 2ⁿ вокселей.
     let lod = f32(1u << (v.color.a >> 2u));
@@ -380,19 +390,30 @@ fn vs_point_outline(v: PIn) -> POut {
 fn vs_point_ghost(v: PIn) -> POut {
     // Ближе к камере на полметра — чтобы земля под ногами не считалась «стеной».
     // Силуэт врага не рисуем: квадратик нулевого размера (бит 1 признаков снят).
-    let shown = select(0.0, 1.0, (v.inst.y & 2u) != 0u);
+    // У RWR точки силуэта крупнее основных: 3,0 против 2,6.
+    let shown = select(0.0, 1.0, (v.inst.y & 2u) != 0u) * select(1.0, 3.0 / 2.6, rwr_exact());
     var out = point_out(v, shown, 0.0, 0.5);
     out.color = unpack4x8unorm(v.inst.z).rgb;
     return out;
 }
 
+// Солдат в проходе нормалей и глубины: у RWR точки там мельче (2,3 против 2,6).
+@vertex
+fn vs_point_nd(v: PIn) -> POut {
+    return point_out(v, select(1.0, 2.3 / 2.6, rwr_exact()), 0.0, 0.0);
+}
+
 @fragment
 fn fs_point(in: POut) -> @location(0) vec4<f32> {
-    // Свет сверху без направления: небо + доля солнца.
+    let weapon = in.weapon > 0.5;
+    // Свет сверху без направления: небо + доля солнца. Оружие у RWR — без света.
     let l = g.ambient_sky.rgb + g.sun_color.rgb * 0.7;
     var c = to_srgb(to_linear(in.color) * l);
-    // Нижняя половина точки темнее; у оружия — сильнее.
-    let shade = select(0.85, 0.6, in.weapon > 0.5);
+    if (weapon && rwr_exact()) {
+        c = in.color;
+    }
+    // Нижняя половина точки темнее; у оружия — сильнее (у RWR 0,55).
+    let shade = select(0.85, select(0.6, 0.55, rwr_exact()), weapon);
     c *= select(1.0, shade, in.corner.y < 0.0);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }

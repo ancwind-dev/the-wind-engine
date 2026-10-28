@@ -109,6 +109,9 @@ pub struct SceneBuilder {
     pub characters: Option<Arc<CharacterSet>>,
     /// Ширина плавного сгиба у суставов, воксели. 0 — части жёсткие.
     pub joint_blend: f32,
+    /// Солдаты «точно как RWR» (размеры точек в пикселях экрана, оружие без света) или
+    /// «как было» до 2026-10-28 (точки как при 1080p, оружие со светом). См. world.wgsl.
+    pub rwr_exact: bool,
     /// Где в этом кадре рушились стены — для звука (одно место на кусок стены).
     pub crumbled: Vec<Vec2>,
 }
@@ -129,6 +132,7 @@ impl Default for SceneBuilder {
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
             characters: None,
             joint_blend: JOINT_BLEND,
+            rwr_exact: true,
             crumbled: Vec::new(),
         }
     }
@@ -459,7 +463,7 @@ impl SceneBuilder {
             tint: [atmo.tint[0], atmo.tint[1], atmo.tint[2], input.viewport_px[3] / (2.0 * (cam.fov_y * 0.5).tan())],
             post: [atmo.outline, atmo.occlusion, atmo.vignette, cam.far()],
             screen: input.viewport_px,
-            skin: [self.joint_blend, 0.0, 0.0, 0.0],
+            skin: [self.joint_blend, self.rwr_exact as u8 as f32, 0.0, 0.0],
             points,
         }
     }

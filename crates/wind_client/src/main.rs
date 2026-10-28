@@ -353,6 +353,8 @@ struct Game {
     seed: Option<u64>,
     /// После меню кнопка мыши ещё зажата — не стрелять, пока не отпустят.
     fire_lock: bool,
+    /// Короткая надпись по центру сверху (что переключили) и когда появилась.
+    toast: Option<(String, Instant)>,
     scene: SceneBuilder,
     last_frame: Instant,
     started: Instant,
@@ -450,6 +452,7 @@ impl Game {
             settings,
             seed,
             fire_lock: false,
+            toast: None,
             scene: SceneBuilder::with_characters(characters),
             last_frame: Instant::now(),
             started: Instant::now(),
@@ -547,6 +550,13 @@ impl eframe::App for Game {
         self.fps.tick(dt);
         if ctx.input(|i| i.key_pressed(egui::Key::F3)) {
             self.debug = !self.debug;
+        }
+        // F4 — солдаты «точно как RWR» или «как было»: сравнить и, если не понравится,
+        // вернуть прежний вид.
+        if ctx.input(|i| i.key_pressed(egui::Key::F4)) {
+            self.scene.rwr_exact = !self.scene.rwr_exact;
+            let text = if self.scene.rwr_exact { "Солдаты: точно как RWR (F4)" } else { "Солдаты: как было (F4)" };
+            self.toast = Some((text.into(), Instant::now()));
         }
         let in_match = !self.session.backdrop;
         if self.bench.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -764,6 +774,13 @@ impl Game {
         let stats = self.render_state.as_ref().map(wind_render::stats).unwrap_or_default();
         let lines = self.debug.then(|| self.debug_lines(&stats, &view));
         hud::perf(&painter, rect, &self.fps_line(), lines);
+        if let Some((text, at)) = &self.toast {
+            if at.elapsed().as_secs_f32() < 2.0 {
+                hud::toast(&painter, rect, text);
+            } else {
+                self.toast = None;
+            }
+        }
     }
 
     fn fps_line(&self) -> String {
@@ -777,6 +794,7 @@ impl Game {
             format!("Экземпляров: {}, вызовов отрисовки: {}", stats.instances, stats.draw_calls),
             format!("Чанков карты: {} рисуется из {}", stats.chunks_drawn, stats.chunks),
             format!("Камера: {:.0} м", s.camera.distance),
+            format!("Солдаты: {} (F4)", if self.scene.rwr_exact { "точно как RWR" } else { "как было" }),
             format!("Свой солдат: возвратов на место сервера {}", s.pilot.snaps),
         ];
         if self.audio.is_on() {

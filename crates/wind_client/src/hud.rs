@@ -93,6 +93,15 @@ fn kill_feed(painter: &Painter, rect: Rect, view: &View) {
 }
 
 /// Таблица бойцов (держать Tab): по командам — счёт, точки, игроки и лучшие из ИИ.
+/// Короткая надпись сверху по центру — что переключили.
+pub fn toast(painter: &Painter, rect: Rect, text: &str) {
+    let at = rect.center_top() + vec2(0.0, 110.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(16.0), TEXT);
+    let r = Rect::from_center_size(at, galley.size() + vec2(24.0, 12.0));
+    painter.rect_filled(r, 6, PANEL);
+    painter.galley(r.center() - galley.size() / 2.0, galley, TEXT);
+}
+
 pub fn scoreboard(painter: &Painter, rect: Rect, view: &View) {
     let names = &view.round.team_names;
     let rows = view.board.iter().filter(|r| r.team == 0).count().max(view.board.iter().filter(|r| r.team == 1).count());

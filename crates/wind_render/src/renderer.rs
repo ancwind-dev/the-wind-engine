@@ -588,7 +588,7 @@ impl WorldRenderer {
                 vertex: wgpu::VertexState { module: &shader, entry_point: Some(vs), compilation_options: Default::default(), buffers },
                 // Солдаты-точки — квадратики «на камеру», их не отсекаем.
                 primitive: wgpu::PrimitiveState {
-                    cull_mode: (vs != "vs_point").then_some(wgpu::Face::Back),
+                    cull_mode: (!vs.starts_with("vs_point")).then_some(wgpu::Face::Back),
                     ..Default::default()
                 },
                 depth_stencil: Some(depth(true, Default::default())),
@@ -604,7 +604,7 @@ impl WorldRenderer {
             })
         };
         let nd_voxel = nd_pipeline("nd voxel", "fs_nd", &layouts, "vs_voxel", &main_pipeline_layout);
-        let nd_char = nd_pipeline("nd character", "fs_point_nd", &point_vertex, "vs_point", &char_pipeline_layout);
+        let nd_char = nd_pipeline("nd character", "fs_point_nd", &point_vertex, "vs_point_nd", &char_pipeline_layout);
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post"),
             entries: &[wgpu::BindGroupLayoutEntry {

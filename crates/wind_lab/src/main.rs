@@ -91,6 +91,8 @@ struct Lab {
     map_ws: MapWorkspace,
     /// Свой вьюпорт у редактора — камера не прыгает при переключении вкладок.
     editor_view: Viewport,
+    /// Солдаты «точно как RWR» (по умолчанию) или «как было».
+    rwr_exact: bool,
     map_generation: u64,
     /// Карта из файла (или из редактора), на которой идёт симуляция. `None` — процедурная.
     map_file: Option<MapFile>,
@@ -164,6 +166,7 @@ impl Lab {
             map_generation: 0,
             map_file: None,
             studio,
+            rwr_exact: true,
         };
         // wind_lab --connect 127.0.0.1:7777 — сразу в игру; wind_lab --serve — сразу поднять сервер.
         let mut args = std::env::args().skip(1);
@@ -452,6 +455,12 @@ impl Lab {
                         ui.checkbox(&mut o.vision, "Обзор выделенного");
                         ui.checkbox(&mut o.flow, "Поле путей выделенного");
                         ui.checkbox(&mut self.viewport.follow, "Следовать за выделенным");
+                        ui.separator();
+                        if ui.checkbox(&mut self.rwr_exact, "Солдаты точно как RWR").on_hover_text("Точки в пикселях экрана, оружие без света. Выключить — как было до 2026-10-28").changed() {
+                            for v in [&mut self.viewport, &mut self.editor_view, &mut self.studio.view] {
+                                v.set_rwr_exact(self.rwr_exact);
+                            }
+                        }
                     });
                     ui.add_space(24.0);
                     // Вкладки рабочих пространств, как Layout / Modeling в Blender.
