@@ -1,4 +1,5 @@
-//! Свои солдаты: модели RWR со скелетом, процедурная поза, оружие, тела.
+//! Свои солдаты: модели RWR со скелетом, процедурная поза, оружие. Тела убитых —
+//! в `ragdoll`.
 //!
 //! У каждой палки скелета свои воксели и своя матрица; матрицы всех палок солдата
 //! уходят в видеокарту, и модель рисуется одним вызовом на всех солдат (как у RWR).
@@ -7,6 +8,7 @@
 //! размера на экране (см. заметку «Как устроена картинка RWR»). Грани, склеенные
 //! по форме, остались только для теней.
 
+use crate::ragdoll::Rig;
 use crate::rwr::{self, RwrModel, VOXEL};
 use wind_sim::arsenal::Arsenal;
 use bytemuck::{Pod, Zeroable};
@@ -78,6 +80,8 @@ pub struct CharModel {
     joints: Option<Joints>,
     /// Поворот корпуса в позе покоя (см. `body_frame`).
     rest_body: Mat3,
+    /// Тело для физики — когда солдата убьют.
+    pub(crate) rig: Rig,
 }
 
 pub struct WeaponModel {
@@ -242,16 +246,6 @@ impl CharModel {
         p.iter().map(|&v| rot * v + Vec3::Y * lift).collect()
     }
 
-    /// Убитый: падает назад (или вперёд) за полсекунды и лежит, раскинув руки.
-    pub fn corpse(&self, age: f32, forward: bool) -> Pose {
-        let t = (age / 0.45).clamp(0.0, 1.0);
-        let t = t * t * (3.0 - 2.0 * t);
-        let angle = if forward { -1.0 } else { 1.0 } * std::f32::consts::FRAC_PI_2 * t;
-        let rot = Mat3::from_rotation_z(angle);
-        let lift = 3.0 * t;
-        self.rest.iter().map(|&v| rot * v + Vec3::Y * lift).collect()
-    }
-
     /// Матрицы палок, по одной на палку: из позы покоя в позу `pose` (метры, +X вперёд).
     ///
     /// Поворот палки = поворот корпуса + наклон палки кратчайшим путём. Поворот вокруг
@@ -365,7 +359,10 @@ impl Builder {
                 foot: pair("rightfoot", "leftfoot")?,
             })
         })();
-        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY };
+        let inv_mass: Vec<f32> = m.particles.iter().map(|p| p.inv_mass).collect();
+        let torso = joints.map(|j| ([j.neck, j.mid, j.shoulder[0], j.shoulder[1], j.hip[0], j.hip[1]], j.head));
+        let rig = Rig::new(&rest, &m.sticks, &inv_mass, torso);
+        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rig };
         model.rest_body = model.body_frame(&model.rest);
         model
     }
@@ -566,22 +563,6 @@ mod tests {
         let mut out = Vec::new();
         m.bones(pose, &mut |mat| out.push(mat));
         out
-    }
-
-    #[test]
-    fn corpse_falls_as_one_piece() {
-        let set = CharacterSet::load(&data()).unwrap();
-        for m in &set.models {
-            for forward in [false, true] {
-                let pose = m.corpse(10.0, forward);
-                let angle = if forward { -1.0 } else { 1.0 } * std::f32::consts::FRAC_PI_2;
-                let rot = Mat3::from_rotation_z(angle);
-                for mat in part_matrices(m, &pose) {
-                    let diff = (Mat3::from_mat4(mat) - rot).abs().to_cols_array().iter().copied().fold(0.0, f32::max);
-                    assert!(diff < 1e-3, "{}: часть повёрнута не как всё тело ({diff})", m.name);
-                }
-            }
-        }
     }
 
     #[test]

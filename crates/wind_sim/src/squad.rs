@@ -205,7 +205,7 @@ mod tests {
         let first = w.squads[0].leader.unwrap();
         assert_eq!(first, w.squads[0].members[0]);
         assert!(matches!(w.orders[first as usize], Order::Lead { .. }));
-        w.kill(first, w.squads.last().unwrap().members[0]);
+        w.kill(first, w.squads.last().unwrap().members[0], Vec2::ZERO, false);
         w.step();
         let next = w.squads[0].leader.unwrap();
         assert_ne!(next, first);
@@ -222,7 +222,7 @@ mod tests {
         let enemy = w.squads.iter().find(|q| q.team != team).unwrap().members[0];
         // Командир стоит на нашей точке A, далеко от базы.
         let a = w.points[0].pos;
-        w.kill(member, enemy);
+        w.kill(member, enemy, Vec2::ZERO, false);
         for _ in 0..(w.config.soldier.respawn_time * 20.0) as u32 + 5 {
             w.points[0].owner = Some(team);
             w.points[0].progress = if team == 0 { -1.0 } else { 1.0 };

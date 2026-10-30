@@ -25,6 +25,12 @@ pub const NO_OBJECTIVE: u32 = u32::MAX;
 /// Устаревшее поле путей пересчитываем не чаще, тиков (15 с).
 const NAV_REFRESH: u64 = 300;
 
+/// С какой скоростью толкает тело убитого пуля и взрыв (у самого центра), м/с
+/// (см. `Soldier::death_push`). Пуля — чтобы тело отпало назад, взрыв — чуть сильнее
+/// и с подбросом.
+pub const BULLET_PUSH: f32 = 2.2;
+pub const BLAST_PUSH: f32 = 3.2;
+
 /// Размер клетки пространственной сетки, м.
 const GRID_CELL: f32 = 8.0;
 
@@ -88,6 +94,11 @@ pub struct Soldier {
     pub alive: bool,
     pub health: f32,
     pub respawn_timer: f32,
+    /// Чем толкнуло при смерти, м/с по земле: пулей — по её ходу, взрывом — от центра.
+    /// Только для картинки: тело-рэгдолл отлетает туда (см. `wind_render::ragdoll`).
+    pub death_push: Vec2,
+    /// Убит взрывом — тело подбрасывает.
+    pub death_blast: bool,
     /// Враг, по которому стреляет.
     pub target: Option<u32>,
     /// Индекс точки захвата, к которой идёт.
@@ -902,6 +913,8 @@ impl World {
             alive: true,
             health: 1.0,
             respawn_timer: 0.0,
+            death_push: Vec2::ZERO,
+            death_blast: false,
             target: None,
             objective: NO_OBJECTIVE,
             cooldown: 0.0,
@@ -942,12 +955,15 @@ impl World {
         center
     }
 
-    pub(crate) fn kill(&mut self, victim: u32, killer: u32) {
+    /// `push` и `blast` — чем толкнуло тело (см. `Soldier::death_push`).
+    pub(crate) fn kill(&mut self, victim: u32, killer: u32, push: Vec2, blast: bool) {
         let s = &mut self.soldiers[victim as usize];
         if !s.alive {
             return;
         }
         s.alive = false;
+        s.death_push = push;
+        s.death_blast = blast;
         s.target = None;
         s.respawn_timer = self.config.soldier.respawn_time;
         s.deaths += 1;

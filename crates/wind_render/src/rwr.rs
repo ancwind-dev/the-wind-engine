@@ -14,6 +14,8 @@ pub struct Particle {
     pub name: String,
     /// В вокселях, уже в наших осях.
     pub pos: Vec3,
+    /// Обратная масса (`invMass`): чем больше, тем легче точка — для тела-рэгдолла.
+    pub inv_mass: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -105,7 +107,7 @@ pub fn parse(text: &str) -> Result<RwrModel, String> {
                 model.voxels.push((cell, rgba));
             }
             "particle" => {
-                let (mut p, mut id, mut pname) = ([0f32; 3], 0i64, String::new());
+                let (mut p, mut id, mut pname, mut inv_mass) = ([0f32; 3], 0i64, String::new(), 1.0);
                 for (k, v) in attrs(tag) {
                     match k {
                         "x" => p[0] = num(v, "x")?,
@@ -113,11 +115,12 @@ pub fn parse(text: &str) -> Result<RwrModel, String> {
                         "z" => p[2] = num(v, "z")?,
                         "id" => id = num(v, "id")?,
                         "name" => pname = v.to_owned(),
+                        "invMass" => inv_mass = num(v, "invMass")?,
                         _ => {}
                     }
                 }
                 ids.push(id);
-                model.particles.push(Particle { name: pname, pos: axes(p[0], p[1], p[2]) });
+                model.particles.push(Particle { name: pname, pos: axes(p[0], p[1], p[2]), inv_mass });
             }
             "stick" => {
                 let (mut a, mut b) = (0i64, 0i64);

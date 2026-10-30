@@ -322,6 +322,8 @@ impl ServerReplica {
                     scratch.write_var(killer);
                     scratch.write_var(victim);
                     scratch.write_bits(world.soldiers[killer as usize].team as u32, 1);
+                    let s = &world.soldiers[victim as usize];
+                    write_push(&mut scratch, s.death_push, s.death_blast);
                 }
                 Event::PointCaptured { .. } | Event::RoundOver { .. } | Event::RoundStarted { .. } => continue,
             }
@@ -559,6 +561,22 @@ pub struct Corpse {
     pub facing: f32,
     pub team: u8,
     pub age: f32,
+    /// Чем толкнуло при смерти (см. `Soldier::death_push`).
+    pub push: Vec2,
+    pub blast: bool,
+}
+
+/// Толчок тела: направление — 6 бит, скорость — 4 бита (по 0,5 м/с), взрыв — бит.
+fn write_push(w: &mut BitWriter, push: Vec2, blast: bool) {
+    w.write_bits(q_angle(push.to_angle(), 6), 6);
+    w.write_bits((push.length() * 2.0).round().min(15.0) as u32, 4);
+    w.write_bool(blast);
+}
+
+fn read_push(r: &mut BitReader) -> Result<(Vec2, bool), Truncated> {
+    let angle = dq_angle(r.read_bits(6)?, 6);
+    let speed = r.read_bits(4)? as f32 * 0.5;
+    Ok((Vec2::from_angle(angle) * speed, r.read_bool()?))
 }
 
 /// Сколько лежит тело у клиента: столько же, сколько солдат ждёт возрождения.
@@ -787,7 +805,8 @@ impl RemoteWorld {
             Shot(u32, f32, Option<(Vec2, u8)>),
             Grenade(Vec2, Vec2, f32),
             Blast(Vec2, f32),
-            Kill(u32, u32, u8),
+            /// Убийца, убитый, команда убийцы, толчок тела и «взрывом ли».
+            Kill(u32, u32, u8, Vec2, bool),
         }
         let event_count = r.read_var()?;
         let mut effects = Vec::with_capacity(event_count as usize);
@@ -801,7 +820,11 @@ impl RemoteWorld {
                 }
                 1 => Fx::Grenade(read_pos(&mut r)?, read_pos(&mut r)?, r.read_var()? as f32 / 10.0),
                 2 => Fx::Blast(read_pos(&mut r)?, r.read_bits(8)? as f32 / 4.0),
-                _ => Fx::Kill(r.read_var()?, r.read_var()?, r.read_bits(1)? as u8),
+                _ => {
+                    let (killer, victim, team) = (r.read_var()?, r.read_var()?, r.read_bits(1)? as u8);
+                    let (push, blast) = read_push(&mut r)?;
+                    Fx::Kill(killer, victim, team, push, blast)
+                }
             });
         }
 
@@ -820,10 +843,10 @@ impl RemoteWorld {
         // Снимок разобран целиком — применяем.
         // Сначала тела: убитый пропадёт из вида, а нам нужно его последнее место.
         for fx in &effects {
-            if let Fx::Kill(_, victim, _) = *fx
+            if let Fx::Kill(_, victim, _, push, blast) = *fx
                 && let Some(Some(s)) = self.soldiers.get(victim as usize)
             {
-                self.corpses.push(Corpse { id: victim, pos: s.pos, facing: s.net.facing(), team: s.net.team(), age: 0.0 });
+                self.corpses.push(Corpse { id: victim, pos: s.pos, facing: s.net.facing(), team: s.net.team(), age: 0.0, push, blast });
             }
         }
         let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
@@ -880,7 +903,7 @@ impl RemoteWorld {
                     self.blasts.push((pos, radius, 0.0));
                     self.heard.push(Heard::Blast { pos, radius });
                 }
-                Fx::Kill(killer, victim, killer_team) => {
+                Fx::Kill(killer, victim, killer_team, ..) => {
                     self.kill_feed.push_front(KillNote { killer, victim, killer_team, age: 0.0 });
                     self.kill_feed.truncate(6);
                 }
@@ -1067,4 +1090,24 @@ fn read_board(r: &mut BitReader) -> Result<Vec<BoardEntry>, Truncated> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn death_push_round_trip() {
+        for (push, blast) in [(Vec2::new(2.2, 0.0), false), (Vec2::new(-1.5, 2.6), true), (Vec2::ZERO, false), (Vec2::new(0.0, -20.0), true)] {
+            let mut w = BitWriter::new();
+            write_push(&mut w, push, blast);
+            assert_eq!(w.len_bits(), 11, "толчок — 11 бит");
+            let bytes = w.finish();
+            let (back, back_blast) = read_push(&mut BitReader::new(&bytes)).unwrap();
+            assert_eq!(back_blast, blast);
+            // Скорость — до 7,5 м/с с шагом 0,5, направление — 64 шага по кругу.
+            let want = push.clamp_length_max(7.5);
+            assert!(back.distance(want) < 0.3, "{push:?} → {back:?}");
+        }
+    }
 }

@@ -3,7 +3,7 @@
 use crate::arsenal::{BlastSpec, MAX_HEAT, WeaponSpec};
 use crate::suppression::SuppressionSpec;
 use crate::rng::Rng;
-use crate::world::{Controller, Event, Projectile, ProjectileKind, Soldier, World, snapshot};
+use crate::world::{BLAST_PUSH, BULLET_PUSH, Controller, Event, Projectile, ProjectileKind, Soldier, World, snapshot};
 use glam::Vec2;
 use rayon::prelude::*;
 
@@ -327,7 +327,7 @@ pub(crate) fn update_projectiles(world: &mut World) {
                     rng.chance(weapon.kill_probability) || s.health <= 0.0
                 };
                 if killed {
-                    world.kill(victim, shooter);
+                    world.kill(victim, shooter, p.vel.normalize_or_zero() * BULLET_PUSH, false);
                 }
             }
             Outcome::Explode => {
@@ -369,7 +369,8 @@ fn explode(world: &mut World, pos: Vec2, shooter: u32, salt: u32, blast: &BlastS
     for (j, d) in victims {
         let falloff = 1.0 - d / blast.radius;
         if rng.chance(blast.kill_probability * falloff) {
-            world.kill(j, shooter);
+            let away = (world.soldiers[j as usize].pos - pos).normalize_or(Vec2::X);
+            world.kill(j, shooter, away * BLAST_PUSH * (0.6 + 0.4 * falloff), true);
         }
     }
     world.map.damage_circle(pos, blast.wall_damage_radius, blast.wall_damage);

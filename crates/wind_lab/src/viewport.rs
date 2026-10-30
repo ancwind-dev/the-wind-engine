@@ -208,12 +208,17 @@ impl Viewport {
         &self.camera_3d
     }
 
-    /// Ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
     /// Солдаты «точно как RWR» или «как было» (см. `SceneBuilder::rwr_exact`).
     pub fn set_rwr_exact(&mut self, on: bool) {
         self.scene_3d.rwr_exact = on;
     }
 
+    /// Точки скелета тела убитого солдата `id` (мир, м).
+    pub fn corpse_points(&self, id: u32) -> Option<&[wind_render::glam::Vec3]> {
+        self.scene_3d.corpse_points(id)
+    }
+
+    /// Ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
     pub fn set_joint_blend(&mut self, width: f32) {
         self.scene_3d.joint_blend = width;
     }

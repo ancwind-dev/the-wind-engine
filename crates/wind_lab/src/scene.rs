@@ -80,6 +80,8 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
                 facing: s.facing,
                 team: s.team,
                 age: world.config.soldier.respawn_time - s.respawn_timer,
+                push: s.death_push,
+                blast: s.death_blast,
                 model: None,
             })
             .collect(),
@@ -172,7 +174,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
             .collect(),
         rings: Vec::new(),
         lines: Vec::new(),
-        corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, model: None }).collect(),
+        corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, push: c.push, blast: c.blast, model: None }).collect(),
         atmosphere: w.atmosphere.clone(),
     })
 }

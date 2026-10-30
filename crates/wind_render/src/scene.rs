@@ -8,6 +8,8 @@ use crate::effects::Effects;
 use wind_sim::atmosphere::Atmosphere;
 use crate::mapmesh::MapMesher;
 use crate::models::{MeshId, SOLDIER_VOXEL};
+use crate::ragdoll::{Ragdoll, world_points};
+use std::collections::{HashMap, HashSet};
 use crate::renderer::{FrameData, Globals, GroundPoint, Instance, MAX_POINTS, PendingMap, SHADOW_SIZE, SkinInstance};
 use std::sync::{Arc, Mutex};
 use glam::camera::rh::{proj::directx as proj, view};
@@ -34,14 +36,19 @@ pub struct Look {
     pub motion: Motion,
 }
 
-/// Убитый солдат: лежит, пока не возродится.
+/// Убитый солдат: тело-рэгдолл лежит, пока солдат не возродится.
 pub struct CorpseDraw {
     pub id: u32,
+    /// Где и куда смотрел в момент смерти.
     pub pos: Vec2,
     pub facing: f32,
     pub team: u8,
-    /// Сколько секунд прошло со смерти — для падения.
+    /// Сколько секунд прошло со смерти. Стало меньше — это новая смерть.
     pub age: f32,
+    /// Чем толкнуло тело, м/с по земле (см. `Soldier::death_push`). Ноль — падает назад.
+    pub push: Vec2,
+    /// Убит взрывом — тело подбрасывает.
+    pub blast: bool,
     /// Явная модель — для студии.
     pub model: Option<usize>,
 }
@@ -103,6 +110,8 @@ pub struct SceneBuilder {
     effects: Effects,
     decals_key: Option<u64>,
     anim: Vec<Anim>,
+    /// Тела убитых по номеру солдата.
+    ragdolls: HashMap<u32, Ragdoll>,
     /// Цвета команд (sRGB 0..1).
     pub team_colors: [[f32; 3]; 2],
     /// Свои солдаты (из `install`). Без них рисуются встроенные болванчики.
@@ -129,6 +138,7 @@ impl Default for SceneBuilder {
             effects: Effects::default(),
             decals_key: None,
             anim: Vec::new(),
+            ragdolls: HashMap::new(),
             team_colors: [[0.33, 0.52, 0.78], [0.78, 0.33, 0.30]],
             characters: None,
             joint_blend: JOINT_BLEND,
@@ -136,11 +146,6 @@ impl Default for SceneBuilder {
             crumbled: Vec::new(),
         }
     }
-}
-
-/// Куда падает убитый: у каждого солдата своё направление, но всегда одно и то же.
-pub fn falls_forward(id: u32) -> bool {
-    id.wrapping_mul(0x9E37_79B9) >> 31 == 1
 }
 
 /// Насколько далеко от центра экрана ещё есть смысл рисовать, м.
@@ -153,10 +158,16 @@ impl SceneBuilder {
         SceneBuilder { characters, ..Default::default() }
     }
 
+    /// Точки скелета тела убитого солдата `id` (мир, м) — для скелета в студии.
+    pub fn corpse_points(&self, id: u32) -> Option<&[Vec3]> {
+        self.ragdolls.get(&id).map(|r| r.points())
+    }
+
     pub fn build(&mut self, input: &DrawInput) -> FrameData {
         let cam = input.camera;
         let reach = view_radius(cam);
         let reach2 = reach * reach;
+        self.update_ragdolls(input);
 
         // --- Карта.
         let update = self.mesher.update(input.map, input.map_key);
@@ -307,20 +318,19 @@ impl SceneBuilder {
 
         self.effects.debris_instances(&mut by_mesh[MeshId::Cube as usize]);
 
-        // Убитые: падают и лежат, пока солдат не возродится.
+        // Убитые: тела-рэгдоллы (см. `update_ragdolls`).
         if let Some(set) = &characters {
             for c in input.corpses {
-                if c.pos.distance_squared(cam.target) > reach2 {
+                let Some(r) = self.ragdolls.get(&c.id) else { continue };
+                let Some(&origin) = r.points().first() else { continue };
+                if Vec2::new(origin.x, origin.z).distance_squared(cam.target) > reach2 {
                     continue;
                 }
-                let Some(model) = c.model.or_else(|| set.pick(c.team, c.id).map(|p| p.0)) else { continue };
-                let model = &set.models[model];
-                let pose = model.corpse(c.age, falls_forward(c.id));
-                let at = to_3d(c.pos, input.map.height_at(c.pos));
-                let lod = lod_at(at);
-                let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-c.facing);
+                let model = &set.models[r.model];
+                let lod = lod_at(origin);
+                let root = Mat4::from_translation(origin);
                 by_char[model.mesh * LODS + lod].push(skin(bones.len(), c.team, false));
-                model.bones(&pose, &mut |m| bones.push((root * m).to_cols_array_2d()));
+                model.bones(&r.pose(origin), &mut |m| bones.push((root * m).to_cols_array_2d()));
             }
         }
 
@@ -366,11 +376,11 @@ impl SceneBuilder {
         for &(c, r, _) in input.blasts {
             rects.extend(self.decals.blast(c, r, input.time));
         }
-        // Кровь — когда тело уже упало.
-        for c in input.corpses.iter().filter(|c| c.age > 0.45) {
-            // Лужа — под корпусом: тело упало на метр вперёд или назад от ног.
-            let fall = Vec2::from_angle(c.facing) * if falls_forward(c.id) { 1.0 } else { -1.0 };
-            rects.extend(self.decals.corpse(c.id, c.pos + fall));
+        // Кровь — под корпусом, когда тело улеглось.
+        if let Some(set) = &self.characters {
+            for (&id, r) in self.ragdolls.iter().filter(|(_, r)| r.resting()) {
+                rects.extend(self.decals.corpse(id, r.center(&set.models[r.model].rig)));
+            }
         }
         if rects.is_empty() {
             return;
@@ -382,6 +392,44 @@ impl SceneBuilder {
     }
 
     /// Двигает фазу шага по пройденному пути. Возвращает сглаженную скорость.
+    /// Тела убитых: новое — из позы солдата в момент смерти, с толчком; остальные
+    /// падают дальше. Считаем все, а не только те, что на экране: тело, упавшее вдали,
+    /// должно лежать как надо, когда до него дойдёт камера. Улёгшиеся не считаются.
+    fn update_ragdolls(&mut self, input: &DrawInput) {
+        let Some(set) = self.characters.clone() else {
+            self.ragdolls.clear();
+            return;
+        };
+        let alive: HashSet<u32> = input.corpses.iter().map(|c| c.id).collect();
+        self.ragdolls.retain(|id, _| alive.contains(id));
+        for c in input.corpses {
+            let Some(model) = c.model.or_else(|| set.pick(c.team, c.id).map(|p| p.0)) else { continue };
+            let m = &set.models[model];
+            let fresh = self.ragdolls.get(&c.id).is_none_or(|r| r.model != model || c.age + 0.1 < r.age);
+            if fresh {
+                // Последняя поза живого солдата: шаг, залёг ли.
+                let a = self.anim.get(c.id as usize).copied().unwrap_or_default();
+                let pose = m.pose(Motion { speed: a.speed, phase: a.phase * 2.0 });
+                let pose = if a.prone > 0.0 { m.lie(&pose, a.prone) } else { pose };
+                let at = to_3d(c.pos, input.map.height_at(c.pos));
+                let push = if c.push == Vec2::ZERO { -Vec2::from_angle(c.facing) * 2.0 } else { c.push };
+                let seed = c.id ^ ((input.time * 1000.0) as u32).wrapping_mul(0x9E37_79B9);
+                let mut r = Ragdoll::new(model, &m.rig, world_points(&pose, at, c.facing), push, c.blast, seed);
+                // Тело увидели не сразу (подключились посреди боя) — догоняем.
+                r.advance(&m.rig, input.map, c.age.min(2.0));
+                r.age = c.age;
+                self.ragdolls.insert(c.id, r);
+                continue;
+            }
+            let r = self.ragdolls.get_mut(&c.id).expect("есть: проверили выше");
+            // Тело не обгоняет смерть больше чем на тик: в паузе и в замедлении студии
+            // замирает вместе с миром.
+            let dt = input.dt.min(0.1).min((c.age + 0.06 - r.time()).max(0.0));
+            r.advance(&m.rig, input.map, dt);
+            r.age = c.age;
+        }
+    }
+
     fn animate(&mut self, s: &SoldierDraw, dt: f32) -> f32 {
         let i = s.id as usize;
         if self.anim.len() <= i {

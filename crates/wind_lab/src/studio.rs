@@ -33,7 +33,8 @@ pub struct Studio {
     /// Фаза шага и возраст тела — двигаются сами, пока не на паузе.
     phase: f32,
     dead: Option<f32>,
-    falls_forward: bool,
+    /// Чем убит: пулей спереди или взрывом спереди.
+    blast: bool,
     paused: bool,
     /// Замедление: 1 — как в игре.
     tempo: f32,
@@ -62,7 +63,7 @@ impl Studio {
             speed: 1.8,
             phase: 0.0,
             dead: None,
-            falls_forward: false,
+            blast: false,
             paused: false,
             tempo: 1.0,
             facing: -0.6,
@@ -134,10 +135,12 @@ impl Studio {
                 theme::label(ui, "Фаза шага");
                 ui.add(egui::Slider::new(&mut self.phase, 0.0..=std::f32::consts::TAU).max_decimals(2));
                 ui.end_row();
-                theme::label(ui, "Падает");
+                theme::label(ui, "Чем убит");
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.falls_forward, false, "на спину");
-                    ui.selectable_value(&mut self.falls_forward, true, "ничком");
+                    // Выбрали — сразу падает заново.
+                    if ui.selectable_value(&mut self.blast, false, "пулей").clicked() | ui.selectable_value(&mut self.blast, true, "взрывом").clicked() {
+                        self.dead = Some(0.0);
+                    }
                 });
                 ui.end_row();
             });
@@ -221,12 +224,13 @@ impl Studio {
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
         let motion = Motion { speed: self.speed, phase: self.phase };
-        // Нужный способ падения — солдат с подходящим номером.
-        let id = (0..64).find(|&id| wind_render::falls_forward(id) == self.falls_forward).unwrap_or(0);
+        let id = 0;
+        // Стреляют спереди: тело отлетает назад.
+        let push = -Vec2::from_angle(self.facing) * if self.blast { wind_sim::world::BLAST_PUSH } else { wind_sim::world::BULLET_PUSH };
         let mut soldiers = Vec::new();
         let mut corpses = Vec::new();
         match self.dead {
-            Some(age) => corpses.push(wind_render::CorpseDraw { id, pos: center, facing: self.facing, team: self.team, age, model: Some(model) }),
+            Some(age) => corpses.push(wind_render::CorpseDraw { id, pos: center, facing: self.facing, team: self.team, age, push, blast: self.blast, model: Some(model) }),
             None => soldiers.push(SceneSoldier {
                 id,
                 pos: center,
@@ -265,21 +269,22 @@ impl Studio {
             && let Some(set) = &self.characters
         {
             let m = &set.models[model];
-            let pose = match self.dead {
-                Some(age) => m.corpse(age, self.falls_forward),
-                None => m.pose(motion),
+            // Точки скелета в мире, м: у живого — из позы, у убитого — тело-рэгдолл.
+            let root = Mat4::from_translation(Vec3::new(center.x, 0.0, center.y)) * Mat4::from_rotation_y(-self.facing);
+            let pose: Vec<Vec3> = match self.dead {
+                Some(_) => self.view.corpse_points(id).map(<[Vec3]>::to_vec).unwrap_or_default(),
+                None => m.pose(motion).iter().map(|&p| root.transform_point3(p * wind_render::rwr::VOXEL)).collect(),
             };
             let cam = self.view.camera_3d();
             let view_proj = cam.view_proj(rect.width() / rect.height().max(1.0));
-            let root = Mat4::from_translation(Vec3::new(center.x, 0.0, center.y)) * Mat4::from_rotation_y(-self.facing);
             let to_screen = |p: Vec3| {
-                let clip = view_proj * root * (p * wind_render::rwr::VOXEL).extend(1.0);
+                let clip = view_proj * p.extend(1.0);
                 let ndc = clip.xyz() / clip.w;
                 pos2(rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(), rect.top() + (0.5 - ndc.y * 0.5) * rect.height())
             };
             let painter = ui.painter_at(rect);
             let red = Color32::from_rgb(230, 40, 40);
-            for &(a, b) in &m.sticks {
+            for &(a, b) in m.sticks.iter().filter(|&&(a, b)| a.max(b) < pose.len()) {
                 painter.line_segment([to_screen(pose[a]), to_screen(pose[b])], Stroke::new(1.0, red));
             }
             for &p in &pose {

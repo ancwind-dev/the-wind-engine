@@ -379,7 +379,16 @@ fn local_view(l: &Local) -> View {
         .iter()
         .enumerate()
         .filter(|(_, s)| !s.alive && s.respawn_timer > 0.0)
-        .map(|(i, s)| CorpseDraw { id: i as u32, pos: s.pos, facing: s.facing, team: s.team, age: respawn - s.respawn_timer, model: None })
+        .map(|(i, s)| CorpseDraw {
+            id: i as u32,
+            pos: s.pos,
+            facing: s.facing,
+            team: s.team,
+            age: respawn - s.respawn_timer,
+            push: s.death_push,
+            blast: s.death_blast,
+            model: None,
+        })
         .collect();
     v
 }
@@ -456,7 +465,7 @@ fn remote_view(c: &NetClient) -> View {
         corpses: w
             .corpses
             .iter()
-            .map(|c| CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, model: None })
+            .map(|c| CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, push: c.push, blast: c.blast, model: None })
             .collect(),
         server_name: w.welcome.server_name.clone(),
     }
