@@ -29,6 +29,7 @@ pub(crate) fn fire(world: &mut World) {
             let weapon = &arsenal.weapons[kit.weapon];
             s.cooldown -= dt;
             s.grenade_timer -= dt;
+            s.throw_timer = (s.throw_timer - dt).max(0.0);
             s.heat = (s.heat - weapon.sustained_fire_diminish_rate * dt).max(0.0);
             if s.reload_timer > 0.0 {
                 s.reload_timer -= dt;

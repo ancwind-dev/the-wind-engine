@@ -28,6 +28,8 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
             player: matches!(s.controller, Controller::Player(_)),
             look: None,
             prone: s.prone,
+            reloading: s.reload_timer > 0.0,
+            throwing: s.throw_timer > 0.0,
         })
         .collect();
     let mut bullets = Vec::new();
@@ -135,6 +137,8 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
                 player: s.net.is_player(),
                 look: None,
                 prone: s.net.is_prone(),
+                reloading: s.net.is_reloading(),
+                throwing: s.net.is_throwing(),
             })
         })
         .collect();

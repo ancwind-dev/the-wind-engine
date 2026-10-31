@@ -2,7 +2,7 @@
 //! Источник данных (локальная симуляция или сеть) не важен — на входе простые списки.
 
 use crate::camera::{Camera, to_3d};
-use crate::character::{CharacterSet, LODS, Motion};
+use crate::character::{Action, CharacterSet, LODS, Motion, THROW_TIME};
 use crate::decals::Decals;
 use crate::effects::Effects;
 use wind_sim::atmosphere::Atmosphere;
@@ -26,6 +26,10 @@ pub struct SoldierDraw {
     pub look: Option<Look>,
     /// Залёг под огнём.
     pub prone: bool,
+    /// Перезаряжается — анимация идёт, пока признак держится.
+    pub reloading: bool,
+    /// Только что бросил гранату — с этого признака начинается анимация броска.
+    pub throwing: bool,
 }
 
 /// Модель, оружие и движение солдата, заданные явно.
@@ -34,6 +38,8 @@ pub struct Look {
     pub model: usize,
     pub weapon: Option<usize>,
     pub motion: Motion,
+    /// Действие руками — для студии; в игре берётся из `reloading` и `throwing`.
+    pub action: Option<Action>,
 }
 
 /// Убитый солдат: тело-рэгдолл лежит, пока солдат не возродится.
@@ -96,6 +102,11 @@ struct Anim {
     seen: bool,
     /// 0 — стоит, 1 — лежит; плавно, чтобы солдат ложился и вставал, а не прыгал.
     prone: f32,
+    /// Сколько секунд идёт перезарядка и бросок (`None` — не идёт).
+    reload: Option<f32>,
+    throw: Option<f32>,
+    /// Признак броска в прошлом кадре — бросок начинается, когда он появился.
+    was_throwing: bool,
 }
 
 pub struct SceneBuilder {
@@ -246,25 +257,49 @@ impl SceneBuilder {
             let a = self.anim[s.id as usize];
             // Свои модели: поза по скелету, оружие в правой руке.
             let look = s.look.or_else(|| {
-                let (model, weapon) = characters.as_ref()?.pick(s.team, s.id)?;
-                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase * 2.0 } })
+                let set = characters.as_ref()?;
+                let (model, weapon) = set.pick(s.team, s.id)?;
+                // Перезарядка — по оружию: как и сколько секунд; бросок — по времени.
+                let w = &set.weapons[weapon];
+                let action = match (a.throw, a.reload) {
+                    (Some(t), _) => Some(Action::Throw { t }),
+                    (None, Some(t)) => Some(Action::Reload { kind: w.reload, t: t / w.reload_time.max(0.1), rounds: w.rounds }),
+                    _ => None,
+                };
+                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase * 2.0 }, action })
             });
             if let Some(set) = &characters
                 && let Some(look) = look
             {
                 let model = &set.models[look.model];
                 let pose = model.pose(look.motion);
-                let pose = if a.prone > 0.0 { model.lie(&pose, a.prone) } else { pose };
+                // Лёжа руки заняты позой лёжа — действия пока не показываем.
+                let (pose, grip, grenade) = match look.action {
+                    Some(action) if a.prone <= 0.0 => {
+                        let acted = model.act(&pose, action);
+                        (acted.pose, acted.weapon, acted.grenade)
+                    }
+                    _ => {
+                        let pose = if a.prone > 0.0 { model.lie(&pose, a.prone) } else { pose };
+                        let grip = model.weapon_frame(&pose);
+                        (pose, grip, None)
+                    }
+                };
                 let at = to_3d(s.pos, input.map.height_at(s.pos));
                 let lod = lod_at(at);
                 let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-s.facing);
                 by_char[model.mesh * LODS + lod].push(skin(bones.len(), s.team, false));
                 model.bones(&pose, &mut |m| bones.push((root * m).to_cols_array_2d()));
                 if let Some(weapon) = look.weapon
-                    && let Some(grip) = model.weapon_frame(&pose)
+                    && let Some(grip) = grip
                 {
                     by_char[set.weapons[weapon].mesh * LODS + lod].push(skin(bones.len(), s.team, true));
                     bones.push((root * grip).to_cols_array_2d());
+                }
+                // Граната в руке — до броска.
+                if let Some(g) = grenade {
+                    let m = root * Mat4::from_translation(g * crate::rwr::VOXEL) * Mat4::from_scale(Vec3::splat(0.11));
+                    by_mesh[MeshId::Cube as usize].push(Instance { model: m.to_cols_array_2d(), tint: [0.30, 0.36, 0.22, 0.5] });
                 }
                 continue;
             }
@@ -439,9 +474,16 @@ impl SceneBuilder {
         let moved = s.pos.distance(a.last);
         if !a.seen || moved > 3.0 {
             // Первый кадр или телепорт (возрождение).
-            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone: s.prone as u8 as f32 };
+            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone: s.prone as u8 as f32, ..Default::default() };
             return 0.0;
         }
+        a.reload = s.reloading.then(|| a.reload.unwrap_or(0.0) + dt);
+        if s.throwing && !a.was_throwing {
+            a.throw = Some(0.0);
+        } else {
+            a.throw = a.throw.map(|t| t + dt).filter(|&t| t < THROW_TIME);
+        }
+        a.was_throwing = s.throwing;
         let goal = if s.prone { 1.0 } else { 0.0 };
         a.prone += (goal - a.prone).clamp(-dt * 3.0, dt * 3.0);
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };

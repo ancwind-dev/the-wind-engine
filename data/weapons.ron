@@ -8,7 +8,9 @@
 // (больше чем втрое разброс не вырастает);
 // kill_probability — вероятность убить попаданием, иначе ранит на wound_damage;
 // blast — у гранатомётов: снаряд летит в точку прицела и взрывается;
-// sound — звук выстрела: rifle, carbine, smg или launcher.
+// sound — звук выстрела: rifle, carbine, smg или launcher;
+// reload — как перезаряжается (только анимация): magazine (по умолчанию), cylinder —
+// барабан, pump — трубка и цевьё, break — переломить ствол.
 (
     weapons: [
         (
@@ -76,6 +78,7 @@
             name: "m32_mgl",
             model: "weapons/m32_mgl",
             sound: "launcher",
+            reload: "cylinder",
             retrigger_time: 0.6,
             magazine_size: 6,
             reload_time: 4.5,
@@ -92,6 +95,7 @@
             name: "gl06",
             model: "weapons/gl06",
             sound: "launcher",
+            reload: "break",
             retrigger_time: 0.5,
             magazine_size: 1,
             reload_time: 2.2,
@@ -108,6 +112,7 @@
             name: "gm94",
             model: "weapons/gm94",
             sound: "launcher",
+            reload: "pump",
             retrigger_time: 1.2,
             magazine_size: 4,
             reload_time: 3.5,

@@ -52,7 +52,7 @@ mod tests {
     use super::*;
 
     fn soldier(id: u32, team: u8, x: f32, y: f32) -> SoldierDraw {
-        SoldierDraw { id, pos: Vec2::new(x, y), facing: 0.0, team, look: None, prone: false }
+        SoldierDraw { id, pos: Vec2::new(x, y), facing: 0.0, team, look: None, prone: false, reloading: false, throwing: false }
     }
 
     #[test]

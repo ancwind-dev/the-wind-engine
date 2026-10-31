@@ -31,6 +31,10 @@ const NAV_REFRESH: u64 = 300;
 pub const BULLET_PUSH: f32 = 2.2;
 pub const BLAST_PUSH: f32 = 3.2;
 
+/// Сколько секунд после броска гранаты солдат считается «бросающим» (`throw_timer`):
+/// дольше снимка сервера, чтобы клиент не пропустил бросок при потере пакета.
+pub const THROW_SHOWN: f32 = 0.4;
+
 /// Размер клетки пространственной сетки, м.
 const GRID_CELL: f32 = 8.0;
 
@@ -108,6 +112,9 @@ pub struct Soldier {
     pub reload_timer: f32,
     pub grenades: u32,
     pub grenade_timer: f32,
+    /// Сколько ещё показывать бросок гранаты, с. Только для картинки: по нему клиент
+    /// начинает анимацию броска (см. `THROW_SHOWN`).
+    pub throw_timer: f32,
     /// Убийства и смерти за раунд — для таблицы. При возрождении не сбрасываются.
     pub kills: u32,
     pub deaths: u32,
@@ -865,6 +872,7 @@ impl World {
         }
         s.grenades -= 1;
         s.grenade_timer = spec.interval;
+        s.throw_timer = THROW_SHOWN;
         self.projectiles.push(Projectile {
             pos: s.pos,
             vel: to / distance * spec.throw_speed,
@@ -922,6 +930,7 @@ impl World {
             reload_timer: 0.0,
             grenades: self.config.grenade.count,
             grenade_timer: 0.0,
+            throw_timer: 0.0,
             kills: 0,
             deaths: 0,
             kit,

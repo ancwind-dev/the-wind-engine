@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use wind_render::character::CharacterSet;
 use wind_render::glam::{Mat4, Vec3, Vec4Swizzles};
-use wind_render::{JOINT_BLEND, Look, Motion};
+use wind_render::{Action, JOINT_BLEND, Look, Motion, THROW_TIME};
 use wind_sim::Vec2;
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::map::Map;
@@ -35,6 +35,9 @@ pub struct Studio {
     dead: Option<f32>,
     /// Чем убит: пулей спереди или взрывом спереди.
     blast: bool,
+    /// Действие руками — повторяется по кругу — и его часы.
+    act: Act,
+    act_time: f32,
     paused: bool,
     /// Замедление: 1 — как в игре.
     tempo: f32,
@@ -64,6 +67,8 @@ impl Studio {
             phase: 0.0,
             dead: None,
             blast: false,
+            act: Act::None,
+            act_time: 0.0,
             paused: false,
             tempo: 1.0,
             facing: -0.6,
@@ -123,6 +128,15 @@ impl Studio {
                 }
                 if ui.selectable_label(self.dead.is_some(), "Падает").clicked() {
                     self.dead = Some(0.0);
+                }
+            });
+            ui.horizontal(|ui| {
+                for (name, act) in [("Без действия", Act::None), ("Перезарядка", Act::Reload), ("Бросок гранаты", Act::Throw)] {
+                    if ui.selectable_label(self.dead.is_none() && self.act == act, name).clicked() {
+                        self.act = act;
+                        self.act_time = 0.0;
+                        self.dead = None;
+                    }
                 }
             });
             theme::props(ui, "studio_anim", |ui| {
@@ -209,6 +223,20 @@ impl Studio {
         }
     }
 
+    /// Действие руками сейчас: повторяется с паузой между повторами. Перезарядка —
+    /// по выбранному оружию (как и сколько секунд).
+    fn action(&self) -> Option<Action> {
+        match self.act {
+            Act::None => None,
+            Act::Reload => {
+                let w = self.characters.as_ref()?.weapons.get(self.weapon?)?;
+                let t = (self.act_time % (w.reload_time + 0.6)) / w.reload_time.max(0.1);
+                Some(Action::Reload { kind: w.reload, t: t.min(1.0), rounds: w.rounds })
+            }
+            Act::Throw => Some(Action::Throw { t: (self.act_time % (THROW_TIME + 0.8)).min(THROW_TIME) }),
+        }
+    }
+
     /// Вьюпорт: солдат и, если нужно, его скелет.
     pub fn viewport(&mut self, ui: &mut egui::Ui) {
         let now = Instant::now();
@@ -219,11 +247,13 @@ impl Studio {
         if let Some(age) = &mut self.dead {
             *age += dt;
         }
+        self.act_time += dt;
         self.view.set_joint_blend(self.blend);
 
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
         let motion = Motion { speed: self.speed, phase: self.phase };
+        let action = self.action();
         let id = 0;
         // Стреляют спереди: тело отлетает назад.
         let push = -Vec2::from_angle(self.facing) * if self.blast { wind_sim::world::BLAST_PUSH } else { wind_sim::world::BULLET_PUSH };
@@ -237,8 +267,10 @@ impl Studio {
                 facing: self.facing,
                 team: self.team,
                 player: false,
-                look: Some(Look { model, weapon: self.weapon, motion }),
+                look: Some(Look { model, weapon: self.weapon, motion, action }),
                 prone: false,
+                reloading: false,
+                throwing: false,
             }),
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());
@@ -273,7 +305,11 @@ impl Studio {
             let root = Mat4::from_translation(Vec3::new(center.x, 0.0, center.y)) * Mat4::from_rotation_y(-self.facing);
             let pose: Vec<Vec3> = match self.dead {
                 Some(_) => self.view.corpse_points(id).map(<[Vec3]>::to_vec).unwrap_or_default(),
-                None => m.pose(motion).iter().map(|&p| root.transform_point3(p * wind_render::rwr::VOXEL)).collect(),
+                None => {
+                    let pose = m.pose(motion);
+                    let pose = action.map_or(pose.clone(), |a| m.act(&pose, a).pose);
+                    pose.iter().map(|&p| root.transform_point3(p * wind_render::rwr::VOXEL)).collect()
+                }
             };
             let cam = self.view.camera_3d();
             let view_proj = cam.view_proj(rect.width() / rect.height().max(1.0));
@@ -292,4 +328,12 @@ impl Studio {
             }
         }
     }
+}
+
+/// Что студия показывает руками.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Act {
+    None,
+    Reload,
+    Throw,
 }

@@ -127,3 +127,21 @@ fn player_reloads_on_demand() {
     assert_eq!(shots, 0, "стрелял во время перезарядки");
     assert_eq!(world.soldiers[me as usize].ammo, full);
 }
+
+#[test]
+fn thrown_grenade_is_shown_briefly() {
+    let mut world = World::new(config(20), 9);
+    let me = world.take_control(0).unwrap();
+    let pos = world.soldiers[me as usize].pos;
+    world.soldiers[me as usize].grenade_timer = 0.0;
+    world.set_input(me, PlayerInput { aim: pos + Vec2::new(15.0, 0.0), grenade: true, ..Default::default() });
+    world.step();
+    let s = &world.soldiers[me as usize];
+    assert!(s.throw_timer > 0.0, "бросок не отмечен");
+    // Через полсекунды — уже не «бросает».
+    world.set_input(me, PlayerInput { aim: pos, ..Default::default() });
+    for _ in 0..10 {
+        world.step();
+    }
+    assert_eq!(world.soldiers[me as usize].throw_timer, 0.0);
+}

@@ -26,6 +26,7 @@ const FLAG_TEAM1: u8 = 1;
 const FLAG_PLAYER: u8 = 2;
 const FLAG_RELOADING: u8 = 4;
 const FLAG_PRONE: u8 = 8;
+const FLAG_THROWING: u8 = 16;
 
 /// Солдат в том виде, в каком он уходит по сети.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +53,9 @@ impl NetSoldier {
         if s.prone {
             flags |= FLAG_PRONE;
         }
+        if s.throw_timer > 0.0 {
+            flags |= FLAG_THROWING;
+        }
         NetSoldier { x, y, facing: q_angle(s.facing, 8) as u8, flags }
     }
 
@@ -74,6 +78,15 @@ impl NetSoldier {
     /// Залёг под огнём.
     pub fn is_prone(&self) -> bool {
         self.flags & FLAG_PRONE != 0
+    }
+
+    pub fn is_reloading(&self) -> bool {
+        self.flags & FLAG_RELOADING != 0
+    }
+
+    /// Только что бросил гранату.
+    pub fn is_throwing(&self) -> bool {
+        self.flags & FLAG_THROWING != 0
     }
 }
 
@@ -1095,6 +1108,17 @@ fn read_board(r: &mut BitReader) -> Result<Vec<BoardEntry>, Truncated> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reloading_and_throwing_reach_the_client() {
+        let mut world = World::new(wind_sim::SimConfig { map_size: 128, soldiers_per_team: 2, ..Default::default() }, 1);
+        let s = &mut world.soldiers[0];
+        assert!(!NetSoldier::from_soldier(s).is_reloading() && !NetSoldier::from_soldier(s).is_throwing());
+        s.reload_timer = 1.0;
+        s.throw_timer = 0.3;
+        let n = NetSoldier::from_soldier(s);
+        assert!(n.is_reloading() && n.is_throwing() && !n.is_prone());
+    }
 
     #[test]
     fn death_push_round_trip() {

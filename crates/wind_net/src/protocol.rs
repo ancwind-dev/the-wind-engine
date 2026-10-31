@@ -21,7 +21,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 13;
+pub const VERSION: u8 = 14;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Пароль сервера и имя сервера — не длиннее, байт.

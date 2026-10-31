@@ -8,6 +8,9 @@
 //! размера на экране (см. заметку «Как устроена картинка RWR»). Грани, склеенные
 //! по форме, остались только для теней.
 
+mod actions;
+
+pub use actions::{Acted, Action, ReloadKind, THROW_RELEASE, THROW_TIME};
 use crate::ragdoll::Rig;
 use crate::rwr::{self, RwrModel, VOXEL};
 use wind_sim::arsenal::Arsenal;
@@ -87,6 +90,10 @@ pub struct CharModel {
 pub struct WeaponModel {
     pub name: String,
     pub mesh: usize,
+    /// Как перезаряжается, сколько секунд и сколько выстрелов в магазине — для анимации.
+    pub reload: ReloadKind,
+    pub reload_time: f32,
+    pub rounds: u32,
 }
 
 /// Всё про своих солдат: меши, модели, кто в какой команде.
@@ -134,7 +141,14 @@ impl CharacterSet {
                     Some(&(_, i)) => i,
                     None => {
                         let mesh = builder.prop(&read(path)?);
-                        weapons.push(WeaponModel { name: path.clone(), mesh });
+                        let spec = &arsenal.weapons[kit.weapon];
+                        weapons.push(WeaponModel {
+                            name: path.clone(),
+                            mesh,
+                            reload: ReloadKind::from_name(&spec.reload),
+                            reload_time: spec.reload_time,
+                            rounds: spec.magazine_size,
+                        });
                         set_weapons.push((path.clone(), weapons.len() - 1));
                         weapons.len() - 1
                     }
