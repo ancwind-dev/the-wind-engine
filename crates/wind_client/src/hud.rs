@@ -65,6 +65,49 @@ pub fn draw(painter: &Painter, rect: Rect, view: &View, status: Option<String>, 
             Color32::from_rgb(240, 120, 100),
         );
     }
+    rank_and_squad(painter, bar, view);
+}
+
+/// Над полоской солдата: звание и опыт до следующего, свой отряд и приказ.
+fn rank_and_squad(painter: &Painter, bar: Rect, view: &View) {
+    let me = &view.me;
+    let panel = Rect::from_min_size(bar.left_top() - vec2(0.0, 52.0), vec2(bar.width(), 46.0));
+    painter.rect_filled(panel, 8, PANEL);
+    let left = panel.left_top() + vec2(14.0, 0.0);
+    // Звание и опыт до следующего — первая строка, полоска опыта — вторая.
+    let galley = painter.layout_no_wrap(me.rank_name.clone(), FontId::proportional(15.0), TEXT);
+    let name_width = galley.size().x;
+    painter.galley(left + vec2(0.0, 14.0 - galley.size().y / 2.0), galley, TEXT);
+    let (label, share) = match &me.next {
+        Some((name, xp)) => {
+            let span = (xp - me.rank_xp).max(1) as f32;
+            (format!("{} / {} до «{name}»", me.xp, xp), (me.xp.saturating_sub(me.rank_xp)) as f32 / span)
+        }
+        None => (format!("{} — высшее звание", me.xp), 1.0),
+    };
+    painter.text(left + vec2(name_width + 10.0, 14.0), Align2::LEFT_CENTER, label, FontId::proportional(12.0), DIM);
+    let track = Rect::from_min_size(left + vec2(0.0, 29.0), vec2(120.0, 6.0));
+    painter.rect_filled(track, 2, Color32::from_gray(40));
+    let mut fill = track;
+    fill.set_width(track.width() * share.clamp(0.0, 1.0));
+    painter.rect_filled(fill, 2, Color32::from_rgb(230, 200, 90));
+
+    // Отряд: сколько бойцов, приказ и подсказка по клавишам.
+    let right = panel.right_top() - vec2(14.0, 0.0);
+    let (squad, hint) = if me.squad_max == 0 {
+        ("Отряда нет — звание растёт за убийства и захват точек".to_string(), String::new())
+    } else {
+        let order = if me.squad.is_empty() {
+            "пусто"
+        } else if me.hold.is_some() {
+            "держит точку"
+        } else {
+            "за мной"
+        };
+        (format!("Отряд {} / {} · {order}", me.squad.len(), me.squad_max), "E позвать · F за мной · Q держать · X распустить".to_string())
+    };
+    painter.text(right + vec2(0.0, 14.0), Align2::RIGHT_CENTER, squad, FontId::proportional(14.0), Color32::from_rgb(140, 230, 140));
+    painter.text(right + vec2(0.0, 32.0), Align2::RIGHT_CENTER, hint, FontId::proportional(11.0), DIM);
 }
 
 /// Лента убийств справа сверху: «убийца  ОРУЖИЕ  убитый», имена цветом команды,

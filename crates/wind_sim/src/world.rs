@@ -2,6 +2,7 @@
 
 use crate::arsenal::{BlastSpec, WeaponSpec};
 use crate::command::{self, PointPlan, SquadInfo};
+use crate::commander::{Command, Hold, NO_COMMANDER};
 use crate::config::SimConfig;
 use crate::cover::Cover;
 use crate::grid::SpatialGrid;
@@ -55,6 +56,8 @@ pub struct PlayerInput {
     pub reload: bool,
     /// Идти шагом (Shift), а не бежать: `WALK_SHARE` от скорости бега.
     pub walk: bool,
+    /// Приказ своему отряду (см. `commander`).
+    pub command: Command,
     /// Где появиться после смерти: 0 — на базе, 1 + i — на точке i, если она наша
     /// (иначе на базе).
     pub spawn: u8,
@@ -153,6 +156,15 @@ pub struct Soldier {
     pub calm: f32,
     /// Ранен и отходит: к точке захвата с этим номером или на базу (`RETREAT_TO_BASE`).
     pub retreat: Option<u32>,
+    /// Опыт: за убийства и захват точек; от него звание (см. `commander`). Копится
+    /// весь матч, при возрождении и новом раунде не сбрасывается.
+    pub xp: u32,
+    /// Игрок, в чьём отряде этот боец (`NO_COMMANDER` — ни в чьём).
+    pub commander: u32,
+    /// Только у игрока: его отряд держит точку, а не идёт за ним.
+    pub hold: Option<Hold>,
+    /// Только у игрока: куда смотрит строй его отряда — куда он шёл последний раз.
+    pub squad_heading: Vec2,
 }
 
 impl Soldier {
@@ -374,7 +386,9 @@ impl World {
         if self.tick.is_multiple_of(every) {
             self.run_command();
         }
+        self.apply_commands();
         self.plan_squads();
+        self.plan_player_squads();
         stats.thinkers = ai::think(self);
         stats.think_ms = ms(t);
 
@@ -435,7 +449,7 @@ impl World {
             }
             let ready = |m: &u32| {
                 let s = &self.soldiers[*m as usize];
-                s.alive && s.controller == Controller::Ai && s.retreat.is_none()
+                s.alive && s.controller == Controller::Ai && s.retreat.is_none() && s.commander == NO_COMMANDER
             };
             let mine: Vec<usize> = (0..self.squads.len()).filter(|&q| self.squads[q].team == team && self.squads[q].leader.is_some()).collect();
             let infos: Vec<SquadInfo> = mine
@@ -454,7 +468,10 @@ impl World {
                 self.squads[q].objective = objective;
                 for k in 0..self.squads[q].members.len() {
                     let m = self.squads[q].members[k] as usize;
-                    self.soldiers[m].objective = objective;
+                    // Бойцам игрока точку выбирает игрок.
+                    if self.soldiers[m].commander == NO_COMMANDER {
+                        self.soldiers[m].objective = objective;
+                    }
                 }
             }
             self.plans[t] = plans;
@@ -613,12 +630,15 @@ impl World {
                     desired = to / d;
                     speed *= 0.7;
                 }
-            } else if let Order::Follow { slot, leader_vel, heading } = order
-                && slot.distance(s.pos) < squad_spec.rejoin
-                && map.line_of_sight(s.pos, slot)
+            } else if let Order::Follow { slot, leader_vel, heading, leader } = order
+                // Боец игрока идёт к нему с любого расстояния, если видит (полем путей
+                // к игроку не дойти — поля только к точкам).
+                && (slot.distance(s.pos) < squad_spec.rejoin || s.commander != NO_COMMANDER)
+                && let Some(goal) = [slot, leader].into_iter().find(|&g| map.line_of_sight(s.pos, g))
             {
-                // Место в строю: идём вместе с командиром и подтягиваемся к своему месту.
-                let v = (leader_vel + (slot - s.pos) * 1.5).clamp_length_max(spec.speed);
+                // Место в строю: идём вместе с командиром и подтягиваемся к своему месту;
+                // место за стеной — сначала к командиру.
+                let v = (leader_vel + (goal - s.pos) * 1.5).clamp_length_max(spec.speed);
                 desired = v / spec.speed;
                 let look = if v.length_squared() > 0.5 { v } else { heading };
                 if look != Vec2::ZERO {
@@ -670,6 +690,7 @@ impl World {
     fn update_capture_points(&mut self) {
         let dt = self.dt();
         let spec = &self.config.capture;
+        let mut captured = Vec::new();
         for (index, point) in self.points.iter_mut().enumerate() {
             let mut count = [0u32; 2];
             let soldiers = &self.soldiers;
@@ -710,8 +731,12 @@ impl World {
                 point.owner = new_owner;
                 if let Some(team) = new_owner {
                     self.events.push(Event::PointCaptured { point: index as u32, team });
+                    captured.push((index, team));
                 }
             }
+        }
+        for (point, team) in captured {
+            self.reward_capture(point, team);
         }
     }
 
@@ -777,7 +802,7 @@ impl World {
             let s = &self.soldiers[i];
             let (team, controller, kit) = (s.team, s.controller, s.kit);
             let pos = self.find_spawn_spot(self.bases[team as usize], per_team.sqrt() * 0.8, &mut rng);
-            let mut fresh = Soldier { controller, squad: s.squad, ..self.fresh_soldier(team, pos, kit) };
+            let mut fresh = Soldier { controller, squad: s.squad, xp: s.xp, ..self.fresh_soldier(team, pos, kit) };
             fresh.cooldown = rng.range(0.0, 1.0);
             self.soldiers[i] = fresh;
         }
@@ -828,8 +853,8 @@ impl World {
             };
             let pos = self.find_spawn_spot(spot, 6.0, &mut rng);
             let s = &self.soldiers[i];
-            let (controller, kit, kills, deaths, squad) = (s.controller, s.kit, s.kills, s.deaths, s.squad);
-            self.soldiers[i] = Soldier { controller, kills, deaths, squad, ..self.fresh_soldier(team, pos, kit) };
+            let (controller, kit, kills, deaths, squad, xp) = (s.controller, s.kit, s.kills, s.deaths, s.squad, s.xp);
+            self.soldiers[i] = Soldier { controller, kills, deaths, squad, xp, ..self.fresh_soldier(team, pos, kit) };
         }
     }
 
@@ -847,6 +872,10 @@ impl World {
         let s = &mut self.soldiers[pick];
         s.controller = Controller::Player(PlayerInput { aim: s.pos, ..Default::default() });
         s.target = None;
+        // Новый игрок начинает рядовым и ни у кого не в отряде.
+        s.xp = 0;
+        s.commander = NO_COMMANDER;
+        s.hold = None;
         Some(pick as u32)
     }
 
@@ -856,6 +885,7 @@ impl World {
             s.controller = Controller::Ai;
             s.objective = NO_OBJECTIVE;
         }
+        self.dismiss(soldier);
     }
 
     pub fn set_input(&mut self, soldier: u32, input: PlayerInput) {
@@ -954,6 +984,10 @@ impl World {
             pinned: false,
             prone: false,
             last_seen: None,
+            xp: 0,
+            commander: NO_COMMANDER,
+            hold: None,
+            squad_heading: Vec2::ZERO,
             last_seen_timer: 0.0,
             calm: 0.0,
             retreat: None,
@@ -980,6 +1014,8 @@ impl World {
             return;
         }
         s.alive = false;
+        // Погибший боец выбывает из отряда игрока.
+        s.commander = NO_COMMANDER;
         s.death_push = push;
         s.death_blast = blast;
         s.target = None;
@@ -989,6 +1025,7 @@ impl World {
         let k = &mut self.soldiers[killer as usize];
         if k.team != victim_team {
             k.kills += 1;
+            k.xp += self.config.ranks.kill_xp;
             self.score[k.team as usize] += 1;
         }
         self.events.push(Event::Kill { killer, victim });

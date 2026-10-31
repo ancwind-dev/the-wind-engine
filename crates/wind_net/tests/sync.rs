@@ -326,3 +326,26 @@ fn client_never_learns_about_hidden_enemies() {
     assert!(hidden_in_range > 100, "проверка что-то значит: враги в радиусе бывают скрыты");
     assert!(hidden_shots > 0, "выстрелы из-за стен слышны");
 }
+
+#[test]
+fn rank_and_squad_reach_client() {
+    use wind_sim::commander::Command;
+    let mut link = Link::new(10, ReplicationConfig::default());
+    assert!(link.client.welcome.ranks.len() >= 5, "звания приходят в приветствии");
+    let me = link.soldier;
+    link.world.soldiers[me as usize].xp = 20;
+    let friend = (0..link.world.soldiers.len() as u32).find(|&i| i != me && link.world.soldiers[i as usize].team == link.world.soldiers[me as usize].team).unwrap();
+    let pos = link.world.soldiers[me as usize].pos;
+    link.world.soldiers[friend as usize].pos = pos + Vec2::new(2.0, 0.0);
+    for command in [Command::Recruit, Command::Hold] {
+        link.world.set_input(me, PlayerInput { aim: pos + Vec2::new(2.0, 0.0), command, ..Default::default() });
+        link.world.step();
+        let packet = link.replica.build_snapshot(&link.world, &link.config, None, None);
+        let (_, data) = protocol::parse(&packet).unwrap();
+        link.client.apply_snapshot(data, link.world.tick as f64 * 0.05).unwrap();
+        link.replica.on_ack(link.client.tick);
+    }
+    assert_eq!(link.client.me.xp, link.world.soldiers[me as usize].xp);
+    assert_eq!(link.client.me.squad, vec![friend]);
+    assert!(link.client.me.hold.is_some_and(|h| h.distance(pos + Vec2::new(2.0, 0.0)) < 0.1));
+}

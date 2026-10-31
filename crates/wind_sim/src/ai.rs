@@ -5,6 +5,7 @@
 //! К какой точке идти, решает командир отряда — за весь отряд (см. `squad`).
 //! Под огнём солдат ищет угол, из-за которого стрелять (см. `cover`).
 
+use crate::commander::NO_COMMANDER;
 use crate::cover::{self, Cover, Query};
 use crate::map::Map;
 use crate::rng::Rng;
@@ -100,7 +101,11 @@ pub(crate) fn think(world: &mut World) -> u32 {
         let objective = choose_objective(&world.points, squad.team, world.soldiers[leader as usize].pos, squad.objective, world.config.defend_probability, &mut rng);
         world.squads[index].objective = objective;
         for &m in &world.squads[index].members {
-            world.soldiers[m as usize].objective = objective;
+            let s = &mut world.soldiers[m as usize];
+            // Бойцам игрока точку выбирает игрок.
+            if s.commander == NO_COMMANDER {
+                s.objective = objective;
+            }
         }
     }
     decisions.len() as u32
@@ -174,7 +179,7 @@ fn decide(w: &World, i: usize, taken: &HashMap<(i32, i32), u32>) -> Decision {
 
     // --- Цель движения. В отряде с командиром её выбирает командир (ниже, в `think`);
     // без отряда — сам: часть остаётся защищать свою точку, остальные идут дальше.
-    let led = w.squads.get(me.squad as usize).is_some_and(|q| q.leader.is_some());
+    let led = me.commander != NO_COMMANDER || w.squads.get(me.squad as usize).is_some_and(|q| q.leader.is_some());
     let objective = if led {
         me.objective
     } else {

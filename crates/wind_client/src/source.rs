@@ -9,6 +9,7 @@ use wind_sim::arsenal::WeaponSpec;
 use wind_sim::round::Round;
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::map::Map;
+use wind_sim::commander::Rank;
 use wind_sim::{Controller, Event, PlayerInput, ProjectileKind, Vec2, World};
 
 /// Что показывает HUD про своего солдата.
@@ -24,6 +25,32 @@ pub struct Me {
     pub grenades: u32,
     pub respawn_in: f32,
     pub kills: u32,
+    /// Звание: номер, название, опыт и с какого опыта следующее (`None` — высшее).
+    pub rank: usize,
+    pub rank_name: String,
+    pub xp: u32,
+    pub rank_xp: u32,
+    pub next: Option<(String, u32)>,
+    /// Свой отряд: бойцы, сколько можно вести, точка, которую держит.
+    pub squad: Vec<u32>,
+    pub squad_max: u32,
+    pub hold: Option<Vec2>,
+}
+
+impl Me {
+    /// Звание по опыту `xp` и списку званий.
+    fn ranked(mut self, ranks: &[Rank], xp: u32) -> Me {
+        let i = ranks.iter().rposition(|r| xp >= r.xp).unwrap_or(0);
+        self.rank = i;
+        self.xp = xp;
+        if let Some(r) = ranks.get(i) {
+            self.rank_name = r.name.clone();
+            self.rank_xp = r.xp;
+            self.squad_max = r.squad;
+        }
+        self.next = ranks.get(i + 1).map(|r| (r.name.clone(), r.xp));
+        self
+    }
 }
 
 /// Строка ленты убийств.
@@ -353,7 +380,11 @@ fn local_view(l: &Local) -> View {
             grenades: me.grenades,
             respawn_in: me.respawn_timer.max(0.0),
             kills: me.kills,
-        };
+            squad: w.squad_of(l.me.unwrap_or(0)),
+            hold: me.hold.map(|h| h.at),
+            ..Default::default()
+        }
+        .ranked(&w.config.ranks.ranks, me.xp);
     }
     let name = |i: u32| if Some(i) == l.me { "Ты".to_string() } else { format!("#{i}") };
     v.kill_feed = l
@@ -447,7 +478,11 @@ fn remote_view(c: &NetClient) -> View {
             grenades: w.me.grenades,
             respawn_in: w.me.respawn_in,
             kills: w.me.kills,
-        },
+            squad: w.me.squad.clone(),
+            hold: w.me.hold,
+            ..Default::default()
+        }
+        .ranked(&w.welcome.ranks, w.me.xp),
         score: w.score,
         kill_feed: w
             .kill_feed

@@ -227,7 +227,7 @@ impl ServerReplica {
         w.write_bits(tick, 32);
         w.write_var(baseline.map_or(0, |s| tick - s.tick));
         w.write_bits(self.echo_time, 32);
-        write_self(&mut w, me);
+        write_self(&mut w, world, self.soldier);
         w.write_var(world.score[0]);
         w.write_var(world.score[1]);
         w.write_var(world.points.len() as u32);
@@ -396,7 +396,8 @@ impl ServerReplica {
     }
 }
 
-fn write_self(w: &mut BitWriter, me: &Soldier) {
+fn write_self(w: &mut BitWriter, world: &World, id: u32) {
+    let me = &world.soldiers[id as usize];
     w.write_bool(me.alive);
     w.write_bits((me.health.clamp(0.0, 1.0) * 100.0).round() as u32, 7);
     w.write_var(me.ammo);
@@ -404,7 +405,20 @@ fn write_self(w: &mut BitWriter, me: &Soldier) {
     w.write_bits(me.grenades.min(7), 3);
     w.write_var((me.respawn_timer.max(0.0) * 10.0).round() as u32);
     w.write_var(me.kills);
+    w.write_var(me.xp);
+    let squad = world.squad_of(id);
+    w.write_var(squad.len().min(MAX_SQUAD) as u32);
+    for &m in squad.iter().take(MAX_SQUAD) {
+        w.write_var(m);
+    }
+    w.write_bool(me.hold.is_some());
+    if let Some(h) = me.hold {
+        write_pos(w, h.at);
+    }
 }
+
+/// Больше бойцов своего отряда в снимке не передаём.
+const MAX_SQUAD: usize = 32;
 
 fn write_gap(w: &mut BitWriter, prev: &mut Option<u32>, id: u32) {
     let gap = match *prev {
@@ -533,6 +547,10 @@ pub struct SelfState {
     pub grenades: u32,
     pub respawn_in: f32,
     pub kills: u32,
+    /// Опыт (звание — по `Welcome::ranks`), свой отряд и точка, которую он держит.
+    pub xp: u32,
+    pub squad: Vec<u32>,
+    pub hold: Option<Vec2>,
 }
 
 #[derive(Clone, Debug)]
@@ -772,6 +790,16 @@ impl RemoteWorld {
             grenades: r.read_bits(3)?,
             respawn_in: r.read_var()? as f32 / 10.0,
             kills: r.read_var()?,
+            xp: r.read_var()?,
+            squad: {
+                let n = (r.read_var()? as usize).min(MAX_SQUAD);
+                let mut squad = Vec::with_capacity(n);
+                for _ in 0..n {
+                    squad.push(r.read_var()?);
+                }
+                squad
+            },
+            hold: if r.read_bool()? { Some(read_pos(&mut r)?) } else { None },
         };
         let score = [r.read_var()?, r.read_var()?];
         let point_count = r.read_var()? as usize;

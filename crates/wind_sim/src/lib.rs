@@ -4,6 +4,7 @@
 pub mod arsenal;
 pub mod atmosphere;
 pub mod command;
+pub mod commander;
 pub mod config;
 pub mod cover;
 pub mod grid;

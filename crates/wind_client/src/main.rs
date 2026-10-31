@@ -26,6 +26,7 @@ use std::time::Instant;
 use wind_net::{NetClient, Pilot};
 use wind_render::{Camera, DrawInput, SceneBuilder, WorldPaint};
 use wind_sim::mapfile::MapFile;
+use wind_sim::commander::Command;
 use wind_sim::{PlayerInput, SimConfig, Vec2, World};
 
 /// MSAA. Должно совпадать в NativeOptions и в wind_render::install.
@@ -234,6 +235,10 @@ struct Session {
     /// Сколько ещё секунд просить перезарядку после нажатия R: короткое нажатие
     /// не должно потеряться между пакетами ввода и тиками сервера.
     reload_hold: f32,
+    /// Приказ отряду (E, F, Q, X) и сколько ещё секунд его повторять — как перезарядку.
+    command: (Command, f32),
+    /// Звание в прошлом кадре — чтобы сказать о новом.
+    rank_seen: Option<usize>,
     fog: fog::Fog,
     minimap: minimap::Minimap,
     shots_seen: u32,
@@ -253,6 +258,8 @@ impl Session {
             heat: 0.0,
             spawn: 0,
             reload_hold: 0.0,
+            command: (Command::None, 0.0),
+            rank_seen: None,
             fog: fog::Fog::default(),
             minimap: minimap::Minimap::default(),
             shots_seen: 0,
@@ -299,6 +306,14 @@ impl Session {
             self.aim = m;
         }
         self.reload_hold = if ctx.input(|i| i.key_pressed(egui::Key::R)) { 0.25 } else { (self.reload_hold - dt).max(0.0) };
+        // Приказы отряду: E — позвать бойца у прицела, F — за мной, Q — держать точку
+        // у прицела, X — распустить.
+        let keys = [(egui::Key::E, Command::Recruit), (egui::Key::F, Command::Follow), (egui::Key::Q, Command::Hold), (egui::Key::X, Command::Dismiss)];
+        self.command = match ctx.input(|i| keys.iter().find(|(k, _)| i.key_pressed(*k)).map(|&(_, c)| c)) {
+            Some(c) => (c, 0.25),
+            None => (self.command.0, self.command.1 - dt),
+        };
+        let command = if self.command.1 > 0.0 { self.command.0 } else { Command::None };
         // Где появиться: 1 — база, 2…6 — точки A…E.
         let keys = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6];
         if let Some(k) = ctx.input(|i| keys.iter().position(|&k| i.key_pressed(k))) {
@@ -327,6 +342,7 @@ impl Session {
                 reload: self.reload_hold > 0.0 || i.key_down(egui::Key::R),
                 // Как в RWR: по умолчанию бег, Shift — шагом.
                 walk: i.modifiers.shift,
+                command,
                 spawn: self.spawn,
                 // Заполняет пилот своего солдата.
                 pos: None,
@@ -724,7 +740,7 @@ impl Game {
                 blasts: &view.blasts,
                 points: &view.points,
                 marker: view.me_pos,
-                rings: &[],
+                rings: &squad_rings(&view, s.aim),
                 corpses: &view.corpses,
                 own_team,
                 atmosphere: &atmosphere,
@@ -766,6 +782,14 @@ impl Game {
         }
 
         let painter = ui.painter_at(rect);
+        // Новое звание — сказать, сколько теперь бойцов можно вести.
+        if view.has_me {
+            if s.rank_seen.is_some_and(|r| r < view.me.rank) {
+                let text = format!("Новое звание: {} — отряд до {} бойцов (E — позвать)", view.me.rank_name, view.me.squad_max);
+                self.toast = Some((text, Instant::now()));
+            }
+            s.rank_seen = Some(view.me.rank);
+        }
         if !s.backdrop {
             hud::draw(&painter, rect, &view, s.source.status(), !view.has_me);
             hud::round(&painter, rect, &view);
@@ -831,3 +855,37 @@ impl Game {
         lines
     }
 }
+
+/// Кольца на земле для отряда игрока: под своими бойцами, у точки, которую отряд
+/// держит, и под бойцом у прицела, которого можно позвать (если есть место).
+fn squad_rings(view: &source::View, aim: Vec2) -> Vec<(Vec2, f32, [f32; 3])> {
+    let me = &view.me;
+    let mut rings = Vec::new();
+    if !view.has_me || !me.alive {
+        return rings;
+    }
+    for s in view.soldiers.iter().filter(|s| me.squad.contains(&s.id)) {
+        rings.push((s.pos, 0.6, SQUAD_COLOR));
+    }
+    if let Some(at) = me.hold {
+        rings.push((at, 3.0, HOLD_COLOR));
+    }
+    if (me.squad.len() as u32) < me.squad_max
+        && let Some(team) = view.round.own_team
+        && let Some(s) = view
+            .soldiers
+            .iter()
+            .filter(|s| s.team == team && Some(s.pos) != view.me_pos && !me.squad.contains(&s.id) && s.pos.distance(aim) < RECRUIT_RADIUS)
+            .min_by(|a, b| a.pos.distance(aim).total_cmp(&b.pos.distance(aim)))
+    {
+        rings.push((s.pos, 0.7, [0.85, 0.95, 0.85]));
+    }
+    rings
+}
+
+/// Цвета колец отряда (sRGB) и радиус, в котором E зовёт бойца (как `recruit_radius`
+/// по умолчанию на сервере).
+const SQUAD_COLOR: [f32; 3] = [0.45, 0.95, 0.45];
+const HOLD_COLOR: [f32; 3] = [1.0, 0.85, 0.3];
+const RECRUIT_RADIUS: f32 = 4.0;
+

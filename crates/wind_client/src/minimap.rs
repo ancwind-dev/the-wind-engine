@@ -78,6 +78,14 @@ impl Minimap {
         let dot = if self.big { 3.0 } else { 2.0 };
         for s in &view.soldiers {
             painter.circle_filled(to_screen(s.pos), dot, TEAM[s.team as usize & 1]);
+            // Свой отряд — в зелёном кольце.
+            if view.me.squad.contains(&s.id) {
+                painter.circle_stroke(to_screen(s.pos), dot + 2.0, Stroke::new(1.5, Color32::from_rgb(110, 240, 110)));
+            }
+        }
+        // Точка, которую держит отряд.
+        if let Some(at) = view.me.hold {
+            painter.circle_stroke(to_screen(at), if self.big { 7.0 } else { 5.0 }, Stroke::new(1.5, Color32::from_rgb(255, 215, 80)));
         }
         // Взрывы — оранжевые вспышки.
         for &(p, radius, age) in &view.blasts {

@@ -55,8 +55,9 @@ pub enum Order {
     Free,
     /// Командир: ведёт отряд к точке; `pace` — доля скорости (ждёт отставших).
     Lead { pace: f32 },
-    /// Боец: держать место `slot`, двигаясь вместе с командиром.
-    Follow { slot: Vec2, leader_vel: Vec2, heading: Vec2 },
+    /// Боец: держать место `slot`, двигаясь вместе с командиром. `leader` — где
+    /// командир (или точка, которую держит отряд игрока): место за стеной — идём к нему.
+    Follow { slot: Vec2, leader_vel: Vec2, heading: Vec2, leader: Vec2 },
 }
 
 /// Шаг командира: чуть медленнее бойцов, чтобы строй успевал. Если кто-то
@@ -110,10 +111,11 @@ pub fn formation_offset(rank: u32, spacing: f32, on_point: bool) -> Vec2 {
 pub(crate) fn plan(squads: &mut [Squad], soldiers: &[Soldier], orders: &mut Vec<Order>, map: &Map, spec: &SquadSpec, points: &[Vec2], radius: f32, body: f32) {
     orders.clear();
     orders.resize(soldiers.len(), Order::Free);
-    // Раненые, отходящие в тыл, не командуют и не держат строй.
+    // Раненые, отходящие в тыл, не командуют и не держат строй; бойцы игрока — в его
+    // строю (см. `commander`).
     let ai_alive = |i: u32| {
         let s = &soldiers[i as usize];
-        s.alive && s.controller == Controller::Ai && s.retreat.is_none()
+        s.alive && s.controller == Controller::Ai && s.retreat.is_none() && s.commander == crate::commander::NO_COMMANDER
     };
     for squad in squads.iter_mut() {
         // Командир остаётся, пока жив; иначе — следующий по списку.
@@ -152,7 +154,7 @@ pub(crate) fn plan(squads: &mut [Squad], soldiers: &[Soldier], orders: &mut Vec<
             }
             let d = soldiers[m as usize].pos.distance(slot);
             lagging |= d > LAGGING && d < spec.rejoin;
-            orders[m as usize] = Order::Follow { slot, leader_vel: l.vel, heading: forward };
+            orders[m as usize] = Order::Follow { slot, leader_vel: l.vel, heading: forward, leader: l.pos };
         }
         orders[leader as usize] = Order::Lead { pace: if lagging { PACE_WAITING } else { PACE } };
     }

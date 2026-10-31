@@ -5,6 +5,7 @@
 
 use crate::arsenal::{Arsenal, WeaponSpec};
 use crate::command::CommandSpec;
+use crate::commander::RankSpec;
 use crate::cover::CoverSpec;
 use crate::round::RoundSpec;
 use crate::squad::SquadSpec;
@@ -43,6 +44,8 @@ pub struct SimConfig {
     pub suppression: SuppressionSpec,
     /// Штаб команды: какой отряд к какой точке.
     pub command: CommandSpec,
+    /// Звания игроков: опыт за убийства и захват, сколько бойцов можно вести.
+    pub ranks: RankSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -133,6 +136,7 @@ impl Default for SimConfig {
             cover: CoverSpec::default(),
             suppression: SuppressionSpec::default(),
             command: CommandSpec::default(),
+            ranks: RankSpec::default(),
             arsenal: Arsenal::default(),
         }
     }
