@@ -35,6 +35,10 @@ pub const BLAST_PUSH: f32 = 3.2;
 /// дольше снимка сервера, чтобы клиент не пропустил бросок при потере пакета.
 pub const THROW_SHOWN: f32 = 0.4;
 
+/// Скорость шага — доля скорости бега. Как в RWR, солдат по умолчанию бежит, а шагом
+/// идёт, если зажать клавишу (4,5 м/с → 2 м/с).
+pub const WALK_SHARE: f32 = 0.45;
+
 /// Размер клетки пространственной сетки, м.
 const GRID_CELL: f32 = 8.0;
 
@@ -49,6 +53,8 @@ pub struct PlayerInput {
     pub grenade: bool,
     /// Перезарядить, не дожидаясь конца магазина (R).
     pub reload: bool,
+    /// Идти шагом (Shift), а не бежать: `WALK_SHARE` от скорости бега.
+    pub walk: bool,
     /// Где появиться после смерти: 0 — на базе, 1 + i — на точке i, если она наша
     /// (иначе на базе).
     pub spawn: u8,
@@ -571,6 +577,9 @@ impl World {
                     return;
                 }
                 desired = input.move_dir.clamp_length_max(1.0);
+                if input.walk {
+                    speed *= WALK_SHARE;
+                }
             } else if let Some(to) = s.retreat {
                 // Раненый отходит по полю путей к своей точке или на базу и ждёт там.
                 let field = if to == RETREAT_TO_BASE { base_flow.get(s.team as usize & 1) } else { flow.get(to as usize) };

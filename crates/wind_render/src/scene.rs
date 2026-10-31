@@ -2,7 +2,7 @@
 //! Источник данных (локальная симуляция или сеть) не важен — на входе простые списки.
 
 use crate::camera::{Camera, to_3d};
-use crate::character::{Action, CharacterSet, LODS, Motion, THROW_TIME};
+use crate::character::{Action, CharacterSet, LODS, Motion, THROW_TIME, stride_rate};
 use crate::decals::Decals;
 use crate::effects::Effects;
 use wind_sim::atmosphere::Atmosphere;
@@ -98,6 +98,8 @@ pub struct DrawInput<'a> {
 struct Anim {
     phase: f32,
     speed: f32,
+    /// Куда идёт относительно взгляда (см. `Motion::dir`), сглажено.
+    dir: Vec2,
     last: Vec2,
     seen: bool,
     /// 0 — стоит, 1 — лежит; плавно, чтобы солдат ложился и вставал, а не прыгал.
@@ -266,7 +268,7 @@ impl SceneBuilder {
                     (None, Some(t)) => Some(Action::Reload { kind: w.reload, t: t / w.reload_time.max(0.1), rounds: w.rounds }),
                     _ => None,
                 };
-                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase * 2.0 }, action })
+                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir }, action })
             });
             if let Some(set) = &characters
                 && let Some(look) = look
@@ -444,7 +446,7 @@ impl SceneBuilder {
             if fresh {
                 // Последняя поза живого солдата: шаг, залёг ли.
                 let a = self.anim.get(c.id as usize).copied().unwrap_or_default();
-                let pose = m.pose(Motion { speed: a.speed, phase: a.phase * 2.0 });
+                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir });
                 let pose = if a.prone > 0.0 { m.lie(&pose, a.prone) } else { pose };
                 let at = to_3d(c.pos, input.map.height_at(c.pos));
                 let push = if c.push == Vec2::ZERO { -Vec2::from_angle(c.facing) * 2.0 } else { c.push };
@@ -488,7 +490,13 @@ impl SceneBuilder {
         a.prone += (goal - a.prone).clamp(-dt * 3.0, dt * 3.0);
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };
         a.speed += (speed - a.speed) * 0.25;
-        a.phase += moved * 2.4;
+        a.phase += moved * stride_rate(a.speed);
+        // Направление шага — в осях солдата: вперёд по взгляду и вправо от него.
+        if moved > 0.001 {
+            let step = (s.pos - a.last) / moved;
+            let (fwd, right) = (Vec2::from_angle(s.facing), Vec2::from_angle(s.facing).perp());
+            a.dir = a.dir.lerp(Vec2::new(step.dot(fwd), step.dot(right)), 0.3);
+        }
         a.last = s.pos;
         a.speed
     }

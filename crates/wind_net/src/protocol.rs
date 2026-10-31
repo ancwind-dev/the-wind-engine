@@ -21,7 +21,7 @@ use std::f32::consts::TAU;
 use wind_sim::{PlayerInput, Vec2};
 
 pub const MAGIC: [u8; 2] = *b"WN";
-pub const VERSION: u8 = 14;
+pub const VERSION: u8 = 15;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Пароль сервера и имя сервера — не длиннее, байт.
@@ -265,6 +265,7 @@ impl InputPacket {
         w.write_bool(self.input.fire);
         w.write_bool(self.input.grenade);
         w.write_bool(self.input.reload);
+        w.write_bool(self.input.walk);
         w.write_bits(self.input.spawn as u32, 5);
         w.write_bool(self.input.pos.is_some());
         if let Some(p) = self.input.pos {
@@ -284,13 +285,14 @@ impl InputPacket {
         let fire = r.read_bool()?;
         let grenade = r.read_bool()?;
         let reload = r.read_bool()?;
+        let walk = r.read_bool()?;
         let spawn = r.read_bits(5)? as u8;
         let pos = if r.read_bool()? { Some(read_pos(&mut r)?) } else { None };
         Ok(InputPacket {
             seq,
             ack_tick,
             time_ms,
-            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, reload, spawn, pos },
+            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, reload, walk, spawn, pos },
         })
     }
 }
@@ -430,6 +432,7 @@ mod tests {
                 fire: true,
                 grenade: false,
                 reload: true,
+                walk: true,
                 spawn: 3,
                 pos: Some(Vec2::new(12.0, 34.5)),
             },
@@ -441,7 +444,7 @@ mod tests {
         assert_eq!(back.seq, 77);
         assert_eq!(back.ack_tick, 1234);
         assert_eq!(back.input.aim, Vec2::new(100.5, 200.25));
-        assert!(back.input.fire && !back.input.grenade && back.input.reload);
+        assert!(back.input.fire && !back.input.grenade && back.input.reload && back.input.walk);
         assert!((back.input.move_dir.x - 1.0).abs() < 0.01);
         assert_eq!(back.input.pos, Some(Vec2::new(12.0, 34.5)));
         assert_eq!(back.input.spawn, 3);

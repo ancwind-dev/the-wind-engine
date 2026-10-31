@@ -145,3 +145,23 @@ fn thrown_grenade_is_shown_briefly() {
     }
     assert_eq!(world.soldiers[me as usize].throw_timer, 0.0);
 }
+
+#[test]
+fn player_runs_by_default_and_walks_with_shift() {
+    // Сколько метров за секунду пройдёт игрок, идущий на восток.
+    let distance = |walk: bool| {
+        let mut world = World::new(config(20), 9);
+        let me = world.take_control(0).unwrap();
+        let start = world.soldiers[me as usize].pos;
+        for _ in 0..20 {
+            let pos = world.soldiers[me as usize].pos;
+            world.set_input(me, PlayerInput { move_dir: Vec2::X, aim: pos + Vec2::X, walk, ..Default::default() });
+            world.step();
+        }
+        world.soldiers[me as usize].pos.distance(start)
+    };
+    let (run, walk) = (distance(false), distance(true));
+    println!("за секунду: бегом {run:.2} м, шагом {walk:.2} м");
+    assert!(run > 4.0, "бегом — скорость бега ({run:.2} м/с)");
+    assert!((walk / run - wind_sim::world::WALK_SHARE).abs() < 0.08, "шагом — {:.0} % бега", walk / run * 100.0);
+}

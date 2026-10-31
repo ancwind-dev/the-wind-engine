@@ -325,6 +325,8 @@ impl Session {
                 fire: i.pointer.primary_down(),
                 grenade: i.key_down(egui::Key::G),
                 reload: self.reload_hold > 0.0 || i.key_down(egui::Key::R),
+                // Как в RWR: по умолчанию бег, Shift — шагом.
+                walk: i.modifiers.shift,
                 spawn: self.spawn,
                 // Заполняет пилот своего солдата.
                 pos: None,
@@ -633,6 +635,7 @@ impl Game {
         // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
         if self.bench.is_none() {
             let (speed, radius) = s.source.soldier_spec();
+            let speed = if input.walk { speed * wind_sim::world::WALK_SHARE } else { speed };
             let server = s.source.own_server_pos();
             if let Some(map) = s.source.map() {
                 input.pos = s.pilot.update(map, server, input.move_dir, speed, radius, dt);

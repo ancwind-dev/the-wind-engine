@@ -32,6 +32,8 @@ pub struct Studio {
     speed: f32,
     /// Фаза шага и возраст тела — двигаются сами, пока не на паузе.
     phase: f32,
+    /// Куда идёт относительно взгляда, градусы: 0 — вперёд, 90 — вправо, 180 — назад.
+    heading: f32,
     dead: Option<f32>,
     /// Чем убит: пулей спереди или взрывом спереди.
     blast: bool,
@@ -63,8 +65,9 @@ impl Studio {
             model: 0,
             weapon: Some(0),
             team: 0,
-            speed: 1.8,
+            speed: 2.0,
             phase: 0.0,
+            heading: 0.0,
             dead: None,
             blast: false,
             act: Act::None,
@@ -120,7 +123,7 @@ impl Studio {
     pub fn properties(&mut self, ui: &mut egui::Ui) {
         theme::panel(ui, Icon::Run, "Анимация", true, |ui| {
             ui.horizontal(|ui| {
-                for (name, speed) in [("Стоит", 0.0), ("Шаг", 1.8), ("Бег", 4.5)] {
+                for (name, speed) in [("Стоит", 0.0), ("Шаг", 2.0), ("Бег", 4.5)] {
                     if ui.selectable_label(self.dead.is_none() && self.speed == speed, name).clicked() {
                         self.speed = speed;
                         self.dead = None;
@@ -148,6 +151,10 @@ impl Studio {
                 ui.end_row();
                 theme::label(ui, "Фаза шага");
                 ui.add(egui::Slider::new(&mut self.phase, 0.0..=std::f32::consts::TAU).max_decimals(2));
+                ui.end_row();
+                theme::label(ui, "Направление");
+                ui.add(egui::Slider::new(&mut self.heading, -180.0..=180.0).suffix("°").max_decimals(0))
+                    .on_hover_text("Куда идёт относительно взгляда: 0 — вперёд, 90 — вправо, 180 — назад");
                 ui.end_row();
                 theme::label(ui, "Чем убит");
                 ui.horizontal(|ui| {
@@ -242,8 +249,8 @@ impl Studio {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32().min(0.1) * if self.paused { 0.0 } else { self.tempo };
         self.last = now;
-        // Фаза — как в игре: на метр пути 2,4 рад, а поза берёт двойную.
-        self.phase = (self.phase + self.speed * dt * 4.8) % std::f32::consts::TAU;
+        // Фаза — как в игре: на метр пути `stride_rate` (шагом круг 1,5 м, бегом 2,5 м).
+        self.phase = (self.phase + self.speed * dt * wind_render::character::stride_rate(self.speed)) % std::f32::consts::TAU;
         if let Some(age) = &mut self.dead {
             *age += dt;
         }
@@ -252,7 +259,7 @@ impl Studio {
 
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
-        let motion = Motion { speed: self.speed, phase: self.phase };
+        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()) };
         let action = self.action();
         let id = 0;
         // Стреляют спереди: тело отлетает назад.
