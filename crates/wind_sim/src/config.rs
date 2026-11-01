@@ -150,7 +150,7 @@ impl Default for SimConfig {
 impl Default for SoldierSpec {
     fn default() -> Self {
         SoldierSpec {
-            speed: 4.5,
+            speed: 6.0,
             radius: 0.35,
             vision_range: 32.0,
             vision_candidates: 4,

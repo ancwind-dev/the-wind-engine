@@ -30,6 +30,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
             prone: s.prone,
             reloading: s.reload_timer > 0.0,
             throwing: s.throw_timer > 0.0,
+            aiming: s.aiming(),
         })
         .collect();
     let mut bullets = Vec::new();
@@ -139,6 +140,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
                 prone: s.net.is_prone(),
                 reloading: s.net.is_reloading(),
                 throwing: s.net.is_throwing(),
+                aiming: s.net.is_aiming(),
             })
         })
         .collect();

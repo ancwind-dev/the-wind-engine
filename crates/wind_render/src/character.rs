@@ -181,7 +181,7 @@ impl CharacterSet {
     pub fn stride_rate(&self, speed: f32) -> f32 {
         match self.models.first().and_then(|m| m.gaits.as_ref()) {
             Some(g) => {
-                let stride = g.walk.stride + (g.run.stride - g.walk.stride) * run_share(speed);
+                let stride = g.walk.stride + (g.run.stride * gait::RUN_STRIDE - g.walk.stride) * run_share(speed);
                 std::f32::consts::TAU / stride.max(0.1)
             }
             None => stride_rate(speed),
@@ -206,11 +206,17 @@ pub struct Motion {
     /// Куда идёт относительно взгляда: x — вперёд, y — вправо (ось z модели).
     /// Ноль — вперёд.
     pub dir: Vec2,
+    /// Как держит оружие: 0 — целится (ствол по взгляду), 1 — несёт на бегу поперёк
+    /// груди, как в RWR.
+    pub carry: f32,
 }
 
-/// Насколько солдат бежит, а не идёт: 0 — шагом (до 2,4 м/с), 1 — бегом (от 4 м/с).
+/// На сколько корпус развёрнут левым плечом вперёд, когда солдат целится, рад.
+const BLADE: f32 = 0.6;
+
+/// Насколько солдат бежит, а не идёт: 0 — шагом (до 2,6 м/с), 1 — бегом (от 4,5 м/с).
 pub fn run_share(speed: f32) -> f32 {
-    let u = ((speed - 2.4) / 1.6).clamp(0.0, 1.0);
+    let u = ((speed - 2.6) / 1.9).clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
 }
 
@@ -236,7 +242,7 @@ impl CharModel {
             None => (self.legs_procedural(m, j), 0.12 * run * moving * ph.sin()),
         };
 
-        self.hold_weapon(&mut p, j, run, moving, ph, twist);
+        self.hold_weapon(&mut p, j, m, twist);
         p
     }
 
@@ -244,37 +250,49 @@ impl CharModel {
     /// для редактора анимаций: показать клип так, как он будет в игре.
     pub fn with_weapon(&self, mut p: Pose) -> Pose {
         if let Some(j) = self.joints {
-            self.hold_weapon(&mut p, j, 0.0, 0.0, 0.0, 0.0);
+            self.hold_weapon(&mut p, j, Motion::default(), 0.0);
         }
         p
     }
 
     /// Руки: правая у приклада, левая на цевье, ствол вперёд — туда, куда смотрит
     /// солдат. Бегом оружие чуть ниже, стволом немного вниз, и покачивается с плечами.
-    fn hold_weapon(&self, p: &mut Pose, j: Joints, run: f32, moving: f32, ph: f32, twist: f32) {
+    fn hold_weapon(&self, p: &mut Pose, j: Joints, m: Motion, twist: f32) {
         let r = &self.rest;
-        let shoulder_y = (p[j.shoulder[0]].y + p[j.shoulder[1]].y) * 0.5;
-        let chest = (p[j.shoulder[0]] + p[j.shoulder[1]]) * 0.5;
-        let sway = Vec3::Y * (2.0 * ph).cos() * 0.6 * run * moving;
-        let turn = Quat::from_rotation_y(twist);
+        let (run, moving, ph, carry) = (run_share(m.speed), (m.speed / 1.2).clamp(0.0, 1.0), m.phase, m.carry);
+        // Целясь, корпус развёрнут левым плечом вперёд: приклад — у правого плеча, а левая
+        // рука дотягивается до цевья. Неся оружие на бегу — прямо.
+        let turn = Quat::from_rotation_y(-BLADE * (1.0 - carry) + twist);
         let pivot = p[j.mid];
-        for i in [j.shoulder[0], j.shoulder[1]] {
+        for i in [j.shoulder[0], j.shoulder[1], j.neck] {
             p[i] = pivot + turn * (p[i] - pivot);
         }
-        let right_hand = pivot + turn * (Vec3::new(chest.x + 3.0, shoulder_y - 6.0 - 1.5 * run, chest.z + 1.0) + sway - pivot);
-        let aim = turn * Vec3::new(1.0, -0.12 * run, 0.0).normalize();
-        // Цевьё — на линии ствола, в 9 вокселях от рукояти или ближе, если левая рука
-        // не дотягивается: иначе ствол повело бы к руке.
+        let (rs, ls) = (p[j.shoulder[0]], p[j.shoulder[1]]);
+        let sway = Vec3::Y * (2.0 * ph).cos() * 0.6 * run * moving;
+        // Целится: рукоять — перед правой стороной груди (снаружи тела), ствол — по взгляду,
+        // бегом чуть ниже.
+        let aim_grip = rs + Vec3::new(10.8, -5.5, -4.1) + sway;
+        let aim_dir = Vec3::new(1.0, -0.08 * run, 0.0).normalize();
+        // Несёт на бегу (как в RWR): рукоять — у правого бока груди, ствол — поперёк груди
+        // влево, почти горизонтально: с камеры сверху оружие лежит поперёк хода, а не
+        // торчит вверх по экрану.
+        let chest = (rs + ls) * 0.5;
+        let carry_grip = chest + Vec3::new(6.0, -7.0, 4.0) + sway;
+        let carry_dir = Vec3::new(0.25, 0.08, -0.96).normalize();
+        let grip = aim_grip.lerp(carry_grip, carry);
+        let dir = aim_dir.lerp(carry_dir, carry).normalize();
+        // Цевьё — на линии ствола, докуда левая рука достаёт (5–10 вокселей от рукояти):
+        // иначе ствол повело бы к руке.
         let reach_left = (r[j.shoulder[1]].distance(r[j.elbow[1]]) + r[j.elbow[1]].distance(r[j.hand[1]])) * 0.97;
-        let to = right_hand - p[j.shoulder[1]];
-        let b = aim.dot(to);
+        let to = grip - ls;
+        let b = dir.dot(to);
         let along = (b * b - to.length_squared() + reach_left * reach_left).max(0.0).sqrt() - b;
-        let left_hand = right_hand + aim * along.clamp(4.0, 9.0);
-        for (side, hand, out) in [(0, right_hand, 1.0), (1, left_hand, -1.0)] {
+        let left = grip + dir * along.clamp(5.0, 10.0);
+        // Локти — вниз и наружу, не в грудь.
+        for (side, hand, bend) in [(0, grip, Vec3::new(-0.2, -1.0, 0.7)), (1, left, Vec3::new(0.0, -1.0, -0.6))] {
             let shoulder = p[j.shoulder[side]];
             let upper = r[j.shoulder[side]].distance(r[j.elbow[side]]);
             let fore = r[j.elbow[side]].distance(r[j.hand[side]]);
-            let bend = Vec3::new(0.0, -1.0, 0.6 * out * side_sign(r[j.shoulder[side]].z));
             p[j.elbow[side]] = two_bone(shoulder, hand, upper, fore, bend);
             p[j.hand[side]] = shoulder + (hand - shoulder).clamp_length_max(upper + fore - 0.01);
         }
@@ -701,7 +719,7 @@ mod tests {
         for m in &set.models {
             let mut last: Option<Vec<Mat4>> = None;
             for step in 0..400 {
-                let pose = m.pose(Motion { speed: 4.5 + (step % 7) as f32 * 0.3, phase: step as f32 * 0.05, ..Default::default() });
+                let pose = m.pose(Motion { speed: 6.0 + (step % 7) as f32 * 0.3, phase: step as f32 * 0.05, ..Default::default() });
                 let now = part_matrices(m, &pose);
                 if let Some(prev) = &last {
                     for (a, b) in prev.iter().zip(&now) {
@@ -720,7 +738,7 @@ mod tests {
         let m = &set.models[0];
         let j = m.joints.unwrap();
         for step in 0..16 {
-            let pose = m.pose(Motion { speed: 4.5, phase: step as f32 * 0.4, ..Default::default() });
+            let pose = m.pose(Motion { speed: 6.0, phase: step as f32 * 0.4, ..Default::default() });
             for side in 0..2 {
                 let thigh = m.rest[j.hip[side]].distance(m.rest[j.knee[side]]);
                 let now = pose[j.hip[side]].distance(pose[j.knee[side]]);
@@ -736,7 +754,7 @@ mod tests {
     fn rifle_points_where_the_soldier_looks() {
         let set = CharacterSet::load(&data()).unwrap();
         for m in &set.models {
-            for speed in [0.0, 2.0, 4.5] {
+            for speed in [0.0, 2.2, 6.0] {
                 for step in 0..12 {
                     let pose = m.pose(Motion { speed, phase: step as f32 * 0.5, ..Default::default() });
                     let aim = m.weapon_frame(&pose).unwrap().z_axis.truncate();
@@ -749,6 +767,25 @@ mod tests {
     }
 
     #[test]
+    fn hands_stay_outside_the_chest_and_running_carries_the_rifle_across() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for m in &set.models {
+            let j = m.joints.unwrap();
+            for speed in [0.0, 2.2, 6.0] {
+                let p = m.pose(Motion { speed, phase: 1.0, ..Default::default() });
+                // Целится: рукоять — впереди груди (не внутри), левая рука — ещё дальше.
+                let chest = (p[j.shoulder[0]] + p[j.shoulder[1]]) * 0.5;
+                assert!(p[j.hand[0]].x > chest.x + 4.0, "{}, {speed} м/с: правая кисть в груди ({:?})", m.name, p[j.hand[0]]);
+                assert!(p[j.hand[1]].x > p[j.hand[0]].x + 4.0, "{}: левая кисть не на цевье", m.name);
+            }
+            // Несёт на бегу: ствол поперёк хода, влево, почти горизонтально.
+            let p = m.pose(Motion { speed: 6.0, phase: 1.0, carry: 1.0, ..Default::default() });
+            let aim = m.weapon_frame(&p).unwrap().z_axis.truncate();
+            assert!(aim.z < -0.85 && aim.y.abs() < 0.2, "{}: на бегу ствол не поперёк ({aim:?})", m.name);
+        }
+    }
+
+    #[test]
     fn running_strides_longer_and_legs_follow_the_move_direction() {
         let set = CharacterSet::load(&data()).unwrap();
         let m = &set.models[0];
@@ -757,17 +794,17 @@ mod tests {
         let spread = |speed: f32, dir: Vec2| {
             (0..32)
                 .map(|i| {
-                    let pose = m.pose(Motion { speed, phase: i as f32 * std::f32::consts::TAU / 32.0, dir });
+                    let pose = m.pose(Motion { speed, phase: i as f32 * std::f32::consts::TAU / 32.0, dir, carry: 0.0 });
                     let f = pose[j.foot[0]] - m.rest[j.foot[0]];
                     Vec2::new(f.x, f.z)
                 })
                 .collect::<Vec<_>>()
         };
         let reach = |v: &[Vec2]| v.iter().map(|f| f.length()).fold(0.0, f32::max);
-        assert!(reach(&spread(4.5, Vec2::X)) > reach(&spread(2.0, Vec2::X)));
-        assert!(set.stride_rate(4.5) < set.stride_rate(2.0), "бегом круг шага длиннее");
+        assert!(reach(&spread(6.0, Vec2::X)) > reach(&spread(2.2, Vec2::X)));
+        assert!(set.stride_rate(6.0) < set.stride_rate(2.2), "бегом круг шага длиннее");
         // Идёт вправо — стопы ходят вправо-влево, а не вперёд-назад.
-        let side = spread(2.0, Vec2::Y);
+        let side = spread(2.2, Vec2::Y);
         let (along_x, along_z) = side.iter().fold((0.0f32, 0.0f32), |(x, z), f| (x.max(f.x.abs()), z.max(f.y.abs())));
         assert!(along_z > 8.0 && along_z > along_x * 2.5, "вбок: размах вбок {along_z:.1}, вперёд {along_x:.1}");
         // Из записей движений: у моделей есть шаг и бег.

@@ -25,7 +25,7 @@ pub const MAGIC: [u8; 2] = *b"WN";
 /// Больше званий в приветствии не передаём.
 pub const MAX_RANKS: usize = 32;
 
-pub const VERSION: u8 = 16;
+pub const VERSION: u8 = 17;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Пароль сервера и имя сервера — не длиннее, байт.

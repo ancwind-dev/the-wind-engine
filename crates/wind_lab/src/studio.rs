@@ -35,6 +35,8 @@ pub struct Studio {
     phase: f32,
     /// Куда идёт относительно взгляда, градусы: 0 — вперёд, 90 — вправо, 180 — назад.
     heading: f32,
+    /// Целится: на бегу оружие вперёд, а не поперёк груди.
+    aiming: bool,
     dead: Option<f32>,
     /// Чем убит: пулей спереди или взрывом спереди.
     blast: bool,
@@ -70,9 +72,10 @@ impl Studio {
             model: 0,
             weapon: Some(0),
             team: 0,
-            speed: 2.0,
+            speed: 2.2,
             phase: 0.0,
             heading: 0.0,
+            aiming: false,
             dead: None,
             blast: false,
             act: Act::None,
@@ -148,7 +151,7 @@ impl Studio {
     pub fn properties(&mut self, ui: &mut egui::Ui) {
         theme::panel(ui, Icon::Run, "Анимация", true, |ui| {
             ui.horizontal(|ui| {
-                for (name, speed) in [("Стоит", 0.0), ("Шаг", 2.0), ("Бег", 4.5)] {
+                for (name, speed) in [("Стоит", 0.0), ("Шаг", 2.2), ("Бег", 6.0)] {
                     if ui.selectable_label(self.dead.is_none() && self.speed == speed, name).clicked() {
                         self.speed = speed;
                         self.dead = None;
@@ -169,7 +172,7 @@ impl Studio {
             });
             theme::props(ui, "studio_anim", |ui| {
                 theme::label(ui, "Скорость");
-                ui.add(egui::Slider::new(&mut self.speed, 0.0..=6.0).suffix(" м/с"));
+                ui.add(egui::Slider::new(&mut self.speed, 0.0..=8.0).suffix(" м/с"));
                 ui.end_row();
                 theme::label(ui, "Замедление");
                 ui.add(egui::Slider::new(&mut self.tempo, 0.05..=1.0).logarithmic(true).suffix("×"));
@@ -180,6 +183,9 @@ impl Studio {
                 theme::label(ui, "Направление");
                 ui.add(egui::Slider::new(&mut self.heading, -180.0..=180.0).suffix("°").max_decimals(0))
                     .on_hover_text("Куда идёт относительно взгляда: 0 — вперёд, 90 — вправо, 180 — назад");
+                ui.end_row();
+                theme::label(ui, "Оружие");
+                ui.checkbox(&mut self.aiming, "целится").on_hover_text("Не целясь, на бегу солдат несёт оружие поперёк груди, как в RWR");
                 ui.end_row();
                 theme::label(ui, "Чем убит");
                 ui.horizontal(|ui| {
@@ -295,7 +301,8 @@ impl Studio {
 
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
-        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()) };
+        let carry = if self.aiming { 0.0 } else { wind_render::character::run_share(self.speed) };
+        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()), carry };
         let action = self.action();
         // Редактор анимаций: солдат в позе клипа, без действий и падения.
         let editing = self.editor.on && self.dead.is_none();
@@ -319,6 +326,7 @@ impl Studio {
                 prone: false,
                 reloading: false,
                 throwing: false,
+                aiming: self.aiming,
             }),
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());

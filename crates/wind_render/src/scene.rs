@@ -30,6 +30,8 @@ pub struct SoldierDraw {
     pub reloading: bool,
     /// Только что бросил гранату — с этого признака начинается анимация броска.
     pub throwing: bool,
+    /// Целится (стрелял в последнюю секунду): оружие вперёд, а не поперёк груди на бегу.
+    pub aiming: bool,
 }
 
 /// Модель, оружие и движение солдата, заданные явно.
@@ -109,6 +111,8 @@ struct Anim {
     throw: Option<f32>,
     /// Признак броска в прошлом кадре — бросок начинается, когда он появился.
     was_throwing: bool,
+    /// Как держит оружие (`Motion::carry`), плавно.
+    carry: f32,
 }
 
 pub struct SceneBuilder {
@@ -272,7 +276,7 @@ impl SceneBuilder {
                     (None, Some(t)) => Some(Action::Reload { kind: w.reload, t: t / w.reload_time.max(0.1), rounds: w.rounds }),
                     _ => None,
                 };
-                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir }, action })
+                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry }, action })
             });
             if let Some(set) = &characters
                 && let Some(look) = look
@@ -453,7 +457,7 @@ impl SceneBuilder {
             if fresh {
                 // Последняя поза живого солдата: шаг, залёг ли.
                 let a = self.anim.get(c.id as usize).copied().unwrap_or_default();
-                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir });
+                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir, carry: a.carry });
                 let pose = if a.prone > 0.0 { m.lie(&pose, a.prone) } else { pose };
                 let at = to_3d(c.pos, input.map.height_at(c.pos));
                 let push = if c.push == Vec2::ZERO { -Vec2::from_angle(c.facing) * 2.0 } else { c.push };
@@ -493,6 +497,9 @@ impl SceneBuilder {
             a.throw = a.throw.map(|t| t + dt).filter(|&t| t < THROW_TIME);
         }
         a.was_throwing = s.throwing;
+        // На бегу, не целясь, оружие — поперёк груди; вскидывает быстро, опускает медленнее.
+        let carry = if s.aiming { 0.0 } else { crate::character::run_share(a.speed) };
+        a.carry += (carry - a.carry).clamp(-dt * 6.0, dt * 2.5);
         let goal = if s.prone { 1.0 } else { 0.0 };
         a.prone += (goal - a.prone).clamp(-dt * 3.0, dt * 3.0);
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };

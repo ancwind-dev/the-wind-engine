@@ -89,8 +89,8 @@ impl Default for SightSpec {
 }
 
 /// Скорость шага и бега, м/с: между ними точность и заметность меняются плавно.
-const WALK: f32 = 2.0;
-const RUN: f32 = 4.5;
+const WALK: f32 = 2.2;
+const RUN: f32 = 6.0;
 
 impl SightSpec {
     /// Во сколько раз от дальности обзора видна цель, которая движется со скоростью
@@ -135,11 +135,11 @@ mod tests {
     #[test]
     fn running_is_seen_farther_and_shoots_wider() {
         let s = SightSpec::default();
-        assert!(s.detectability(4.5, false) > s.detectability(2.0, false));
+        assert!(s.detectability(6.0, false) > s.detectability(2.0, false));
         assert!(s.detectability(2.0, false) > s.detectability(0.0, false));
         assert!(s.detectability(0.0, true) < s.detectability(0.0, false));
         assert_eq!(s.spread_factor(0.0, false), 1.0);
-        assert!((s.spread_factor(4.5, false) - 0.85 / 0.3).abs() < 1e-4, "на бегу — почти втрое");
+        assert!((s.spread_factor(6.0, false) - 0.85 / 0.3).abs() < 1e-4, "на бегу — почти втрое");
         assert!(s.spread_factor(0.0, true) < 1.0, "лёжа точнее");
     }
 

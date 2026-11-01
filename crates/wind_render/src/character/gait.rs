@@ -10,6 +10,10 @@ use glam::{Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::path::Path;
 
+/// Во сколько раз шаг бега длиннее, чем в записи: бег в игре (6 м/с) быстрее записи
+/// (≈ 3 м/с) — иначе ноги семенили бы.
+pub const RUN_STRIDE: f32 = 1.3;
+
 /// Клип, собранный на модели: позы по кадрам (воксели, как у `pose`). Круг шага
 /// или действие (бросок).
 #[derive(Clone, Debug, Default)]
@@ -126,6 +130,21 @@ impl CharModel {
             let w = wa[i].lerp(wb[i], wt);
             let r = ra[i].lerp(rb[i], rt);
             *v = v.lerp(w.lerp(r, run), moving);
+        }
+        // Бегом шаг длиннее записи: стопы дальше от таза по ходу, колени — заново.
+        let long = 1.0 + (RUN_STRIDE - 1.0) * run * moving;
+        if long > 1.001 {
+            let r = &self.rest;
+            for side in 0..2 {
+                let hip = p[j.hip[side]];
+                let off = p[j.foot[side]] - hip;
+                let thigh = r[j.hip[side]].distance(r[j.knee[side]]);
+                let shin = r[j.knee[side]].distance(r[j.foot[side]]);
+                let foot = hip + Vec3::new(off.x * long, off.y, off.z).clamp_length_max(thigh + shin - 0.05);
+                let bend = p[j.knee[side]] - (hip + p[j.foot[side]]) * 0.5;
+                p[j.foot[side]] = foot;
+                p[j.knee[side]] = two_bone(hip, foot, thigh, shin, bend);
+            }
         }
         // Ноги — по ходу движения: стопы поворачиваем вокруг таза, а колени ставим
         // заново, сгибом вперёд — иначе вбок колено гнулось бы в сторону.
@@ -266,7 +285,7 @@ mod tests {
         let sk = m.skeleton().unwrap();
         let j = m.joints.unwrap();
         // Поза → кадр → поза: те же точки.
-        let pose = m.pose(Motion { speed: 4.5, phase: 1.0, dir: Vec2::X });
+        let pose = m.pose(Motion { speed: 6.0, phase: 1.0, dir: Vec2::X, carry: 0.0 });
         let back = sk.pose(&sk.frame_of(&pose));
         for i in [j.hand[0], j.foot[1], j.head, j.knee[0]] {
             assert!(back[i].distance(pose[i]) < 0.05, "точка {i}: {:?} → {:?}", pose[i], back[i]);
@@ -288,9 +307,9 @@ mod tests {
         let set = set();
         for m in &set.models {
             assert!(m.gaits.is_some() && m.throw.is_some(), "{}: нет клипов из data/animations", m.name);
-            for speed in [2.0, 4.5] {
+            for speed in [2.2, 6.0] {
                 // Соседние фазы — близкие позы, и на шве круга (2π → 0) тоже.
-                let pose = |ph: f32| m.pose(Motion { speed, phase: ph, dir: Vec2::X });
+                let pose = |ph: f32| m.pose(Motion { speed, phase: ph, dir: Vec2::X, carry: 0.0 });
                 let step = TAU / 200.0;
                 let worst = (0..200)
                     .map(|k| {
@@ -310,7 +329,7 @@ mod tests {
         let j = m.joints.unwrap();
         let (mut low, mut high) = (f32::MAX, f32::MIN);
         for k in 0..64 {
-            let p = m.pose(Motion { speed: 4.5, phase: k as f32 * TAU / 64.0, dir: Vec2::X });
+            let p = m.pose(Motion { speed: 6.0, phase: k as f32 * TAU / 64.0, dir: Vec2::X, carry: 0.0 });
             for s in 0..2 {
                 low = low.min(p[j.foot[s]].y);
                 high = high.max(p[j.foot[s]].y);

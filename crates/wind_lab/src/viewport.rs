@@ -24,9 +24,10 @@ pub struct SceneSoldier {
     pub look: Option<wind_render::Look>,
     /// Залёг под огнём.
     pub prone: bool,
-    /// Перезаряжается и только что бросил гранату — для анимации.
+    /// Перезаряжается, только что бросил гранату, целится — для анимации.
     pub reloading: bool,
     pub throwing: bool,
+    pub aiming: bool,
 }
 
 pub struct ScenePoint {
@@ -319,6 +320,7 @@ impl Viewport {
                 prone: s.prone,
                 reloading: s.reloading,
                 throwing: s.throwing,
+                aiming: s.aiming,
             })
             .collect();
         let bullets: Vec<(Vec2, Vec2)> = scene.bullets.iter().map(|&(tail, head)| (head, head - tail)).collect();

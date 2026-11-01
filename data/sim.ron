@@ -11,7 +11,7 @@
     defend_probability: 0.97,
 
     soldier: (
-        speed: 4.5,
+        speed: 6.0,
         radius: 0.35,
         vision_range: 32.0,
         vision_candidates: 4,

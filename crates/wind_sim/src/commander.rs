@@ -2,7 +2,7 @@
 //! звание, а со званием — сколько бойцов игрок может вести за собой.
 //!
 //! Бойцов игрок набирает сам — из своих солдат под управлением ИИ: наводит на бойца
-//! прицел и зовёт (E). Отряд игрока идёт за ним клином («за мной», F) или держит точку,
+//! прицел и зовёт (E); одно нажатие — один боец. Отряд игрока идёт за ним клином («за мной», F) или держит точку,
 //! на которую указал прицел («держать», Q). X — распустить отряд. Набранный боец выходит
 //! из своего отряда и из-под штаба (`Soldier::commander`); погиб — выбывает, распустили —
 //! возвращается в свой отряд.
@@ -14,6 +14,10 @@ use serde::Deserialize;
 
 /// Солдат не в отряде игрока.
 pub const NO_COMMANDER: u32 = u32::MAX;
+
+/// Сколько секунд после того, как позвал бойца, игрок не зовёт следующего: дольше, чем
+/// клиент держит приказ (0,25 с).
+const RECRUIT_LOCK: f32 = 0.3;
 
 /// Звание: с какого опыта и сколько бойцов можно вести.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -126,7 +130,9 @@ impl World {
 
     /// Приказы игроков в этом тике. Сетка солдат уже построена.
     pub(crate) fn apply_commands(&mut self) {
+        let dt = self.dt();
         for p in 0..self.soldiers.len() {
+            self.soldiers[p].recruit_lock -= dt;
             let s = &self.soldiers[p];
             let Controller::Player(input) = s.controller else { continue };
             if !s.alive {
@@ -134,7 +140,8 @@ impl World {
             }
             match input.command {
                 Command::None => {}
-                Command::Recruit => self.recruit(p as u32, input.aim),
+                Command::Recruit if s.recruit_lock <= 0.0 => self.recruit(p as u32, input.aim),
+                Command::Recruit => {}
                 Command::Dismiss => self.dismiss(p as u32),
                 Command::Follow => self.soldiers[p].hold = None,
                 Command::Hold => {
@@ -145,8 +152,9 @@ impl World {
         }
     }
 
-    /// Позвать бойца, ближайшего к прицелу: своего, под управлением ИИ, не раненого.
-    /// Если ближайший уже в отряде — ничего (приказ повторяется несколько тиков).
+    /// Позвать бойца, ближайшего к прицелу: своего, под управлением ИИ, не раненого и ещё
+    /// не в отряде. Приказ повторяется несколько тиков — второго за то же нажатие не даёт
+    /// `recruit_lock`.
     fn recruit(&mut self, player: u32, at: Vec2) {
         let spec = &self.config.ranks;
         let me = &self.soldiers[player as usize];
@@ -163,19 +171,19 @@ impl World {
                 && s.team == me.team
                 && s.controller == Controller::Ai
                 && s.retreat.is_none()
-                && (s.commander == NO_COMMANDER || s.commander == player)
+                && s.commander == NO_COMMANDER
                 && s.pos.distance(me.pos) <= reach;
             let d = s.pos.distance_squared(at);
             if fits && d < r * r && best.is_none_or(|(b, _)| d < b) {
                 best = Some((d, j));
             }
         });
-        if let Some((_, j)) = best
-            && self.soldiers[j as usize].commander == NO_COMMANDER
-        {
+        if let Some((_, j)) = best {
             let s = &mut self.soldiers[j as usize];
             s.commander = player;
             s.cover = None;
+            // Клиент держит приказ 0,25 с — следующего зовём только новым нажатием.
+            self.soldiers[player as usize].recruit_lock = RECRUIT_LOCK;
         }
     }
 
@@ -266,6 +274,11 @@ mod tests {
             let aim = w.soldiers[f as usize].pos;
             w.set_input(me, PlayerInput { aim, command: Command::Recruit, ..Default::default() });
             w.step();
+            // Следующее нажатие — после `RECRUIT_LOCK`.
+            w.set_input(me, PlayerInput { aim, ..Default::default() });
+            for _ in 0..7 {
+                w.step();
+            }
             w.soldiers[f as usize].pos = w.soldiers[me as usize].pos + Vec2::new(-4.0, f as f32);
         }
         assert_eq!(w.squad_of(me).len(), 3);

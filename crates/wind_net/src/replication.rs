@@ -28,6 +28,7 @@ const FLAG_PLAYER: u8 = 2;
 const FLAG_RELOADING: u8 = 4;
 const FLAG_PRONE: u8 = 8;
 const FLAG_THROWING: u8 = 16;
+const FLAG_AIMING: u8 = 32;
 
 /// Солдат в том виде, в каком он уходит по сети.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,9 @@ impl NetSoldier {
         }
         if s.throw_timer > 0.0 {
             flags |= FLAG_THROWING;
+        }
+        if s.aiming() {
+            flags |= FLAG_AIMING;
         }
         NetSoldier { x, y, facing: q_angle(s.facing, 8) as u8, flags }
     }
@@ -88,6 +92,11 @@ impl NetSoldier {
     /// Только что бросил гранату.
     pub fn is_throwing(&self) -> bool {
         self.flags & FLAG_THROWING != 0
+    }
+
+    /// Целится (стрелял в последнюю секунду) — оружие вперёд, а не поперёк груди.
+    pub fn is_aiming(&self) -> bool {
+        self.flags & FLAG_AIMING != 0
     }
 }
 

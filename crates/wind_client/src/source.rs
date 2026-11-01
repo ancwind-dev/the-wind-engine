@@ -357,6 +357,7 @@ fn local_view(l: &Local) -> View {
                 prone: s.prone,
                 reloading: s.reload_timer > 0.0,
                 throwing: s.throw_timer > 0.0,
+                aiming: s.aiming(),
             })
             .collect(),
         blasts: l.blasts.clone(),
@@ -463,6 +464,7 @@ fn remote_view(c: &NetClient) -> View {
                     prone: s.net.is_prone(),
                     reloading: s.net.is_reloading(),
                     throwing: s.net.is_throwing(),
+                    aiming: s.net.is_aiming(),
                 })
             })
             .collect(),

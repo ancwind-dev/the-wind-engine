@@ -59,12 +59,24 @@ fn recruit_one_at_a_time_up_to_the_rank_limit() {
     }
     order(&mut w, me, at, Command::Recruit, 5);
     assert_eq!(w.squad_of(me).len(), 1);
-    // Сержант (трое): каждый новый приказ — ещё один.
+    // Сержант (трое): одно нажатие (приказ держится 5 тиков) — один боец, даже если
+    // позванный успел убежать в строй, а рядом с прицелом есть ещё свои.
     w.soldiers[me as usize].xp = w.config.ranks.ranks[3].xp;
+    order(&mut w, me, at, Command::None, 7);
+    for &i in &f[..3] {
+        if w.soldiers[i as usize].commander == NO_COMMANDER {
+            w.soldiers[i as usize].pos = at + Vec2::new(0.0, (i % 3) as f32 * 1.5);
+        }
+    }
+    order(&mut w, me, at, Command::Recruit, 5);
+    assert_eq!(w.squad_of(me).len(), 2, "одно нажатие — один боец");
+    order(&mut w, me, at, Command::None, 7);
     for &i in &f[..3] {
         if w.soldiers[i as usize].commander == NO_COMMANDER {
             let aim = w.soldiers[i as usize].pos;
             order(&mut w, me, aim, Command::Recruit, 2);
+            // Новое нажатие — не раньше, чем через 0,3 с после прошлого бойца.
+            order(&mut w, me, aim, Command::None, 7);
         }
     }
     assert_eq!(w.squad_of(me).len(), 3);
@@ -82,6 +94,7 @@ fn recruit(w: &mut World, me: u32, n: usize) -> Vec<u32> {
         w.soldiers[i as usize].pos = pos + Vec2::new(-2.0, k as f32 * 1.2 - 3.0);
         let aim = w.soldiers[i as usize].pos;
         order(w, me, aim, Command::Recruit, 2);
+        order(w, me, aim, Command::None, 7);
     }
     let squad = w.squad_of(me);
     assert_eq!(squad.len(), n);
