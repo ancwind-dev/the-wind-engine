@@ -14,10 +14,18 @@ use glam::Vec2;
 pub const HOUSE_WALL: u8 = prefab::HOUSE;
 pub const FENCE: u8 = prefab::FENCE;
 
-/// Покрытие земли: трава, сухая трава, грунт (номера из `GROUND_NAMES`).
+/// Покрытие земли: трава, сухая трава, грунт, песок (номера из `GROUND_NAMES`).
 const GRASS: u8 = 0;
 const DRY: u8 = 1;
 const DIRT: u8 = 2;
+const SAND: u8 = 3;
+
+/// Высота суши на процедурной карте, м: ниже — дно озёр.
+pub const LAND: f32 = 3.0;
+/// Уровень воды — чуть ниже суши: берег пологий.
+const WATER: f32 = LAND - 0.35;
+/// Глубина озера в середине (от суши), м.
+const LAKE_DEPTH: f32 = 2.6;
 
 /// Квартал: шаг улиц, ширина улицы, участок между улицами, м.
 const BLOCK: i32 = 18;
@@ -200,6 +208,10 @@ pub fn generate(size: u32, capture_points: u32, seed: u64) -> (Map, Layout) {
         fill_circle(&mut map, c, r, INDESTRUCTIBLE);
     }
 
+    // --- Озеро — в стороне от баз, точек, дорог и домов. Своим случаем: остальная карта
+    // от озера не меняется.
+    lakes(&mut map, &bases, &points, seed);
+
     // Край карты.
     for i in 0..n {
         map.set(i, 0, INDESTRUCTIBLE);
@@ -261,6 +273,67 @@ fn paint_disc(map: &mut Map, c: Vec2, r: f32, ground: u8) {
 /// В прямоугольнике нет стен (и он весь на карте).
 fn free(map: &Map, x0: i32, y0: i32, w: i32, h: i32) -> bool {
     (y0..y0 + h).all(|y| (x0..x0 + w).all(|x| map.index(x, y).is_some() && map.solid[map.index(x, y).unwrap()] == EMPTY))
+}
+
+/// Озёра: вся суша поднята на `LAND`, а в озере дно опускается к середине; вода на
+/// уровне `WATER`, вокруг — песчаный берег. Нет места — нет и озера (и воды на карте).
+fn lakes(map: &mut Map, bases: &[Vec2; 2], points: &[Vec2], seed: u64) {
+    let mut rng = Rng::new(seed ^ 0x1A4E);
+    let s = map.width as f32;
+    let count = if map.width >= 160 { 1 + (map.width / 768) as usize } else { 0 };
+    let mut made: Vec<(Vec2, Vec2)> = Vec::new();
+    for _ in 0..count {
+        for _ in 0..40 {
+            let r = Vec2::new(rng.range(9.0, 22.0), rng.range(9.0, 22.0));
+            let c = Vec2::new(rng.range(r.x + 8.0, s - r.x - 8.0), rng.range(r.y + 8.0, s - r.y - 8.0));
+            let big = r.max_element() + 6.0;
+            if bases.iter().any(|b| b.distance(c) < BASE_CLEAR + big + 10.0) || points.iter().any(|p| p.distance(c) < PLAZA + big + 14.0) {
+                continue;
+            }
+            if made.iter().any(|(o, orr)| o.distance(c) < big + orr.max_element() + 10.0) {
+                continue;
+            }
+            // Ни стен, ни дорог в озере и на берегу.
+            let (x0, y0) = Map::cell_of(c - Vec2::splat(big));
+            let d = (big * 2.0).ceil() as i32;
+            if !free(map, x0, y0, d, d) || on_road(map, x0, y0, d, d) {
+                continue;
+            }
+            made.push((c, r));
+            break;
+        }
+    }
+    if made.is_empty() {
+        return;
+    }
+    // Расстояние до края озера в долях его размера: 0 — середина, 1 — урез воды примерно
+    // на 0,85; край — неровный.
+    let shape = |p: Vec2| {
+        made.iter()
+            .map(|&(c, r)| {
+                let q = (p - c) / r;
+                let wobble = 0.85 + 0.3 * value_noise(p.x / 7.0, p.y / 7.0, seed ^ 0x3A11);
+                q.length() / wobble
+            })
+            .fold(f32::MAX, f32::min)
+    };
+    for y in 0..=map.height as i32 {
+        for x in 0..=map.width as i32 {
+            let k = shape(Vec2::new(x as f32, y as f32));
+            let u = ((1.0 - k) / 0.6).clamp(0.0, 1.0);
+            map.set_corner_height(x, y, LAND - LAKE_DEPTH * u * u * (3.0 - 2.0 * u));
+        }
+    }
+    for y in 0..map.height as i32 {
+        for x in 0..map.width as i32 {
+            let k = shape(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
+            if k < 1.25 {
+                let i = map.index(x, y).unwrap();
+                map.ground[i] = if k < 0.86 { DIRT } else { SAND };
+            }
+        }
+    }
+    map.water = Some(WATER);
 }
 
 /// Прямоугольник задевает дорогу.

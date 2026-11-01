@@ -239,6 +239,8 @@ struct Session {
     command: (Command, f32),
     /// Звание в прошлом кадре — чтобы сказать о новом.
     rank_seen: Option<usize>,
+    /// Сколько ещё секунд держать «сесть/выйти» (V) — как перезарядку.
+    boat_hold: f32,
     /// С какой скоростью свой солдат идёт, м/с: от неё разброс прицела.
     move_speed: f32,
     fog: fog::Fog,
@@ -262,6 +264,7 @@ impl Session {
             reload_hold: 0.0,
             command: (Command::None, 0.0),
             rank_seen: None,
+            boat_hold: 0.0,
             move_speed: 0.0,
             fog: fog::Fog::default(),
             minimap: minimap::Minimap::default(),
@@ -317,6 +320,8 @@ impl Session {
             None => (self.command.0, self.command.1 - dt),
         };
         let command = if self.command.1 > 0.0 { self.command.0 } else { Command::None };
+        // V — сесть в лодку рядом или выйти.
+        self.boat_hold = if ctx.input(|i| i.key_pressed(egui::Key::V)) { 0.25 } else { (self.boat_hold - dt).max(0.0) };
         // Где появиться: 1 — база, 2…6 — точки A…E.
         let keys = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6];
         if let Some(k) = ctx.input(|i| keys.iter().position(|&k| i.key_pressed(k))) {
@@ -346,6 +351,7 @@ impl Session {
                 // Как в RWR: по умолчанию бег, Shift — шагом.
                 walk: i.modifiers.shift,
                 command,
+                use_boat: self.boat_hold > 0.0,
                 spawn: self.spawn,
                 // Заполняет пилот своего солдата.
                 pos: None,
@@ -658,7 +664,12 @@ impl Game {
             let (speed, radius) = s.source.soldier_spec();
             let speed = if input.walk { speed * wind_sim::world::WALK_SHARE } else { speed };
             let server = s.source.own_server_pos();
-            if let Some(map) = s.source.map() {
+            if s.source.own_in_boat() {
+                // В лодке солдата везёт лодка: он там, где по серверу.
+                s.pilot.follow(s.source.own_drawn_pos());
+                input.pos = None;
+                s.move_speed = 0.0;
+            } else if let Some(map) = s.source.map() {
                 input.pos = s.pilot.update(map, server, input.move_dir, speed, radius, dt);
                 s.move_speed = input.move_dir.length() * speed;
             }
@@ -746,6 +757,7 @@ impl Game {
                 soldiers: &view.soldiers,
                 bullets: &view.bullets,
                 grenades: &view.grenades,
+                boats: &view.boats,
                 blasts: &view.blasts,
                 points: &view.points,
                 marker: view.me_pos,

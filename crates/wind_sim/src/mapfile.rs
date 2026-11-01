@@ -25,6 +25,9 @@ struct Meta {
     capture_points: Vec<(f32, f32)>,
     #[serde(default)]
     atmosphere: Atmosphere,
+    /// Уровень воды, м; нет — воды нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    water: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -52,6 +55,7 @@ impl MapFile {
         map.ground = read_png(&dir.join("ground.png"), w, h, 8).map_err(|e| err("ground.png", &e))?;
         let raw = read_png(&dir.join("height.png"), w + 1, h + 1, 16).map_err(|e| err("height.png", &e))?;
         map.heights = raw.as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b)).collect();
+        map.water = meta.water;
         let v = |(x, y): (f32, f32)| Vec2::new(x, y);
         Ok(MapFile {
             name: meta.name,
@@ -76,6 +80,7 @@ impl MapFile {
             bases: [p(self.layout.bases[0]), p(self.layout.bases[1])],
             capture_points: self.layout.capture_points.iter().copied().map(p).collect(),
             atmosphere: self.atmosphere.clone(),
+            water: self.map.water,
         };
         let text = ron::ser::to_string_pretty(&meta, ron::ser::PrettyConfig::default()).map_err(|e| err("map.ron", &e))?;
         std::fs::write(dir.join("map.ron"), text).map_err(|e| err("map.ron", &e))?;
@@ -100,6 +105,9 @@ impl MapFile {
         h.write(&self.map.ground);
         for v in &self.map.heights {
             h.write(&v.to_le_bytes());
+        }
+        if let Some(w) = self.map.water {
+            h.write(&w.to_le_bytes());
         }
         h.0
     }

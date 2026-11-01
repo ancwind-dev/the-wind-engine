@@ -323,6 +323,7 @@ impl MapWorkspace {
             rings,
             lines: lines.unwrap_or_default().into_iter().chain(extra).collect(),
             corpses: Vec::new(),
+            boats: Vec::new(),
             atmosphere: file.atmosphere.clone(),
         }
     }
@@ -552,6 +553,22 @@ impl MapWorkspace {
             ui.end_row();
             theme::label(ui, "Размер");
             ui.label(format!("{size}×{size} м, чанков {0}×{0}", crate::editor::chunks_per_side(size)));
+            ui.end_row();
+            // Вода: где земля ниже уровня. Рыть дно и насыпать берег — кистью рельефа.
+            theme::label(ui, "Вода");
+            ui.horizontal(|ui| {
+                let map = &mut self.editor.file.map;
+                let mut on = map.water.is_some();
+                if ui.checkbox(&mut on, "есть").on_hover_text("Где земля ниже уровня — вода; глубже 1,1 м — плывут").changed() {
+                    map.water = on.then_some(map.water.unwrap_or(1.0));
+                    self.editor.dirty = true;
+                }
+                if let Some(level) = &mut map.water
+                    && ui.add(egui::DragValue::new(level).range(0.0..=60.0).speed(0.02).suffix(" м")).changed()
+                {
+                    self.editor.dirty = true;
+                }
+            });
             ui.end_row();
             theme::label(ui, "Отмена");
             ui.horizontal(|ui| {

@@ -327,6 +327,7 @@ impl Studio {
                 reloading: false,
                 throwing: false,
                 aiming: self.aiming,
+                in_boat: false,
             }),
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());
@@ -348,6 +349,7 @@ impl Studio {
             rings: Vec::new(),
             lines: Vec::new(),
             corpses,
+            boats: Vec::new(),
             atmosphere: self.atmosphere.clone(),
         };
         let rect = ui.max_rect();

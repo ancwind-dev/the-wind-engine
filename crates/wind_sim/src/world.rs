@@ -2,11 +2,12 @@
 
 use crate::arsenal::{BlastSpec, WeaponSpec};
 use crate::command::{self, PointPlan, SquadInfo};
+use crate::boat::{Boat, NO_BOAT};
 use crate::commander::{Command, Hold, NO_COMMANDER};
 use crate::config::SimConfig;
 use crate::cover::Cover;
 use crate::grid::SpatialGrid;
-use crate::map::Map;
+use crate::map::{Map, SWIM_DEPTH, WADE_DEPTH};
 use crate::atmosphere::Atmosphere;
 use crate::mapfile::MapFile;
 use crate::mapgen::{self, Layout};
@@ -58,6 +59,8 @@ pub struct PlayerInput {
     pub walk: bool,
     /// Приказ своему отряду (см. `commander`).
     pub command: Command,
+    /// Сесть в лодку рядом или выйти из неё (V; см. `boat`).
+    pub use_boat: bool,
     /// Где появиться после смерти: 0 — на базе, 1 + i — на точке i, если она наша
     /// (иначе на базе).
     pub spawn: u8,
@@ -168,6 +171,10 @@ pub struct Soldier {
     /// Только у игрока: сколько ещё секунд не звать следующего бойца — одно нажатие E
     /// зовёт одного, хотя приказ держится несколько тиков.
     pub recruit_lock: f32,
+    /// В какой лодке сидит (`NO_BOAT` — ни в какой; см. `boat`).
+    pub boat: u32,
+    /// Сколько ещё секунд не принимать «сесть/выйти» — одно нажатие V.
+    pub boat_lock: f32,
     /// Сколько секунд назад стрелял: стреляющего ИИ замечает дальше (см. `sight`).
     pub shot_ago: f32,
     /// ИИ: сколько ещё ждать до первого выстрела по новой цели, с.
@@ -177,7 +184,24 @@ pub struct Soldier {
     pub pause: f32,
 }
 
+/// Во сколько раз медленнее в воде глубиной `depth` м: до колена — как по суше, глубже —
+/// медленнее, вплавь — 40 % скорости.
+pub fn wading(depth: f32) -> f32 {
+    if depth <= WADE_DEPTH {
+        1.0
+    } else if depth < SWIM_DEPTH {
+        1.0 - 0.45 * (depth - WADE_DEPTH) / (SWIM_DEPTH - WADE_DEPTH)
+    } else {
+        0.4
+    }
+}
+
 impl Soldier {
+    /// Плывёт: глубоко и не в лодке — не стреляет и не бросает гранаты.
+    pub fn swimming(&self, map: &Map) -> bool {
+        self.boat == NO_BOAT && map.water_depth(self.pos) > SWIM_DEPTH
+    }
+
     /// Целится: стрелял в последнюю секунду. Иначе на бегу оружие несут поперёк груди,
     /// как в RWR (только картинка).
     pub fn aiming(&self) -> bool {
@@ -286,8 +310,13 @@ pub struct World {
     /// и как он видит точки на последнем совещании.
     pub command_enabled: [bool; 2],
     pub plans: [Vec<PointPlan>; 2],
+    /// Лодки (см. `boat`).
+    pub boats: Vec<Boat>,
     /// Карта в начале — новый раунд начинается с целыми стенами.
     initial_map: Map,
+    /// Глубокая вода по клеткам (`Map::deep_mask`) — для полей путей. Высоты и вода в
+    /// бою не меняются, считаем раз.
+    deep: Vec<bool>,
     pub(crate) grid: SpatialGrid,
 }
 
@@ -313,10 +342,11 @@ impl World {
         // Размер и число точек берём у карты, а не из настроек.
         config.map_size = map.width;
         config.capture_points = capture_points.len() as u32;
+        let deep = map.deep_mask();
         let mut flow: Vec<FlowField> = capture_points.iter().map(|&p| FlowField::new(p)).collect();
-        flow.par_iter_mut().for_each(|f| f.compute(&map));
+        flow.par_iter_mut().for_each(|f| f.compute_with(&map, &deep));
         let mut base_flow: Vec<FlowField> = bases.iter().map(|&p| FlowField::new(p)).collect();
-        base_flow.par_iter_mut().for_each(|f| f.compute(&map));
+        base_flow.par_iter_mut().for_each(|f| f.compute_with(&map, &deep));
 
         let points = capture_points
             .iter()
@@ -336,7 +366,9 @@ impl World {
             orders: Vec::new(),
             command_enabled: [command_on; 2],
             plans: [Vec::new(), Vec::new()],
+            boats: Vec::new(),
             initial_map: map.clone(),
+            deep,
             map,
             bases,
             points,
@@ -364,6 +396,7 @@ impl World {
             }
         }
         world.squads = squad::form(&mut world.soldiers, world.config.squad.size);
+        world.place_boats();
         world
     }
 
@@ -403,6 +436,7 @@ impl World {
             self.run_command();
         }
         self.apply_commands();
+        self.use_boats();
         self.plan_squads();
         self.plan_player_squads();
         stats.thinkers = ai::think(self);
@@ -410,6 +444,7 @@ impl World {
 
         let t = Instant::now();
         self.move_soldiers();
+        self.move_boats();
         stats.move_ms = ms(t);
 
         let t = Instant::now();
@@ -525,7 +560,7 @@ impl World {
         let tick = self.tick;
         let due = |f: &FlowField| f.is_stale(map) && tick >= f.computed_tick + NAV_REFRESH;
         if let Some(field) = self.flow.iter_mut().chain(self.base_flow.iter_mut()).filter(|f| due(f)).min_by_key(|f| f.computed_tick) {
-            field.compute(map);
+            field.compute_with(map, &self.deep);
             field.computed_tick = tick;
         }
     }
@@ -535,8 +570,9 @@ impl World {
     fn rebuild_navigation(&mut self) {
         let map = &self.map;
         let tick = self.tick;
+        let deep = &self.deep;
         self.flow.par_iter_mut().chain(self.base_flow.par_iter_mut()).for_each(|f| {
-            f.compute(map);
+            f.compute_with(map, deep);
             f.computed_tick = tick;
         });
     }
@@ -558,7 +594,8 @@ impl World {
         let base_flow = &self.base_flow;
 
         self.soldiers.par_iter_mut().enumerate().for_each(|(i, s)| {
-            if !s.alive {
+            // Сидящих в лодке везёт лодка (`move_boats`).
+            if !s.alive || s.boat != NO_BOAT {
                 return;
             }
             let mut desired = Vec2::ZERO;
@@ -582,6 +619,8 @@ impl World {
             if s.prone {
                 speed *= sup.crawl;
             }
+            // Вода: по колено и глубже идут медленнее, глубоко — плывут.
+            speed *= wading(map.water_depth(s.pos));
             s.last_seen_timer -= dt;
             s.calm = if s.under_fire > 0.0 || s.target.is_some() { 0.0 } else { s.calm + dt };
             if s.calm >= sup.heal_delay {
@@ -806,6 +845,8 @@ impl World {
         }
         self.projectiles.clear();
         self.score = [0; 2];
+        // Лодки — по местам, пустые (солдаты появятся заново, на берегу).
+        self.place_boats();
         for squad in &mut self.squads {
             squad.leader = None;
             squad.objective = NO_OBJECTIVE;
@@ -915,6 +956,11 @@ impl World {
     /// Бросок гранаты в точку (не дальше `max_distance`).
     pub(crate) fn throw_grenade(&mut self, soldier: u32, at: Vec2) {
         let spec = &self.config.grenade;
+        // Вплавь и за рулём лодки гранату не бросить.
+        let s = &self.soldiers[soldier as usize];
+        if s.swimming(&self.map) || self.boats.get(s.boat as usize).is_some_and(|b| b.seats[0] == soldier) {
+            return;
+        }
         let s = &mut self.soldiers[soldier as usize];
         let mut to = at - s.pos;
         let mut distance = to.length();
@@ -1005,6 +1051,8 @@ impl World {
             hold: None,
             squad_heading: Vec2::ZERO,
             recruit_lock: 0.0,
+            boat: NO_BOAT,
+            boat_lock: 0.0,
             shot_ago: f32::INFINITY,
             reaction: 0.0,
             burst: 0.0,
@@ -1021,7 +1069,7 @@ impl World {
             let a = rng.range(0.0, std::f32::consts::TAU);
             let r = spread * rng.f32().sqrt();
             let pos = center + Vec2::new(a.cos(), a.sin()) * r;
-            if !self.map.circle_hits_solid(pos, radius) {
+            if !self.map.circle_hits_solid(pos, radius) && self.map.water_depth(pos) < SWIM_DEPTH {
                 return pos;
             }
         }
@@ -1035,8 +1083,9 @@ impl World {
             return;
         }
         s.alive = false;
-        // Погибший боец выбывает из отряда игрока.
+        // Погибший боец выбывает из отряда игрока и из лодки.
         s.commander = NO_COMMANDER;
+        let boat = std::mem::replace(&mut s.boat, NO_BOAT);
         s.death_push = push;
         s.death_blast = blast;
         s.target = None;
@@ -1050,6 +1099,11 @@ impl World {
             self.score[k.team as usize] += 1;
         }
         self.events.push(Event::Kill { killer, victim });
+        if let Some(b) = self.boats.get_mut(boat as usize) {
+            for seat in b.seats.iter_mut().filter(|o| **o == victim) {
+                *seat = NO_BOAT;
+            }
+        }
     }
 }
 

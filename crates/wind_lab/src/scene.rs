@@ -31,6 +31,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
             reloading: s.reload_timer > 0.0,
             throwing: s.throw_timer > 0.0,
             aiming: s.aiming(),
+            in_boat: s.boat != wind_sim::boat::NO_BOAT,
         })
         .collect();
     let mut bullets = Vec::new();
@@ -88,6 +89,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
                 model: None,
             })
             .collect(),
+        boats: world.boats.iter().filter(|b| b.afloat()).map(|b| (b.pos, b.heading)).collect(),
         atmosphere: world.atmosphere.clone(),
     }
 }
@@ -141,6 +143,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
                 reloading: s.net.is_reloading(),
                 throwing: s.net.is_throwing(),
                 aiming: s.net.is_aiming(),
+                in_boat: s.net.in_boat(),
             })
         })
         .collect();
@@ -181,6 +184,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
         rings: Vec::new(),
         lines: Vec::new(),
         corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, push: c.push, blast: c.blast, model: None }).collect(),
+        boats: w.boats.iter().filter(|b| b.afloat).map(|b| w.boat_render(b, now)).collect(),
         atmosphere: w.atmosphere.clone(),
     })
 }

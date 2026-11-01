@@ -29,6 +29,7 @@ const FLAG_RELOADING: u8 = 4;
 const FLAG_PRONE: u8 = 8;
 const FLAG_THROWING: u8 = 16;
 const FLAG_AIMING: u8 = 32;
+const FLAG_BOAT: u8 = 64;
 
 /// Солдат в том виде, в каком он уходит по сети.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,9 @@ impl NetSoldier {
         }
         if s.aiming() {
             flags |= FLAG_AIMING;
+        }
+        if s.boat != wind_sim::boat::NO_BOAT {
+            flags |= FLAG_BOAT;
         }
         NetSoldier { x, y, facing: q_angle(s.facing, 8) as u8, flags }
     }
@@ -97,6 +101,11 @@ impl NetSoldier {
     /// Целится (стрелял в последнюю секунду) — оружие вперёд, а не поперёк груди.
     pub fn is_aiming(&self) -> bool {
         self.flags & FLAG_AIMING != 0
+    }
+
+    /// Сидит в лодке.
+    pub fn in_boat(&self) -> bool {
+        self.flags & FLAG_BOAT != 0
     }
 }
 
@@ -253,6 +262,13 @@ impl ServerReplica {
         for p in &world.points {
             w.write_bits(p.owner.map_or(0, |t| t as u32 + 1), 2);
             w.write_signed((p.progress * 127.0).round() as i32, 8);
+        }
+        // Лодки — все: их по одной-две на команду.
+        w.write_var(world.boats.len().min(MAX_BOATS) as u32);
+        for b in world.boats.iter().take(MAX_BOATS) {
+            write_pos(&mut w, b.pos);
+            w.write_bits(q_angle(b.heading, 8), 8);
+            w.write_bool(b.afloat());
         }
         write_round(&mut w, &world.round);
         w.write_bool(board.is_some());
@@ -434,6 +450,9 @@ fn write_self(w: &mut BitWriter, world: &World, id: u32) {
     if let Some(h) = me.hold {
         write_pos(w, h.at);
     }
+    let boat = world.boats.get(me.boat as usize);
+    w.write_bool(boat.is_some());
+    w.write_bool(boat.is_some_and(|b| b.seats[0] == id));
 }
 
 /// Больше бойцов своего отряда в снимке не передаём.
@@ -570,6 +589,19 @@ pub struct SelfState {
     pub xp: u32,
     pub squad: Vec<u32>,
     pub hold: Option<Vec2>,
+    /// В лодке и за рулём ли.
+    pub in_boat: bool,
+    pub driving: bool,
+}
+
+/// Лодка у клиента: где по последнему снимку и где была до него (рисуем между).
+#[derive(Clone, Debug)]
+pub struct RemoteBoat {
+    pub pos: Vec2,
+    pub prev: Vec2,
+    pub heading: f32,
+    pub prev_heading: f32,
+    pub afloat: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -670,6 +702,7 @@ pub struct RemoteWorld {
     pub map: Map,
     pub bases: [Vec2; 2],
     pub points: Vec<RemotePoint>,
+    pub boats: Vec<RemoteBoat>,
     pub soldiers: Vec<Option<RemoteSoldier>>,
     pub me: SelfState,
     pub score: [u32; 2],
@@ -734,6 +767,7 @@ impl RemoteWorld {
             map,
             bases: layout.bases,
             points,
+            boats: Vec::new(),
             me: SelfState::default(),
             score: [0; 2],
             tick: 0,
@@ -763,6 +797,12 @@ impl RemoteWorld {
     pub fn render_pos(&self, s: &RemoteSoldier, now: f64) -> Vec2 {
         let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
         s.prev.lerp(s.pos, t)
+    }
+
+    /// Где рисовать лодку и куда она смотрит.
+    pub fn boat_render(&self, b: &RemoteBoat, now: f64) -> (Vec2, f32) {
+        let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
+        (b.prev.lerp(b.pos, t), lerp_angle(b.prev_heading, b.heading, t))
     }
 
     /// Имя бойца: у игрока — его имя, у ИИ — номер.
@@ -819,6 +859,8 @@ impl RemoteWorld {
                 squad
             },
             hold: if r.read_bool()? { Some(read_pos(&mut r)?) } else { None },
+            in_boat: r.read_bool()?,
+            driving: r.read_bool()?,
         };
         let score = [r.read_var()?, r.read_var()?];
         let point_count = r.read_var()? as usize;
@@ -830,6 +872,11 @@ impl RemoteWorld {
             };
             let progress = r.read_signed(8)? as f32 / 127.0;
             points.push((owner, progress));
+        }
+        let boat_count = (r.read_var()? as usize).min(MAX_BOATS);
+        let mut boats = Vec::with_capacity(boat_count);
+        for _ in 0..boat_count {
+            boats.push((read_pos(&mut r)?, dq_angle(r.read_bits(8)?, 8), r.read_bool()?));
         }
         let round = read_round(&mut r)?;
         let board = if r.read_bool()? { Some(read_board(&mut r)?) } else { None };
@@ -981,6 +1028,17 @@ impl RemoteWorld {
         for (p, (owner, progress)) in self.points.iter_mut().zip(points) {
             p.owner = owner;
             p.progress = progress;
+        }
+        // Лодки: прежнее место — откуда плыть до нового (как у солдат).
+        if self.boats.len() != boats.len() {
+            self.boats = boats.iter().map(|&(pos, heading, afloat)| RemoteBoat { pos, prev: pos, heading, prev_heading: heading, afloat }).collect();
+        }
+        let t = (((now - self.snapshot_time) as f32) / self.dt()).clamp(0.0, 1.0);
+        for (b, (pos, heading, afloat)) in self.boats.iter_mut().zip(boats) {
+            let (shown, shown_heading) = (b.prev.lerp(b.pos, t), lerp_angle(b.prev_heading, b.heading, t));
+            let jump = !afloat || !b.afloat || pos.distance(shown) > 6.0;
+            (b.prev, b.prev_heading) = if jump { (pos, heading) } else { (shown, shown_heading) };
+            (b.pos, b.heading, b.afloat) = (pos, heading, afloat);
         }
 
         // Новый раунд: карта и точки вернутся сами (чанки и снимок), а тела и эффекты
@@ -1150,6 +1208,15 @@ fn read_board(r: &mut BitReader) -> Result<Vec<BoardEntry>, Truncated> {
             })
         })
         .collect()
+}
+
+/// Больше лодок в снимке не передаём.
+const MAX_BOATS: usize = 16;
+
+/// Угол между `a` и `b` по короткой дуге.
+fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
+    let d = (b - a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    a + d * t
 }
 
 #[cfg(test)]

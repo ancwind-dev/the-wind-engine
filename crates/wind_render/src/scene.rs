@@ -32,6 +32,8 @@ pub struct SoldierDraw {
     pub throwing: bool,
     /// Целится (стрелял в последнюю секунду): оружие вперёд, а не поперёк груди на бегу.
     pub aiming: bool,
+    /// Сидит в лодке — стоит на её полу, а не на дне.
+    pub in_boat: bool,
 }
 
 /// Модель, оружие и движение солдата, заданные явно.
@@ -77,6 +79,8 @@ pub struct DrawInput<'a> {
     /// Пули: (голова, скорость).
     pub bullets: &'a [(Vec2, Vec2)],
     pub grenades: &'a [Vec2],
+    /// Лодки на воде: (где, куда смотрит нос).
+    pub boats: &'a [(Vec2, f32)],
     /// Взрывы: (центр, радиус, возраст в секундах).
     pub blasts: &'a [(Vec2, f32, f32)],
     pub points: &'a [PointDraw],
@@ -166,6 +170,22 @@ impl Default for SceneBuilder {
             crumbled: Vec::new(),
             pose_override: None,
         }
+    }
+}
+
+/// Пол лодки на воде в точке `p` (лодка чуть качается на волне).
+fn boat_floor(map: &Map, p: Vec2, time: f32) -> f32 {
+    let water = map.water.unwrap_or_else(|| map.height_at(p));
+    water + crate::models::BOAT_DECK + (time * 2.1 + p.y * 0.7).sin() * 0.03
+}
+
+/// На какой высоте стоит солдат: на земле, а вплавь — у поверхности воды (над водой
+/// голова и плечи).
+fn stand_height(map: &Map, pos: Vec2) -> f32 {
+    let ground = map.height_at(pos);
+    match map.water {
+        Some(w) if w - ground > wind_sim::map::SWIM_DEPTH => ground.max(w - 1.25),
+        _ => ground,
     }
 }
 
@@ -298,7 +318,7 @@ impl SceneBuilder {
                         (pose, grip, None)
                     }
                 };
-                let at = to_3d(s.pos, input.map.height_at(s.pos));
+                let at = to_3d(s.pos, if s.in_boat { boat_floor(input.map, s.pos, input.time) } else { stand_height(input.map, s.pos) });
                 let lod = lod_at(at);
                 let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-s.facing);
                 by_char[model.mesh * LODS + lod].push(skin(bones.len(), s.team, false));
@@ -335,6 +355,18 @@ impl SceneBuilder {
             by_mesh[MeshId::Arm as usize].push(part(Vec3::new(0.0, 14.0, -4.5), 1.05));
             by_mesh[MeshId::Arm as usize].push(part(Vec3::new(0.0, 14.0, 4.5), 1.35));
             by_mesh[MeshId::Rifle as usize].push(part(Vec3::new(3.5, 10.5, 2.0), 0.0));
+        }
+
+        // Лодки — на воде, чуть покачиваются.
+        for &(p, heading) in input.boats {
+            if p.distance_squared(cam.target) > reach2 {
+                continue;
+            }
+            let roll = (input.time * 1.7 + p.x).sin() * 0.03;
+            let m = Mat4::from_translation(to_3d(p, boat_floor(input.map, p, input.time) - 2.0 * crate::models::BOAT_VOXEL))
+                * Mat4::from_rotation_y(-heading)
+                * Mat4::from_rotation_x(roll);
+            by_mesh[MeshId::Boat as usize].push(Instance { model: m.to_cols_array_2d(), tint: [1.0, 1.0, 1.0, 0.5] });
         }
 
         let cube = &mut by_mesh[MeshId::Cube as usize];

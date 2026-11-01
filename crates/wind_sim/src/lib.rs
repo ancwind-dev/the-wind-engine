@@ -20,6 +20,7 @@ pub mod squad;
 pub mod suppression;
 pub mod world;
 
+pub mod boat;
 mod ai;
 mod combat;
 

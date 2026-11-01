@@ -32,6 +32,12 @@ impl Minimap {
             let mut pixels = Vec::with_capacity(w * h);
             for i in 0..w * h {
                 let c = match map.solid[i] {
+                    // Вода: мелко — светлее, глубоко — темнее.
+                    EMPTY if map.water.is_some() && water_depth(map, i) > 0.0 => {
+                        let k = (water_depth(map, i) / 1.5).min(1.0);
+                        let lerp = |a: f32, b: f32| (a + (b - a) * k) as u8;
+                        Color32::from_rgb(lerp(110.0, 40.0), lerp(190.0, 105.0), lerp(210.0, 160.0))
+                    }
                     EMPTY => {
                         let g = GROUND[(map.ground.get(i).copied().unwrap_or(0) as usize).min(GROUND.len() - 1)];
                         Color32::from_rgb(g[0], g[1], g[2])
@@ -115,3 +121,10 @@ impl Minimap {
         }
     }
 }
+
+/// Глубина воды в середине клетки `i`, м.
+fn water_depth(map: &Map, i: usize) -> f32 {
+    let w = map.width as usize;
+    map.water_depth(wind_sim::Vec2::new((i % w) as f32 + 0.5, (i / w) as f32 + 0.5))
+}
+

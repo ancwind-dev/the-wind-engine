@@ -32,7 +32,14 @@ pub struct Map {
     pub ground: Vec<u8>,
     /// Растёт при изменении покрытия земли.
     pub ground_revision: u64,
+    /// Уровень воды, м: где земля ниже — вода. `None` — воды на карте нет.
+    pub water: Option<f32>,
 }
+
+/// Глубже этого солдат плывёт (медленно, не стреляет), а ИИ туда не ходит, м.
+pub const SWIM_DEPTH: f32 = 1.1;
+/// Мельче этого вода не мешает идти, м.
+pub const WADE_DEPTH: f32 = 0.3;
 
 /// Сторона чанка в клетках.
 pub const CHUNK: u32 = 32;
@@ -54,6 +61,7 @@ impl Map {
             heights: vec![0; ((width + 1) * (height + 1)) as usize],
             ground: vec![0; (width * height) as usize],
             ground_revision: 0,
+            water: None,
         }
     }
 
@@ -113,6 +121,33 @@ impl Map {
         let top = h00 + (h10 - h00) * fx;
         let bottom = h01 + (h11 - h01) * fx;
         top + (bottom - top) * fy
+    }
+
+    /// Глубина воды в точке, м (0 — сухо).
+    pub fn water_depth(&self, pos: Vec2) -> f32 {
+        self.water.map_or(0.0, |w| (w - self.height_at(pos)).max(0.0))
+    }
+
+    /// Глубокая вода в клетке (по её середине): там плывут, ИИ туда не ходит.
+    pub fn is_deep(&self, x: i32, y: i32) -> bool {
+        self.water.is_some() && self.water_depth(Vec2::new(x as f32 + 0.5, y as f32 + 0.5)) > SWIM_DEPTH
+    }
+
+    /// Глубокая вода по всем клеткам построчно — как [`Map::is_deep`], но разом и дёшево
+    /// (середина клетки — среднее её углов). Пусто, если воды на карте нет.
+    pub fn deep_mask(&self) -> Vec<bool> {
+        let Some(water) = self.water else { return Vec::new() };
+        // Глубже SWIM_DEPTH там, где сумма высот четырёх углов меньше этого.
+        let limit = (water - SWIM_DEPTH) * HEIGHT_SCALE * 4.0;
+        let (w, stride) = (self.width as usize, self.width as usize + 1);
+        let mut mask = Vec::with_capacity(w * self.height as usize);
+        for (top, bottom) in self.heights.chunks_exact(stride).zip(self.heights.chunks_exact(stride).skip(1)) {
+            for x in 0..w {
+                let sum = top[x] as u32 + top[x + 1] as u32 + bottom[x] as u32 + bottom[x + 1] as u32;
+                mask.push((sum as f32) < limit);
+            }
+        }
+        mask
     }
 
     /// Клетки чанка построчно (у края карты чанк может быть неполным).

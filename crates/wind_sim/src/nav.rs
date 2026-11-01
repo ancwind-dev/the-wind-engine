@@ -43,6 +43,12 @@ impl FlowField {
     /// Алгоритм Дейкстры с очередью из корзин (Dial): веса маленькие и целые,
     /// поэтому куча не нужна.
     pub fn compute(&mut self, map: &Map) {
+        self.compute_with(map, &map.deep_mask());
+    }
+
+    /// То же, но маска глубокой воды (`Map::deep_mask`) уже посчитана: в бою высоты и
+    /// вода не меняются, и мир держит её у себя.
+    pub fn compute_with(&mut self, map: &Map, deep: &[bool]) {
         self.topology_revision = map.topology_revision;
         self.dist.clear();
         self.dist.resize((map.width * map.height) as usize, UNREACHABLE);
@@ -50,6 +56,12 @@ impl FlowField {
         let Some(start) = map.index(tx, ty) else { return };
         if map.is_solid(tx, ty) {
             return;
+        }
+        // Глубокая вода — как стена: туда ИИ не ходит (плыть медленно и стрелять нельзя).
+        // Чтобы не проверять её на каждом шаге, глубокие клетки на время поиска «уже
+        // найдены» (0 — короче не бывает), а после него — недостижимы.
+        for i in deep_cells(deep) {
+            self.dist[i] = 0;
         }
 
         const BUCKETS: usize = 8; // больше максимального веса шага
@@ -83,6 +95,10 @@ impl FlowField {
             }
             current += 1;
         }
+        for i in deep_cells(deep) {
+            self.dist[i] = UNREACHABLE;
+        }
+        self.dist[start] = 0;
     }
 
     /// Куда идти из `pos`. `None`, если отсюда до цели не дойти.
@@ -94,6 +110,7 @@ impl FlowField {
         }
         let mut best = here;
         let mut best_cell = None;
+        // Глубокие клетки в поле недостижимы — их не выберем; а срезать угол у воды можно.
         for &(dx, dy, _) in &NEIGHBORS {
             if !can_step(map, x, y, dx, dy) {
                 continue;
@@ -114,4 +131,9 @@ impl FlowField {
 fn can_step(map: &Map, x: i32, y: i32, dx: i32, dy: i32) -> bool {
     !map.is_solid(x + dx, y + dy)
         && (dx == 0 || dy == 0 || (!map.is_solid(x + dx, y) && !map.is_solid(x, y + dy)))
+}
+
+/// Номера глубоких клеток по маске.
+fn deep_cells(deep: &[bool]) -> impl Iterator<Item = usize> + '_ {
+    deep.iter().enumerate().filter(|(_, d)| **d).map(|(i, _)| i)
 }

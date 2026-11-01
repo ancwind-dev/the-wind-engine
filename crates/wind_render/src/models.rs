@@ -19,9 +19,17 @@ pub enum MeshId {
     Leg,
     Rifle,
     Cube,
+    Boat,
 }
 
-pub const MESH_COUNT: usize = 6;
+pub const MESH_COUNT: usize = 7;
+
+/// Размер вокселя лодки, м.
+pub const BOAT_VOXEL: f32 = 0.12;
+/// Дно лодки ниже воды на столько, м; пол (по нему стоят сидящие) — над водой, на два
+/// вокселя выше дна: иначе вода рисуется поверх ног.
+pub const BOAT_SINK: f32 = 0.15;
+pub const BOAT_DECK: f32 = 2.0 * BOAT_VOXEL - BOAT_SINK;
 
 /// Часть солдата: имя файла, точка крепления в модели (в вокселях).
 pub struct Part {
@@ -126,6 +134,7 @@ pub fn build_meshes(models_dir: Option<&Path>) -> (Vec<Mesh>, Vec<String>) {
         meshes.push(greedy_mesh(&vox, part.pivot, SOLDIER_VOXEL));
     }
     meshes.push(cube());
+    meshes.push(greedy_mesh(&boat(), Vec3::new(18.0, 0.0, 7.5), BOAT_VOXEL));
     (meshes, notes)
 }
 
@@ -139,6 +148,47 @@ pub fn export(models_dir: &Path) -> Result<Vec<String>, String> {
             Ok(path.display().to_string())
         })
         .collect()
+}
+
+/// Штурмовая лодка: 36 × 15 вокселей (4,3 × 1,8 м), нос — вперёд (+x), острый; борта —
+/// толстые, светлее по верху; внутри — пол; на корме — мотор.
+fn boat() -> VoxelModel {
+    const HULL: u8 = 1;
+    const RIM: u8 = 2;
+    const FLOOR: u8 = 3;
+    const MOTOR: u8 = 4;
+    const SEAT: u8 = 5;
+    let mut m = VoxelModel::new([36, 8, 15]);
+    m.palette[HULL as usize] = [70, 78, 58, 255];
+    m.palette[RIM as usize] = [98, 106, 82, 255];
+    m.palette[FLOOR as usize] = [52, 56, 46, 255];
+    m.palette[MOTOR as usize] = [38, 38, 40, 255];
+    m.palette[SEAT as usize] = [84, 70, 52, 255];
+    for x in 3..36i32 {
+        // Ширина: на корме и в середине — полная, к носу сужается.
+        let t = ((x as f32 - 24.0) / 12.0).clamp(0.0, 1.0);
+        let half = 7.5 * (1.0 - t * t * 0.85);
+        let (z0, z1) = ((7.5 - half).round() as i32, (7.5 + half).round() as i32);
+        // Нос чуть приподнят.
+        let lift = if x > 30 { 1 } else { 0 };
+        for z in z0..z1 {
+            m.set(x, lift, z, HULL);
+            let side = z < z0 + 2 || z + 2 >= z1 || x < 5;
+            for y in 1 + lift..4 + lift {
+                if side {
+                    m.set(x, y, z, if y == 3 + lift { RIM } else { HULL });
+                } else if y == 1 + lift {
+                    m.set(x, y, z, FLOOR);
+                }
+            }
+        }
+    }
+    // Банка поперёк — сиденье в середине.
+    m.fill([17, 2, 2], [19, 3, 13], SEAT);
+    // Мотор на корме: колонка в воду и кожух над бортом.
+    m.fill([0, 0, 6], [3, 3, 9], MOTOR);
+    m.fill([0, 3, 5], [4, 7, 10], MOTOR);
+    m
 }
 
 /// Единичный белый куб с центром в начале координат — для пуль, гранат, взрывов.

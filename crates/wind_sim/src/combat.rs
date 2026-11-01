@@ -18,6 +18,7 @@ pub(crate) fn fire(world: &mut World) {
     let map = &world.map;
     let sup = &world.config.suppression;
     let sight = &world.config.sight;
+    let boats = &world.boats;
 
     let shots: Vec<Projectile> = world
         .soldiers
@@ -25,6 +26,10 @@ pub(crate) fn fire(world: &mut World) {
         .enumerate()
         .filter_map(|(i, s)| {
             if !s.alive {
+                return None;
+            }
+            // Вплавь и за рулём лодки не стреляют.
+            if s.swimming(map) || boats.get(s.boat as usize).is_some_and(|b| b.seats[0] == i as u32) {
                 return None;
             }
             let kit = &arsenal.teams[s.team as usize & 1][s.kit as usize];
@@ -419,6 +424,7 @@ fn explode(world: &mut World, pos: Vec2, shooter: u32, salt: u32, blast: &BlastS
     }
     world.map.damage_circle(pos, blast.wall_damage_radius, blast.wall_damage);
     world.events.push(Event::Explosion { pos, radius: blast.radius });
+    world.sink_boats(pos);
 }
 
 /// Задевает ли отрезок `a→b` круг. Возвращает долю пути до ближайшей к центру точки.

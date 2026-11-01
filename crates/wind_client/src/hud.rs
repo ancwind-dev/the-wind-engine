@@ -66,6 +66,21 @@ pub fn draw(painter: &Painter, rect: Rect, view: &View, status: Option<String>, 
         );
     }
     rank_and_squad(painter, bar, view);
+    // Лодка: как сесть и как править.
+    let hint = if me.in_boat {
+        Some(if me.driving { "За рулём: WASD — править, V — выйти" } else { "В лодке: стрелять можно, V — выйти" })
+    } else if me.near_boat && me.alive {
+        Some("V — сесть в лодку")
+    } else {
+        None
+    };
+    if let Some(hint) = hint {
+        let at = bar.center_top() - vec2(0.0, 70.0);
+        let galley = painter.layout_no_wrap(hint.to_owned(), FontId::proportional(14.0), TEXT);
+        let r = Rect::from_center_size(at, galley.size() + vec2(20.0, 10.0));
+        painter.rect_filled(r, 6, PANEL);
+        painter.galley(r.center() - galley.size() / 2.0, galley, TEXT);
+    }
 }
 
 /// Над полоской солдата: звание и опыт до следующего, свой отряд и приказ.

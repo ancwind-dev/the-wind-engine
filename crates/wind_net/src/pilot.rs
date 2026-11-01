@@ -57,4 +57,10 @@ impl Pilot {
     pub fn pos(&self) -> Option<Vec2> {
         self.pos
     }
+
+    /// Солдата везут (лодка): он там, где по серверу, и ничего не заявляет.
+    pub fn follow(&mut self, server: Option<Vec2>) {
+        self.pos = server;
+        self.still = 0.0;
+    }
 }

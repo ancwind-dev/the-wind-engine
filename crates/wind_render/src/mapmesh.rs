@@ -224,11 +224,36 @@ pub fn terrain_chunk(map: &Map, chunk: usize) -> Mesh {
     mesh
 }
 
+/// Вода чанка: плоскость на уровне воды над клетками, где хоть один угол ниже уровня.
+/// Где земля выше воды, плоскость уходит под землю — её прячет буфер глубины.
+/// `None` — воды в чанке нет.
+pub fn water_chunk(map: &Map, chunk: usize) -> Option<Mesh> {
+    let level = map.water?;
+    let mut mesh = Mesh::default();
+    let (x0, y0, w, h) = map.chunk_rect(chunk);
+    for y in y0 as i32..(y0 + h) as i32 {
+        for x in x0 as i32..(x0 + w) as i32 {
+            let low = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)].iter().map(|&(cx, cy)| map.corner_height(cx, cy)).fold(f32::MAX, f32::min);
+            if low >= level {
+                continue;
+            }
+            let base = mesh.vertices.len() as u32;
+            for (cx, cy) in [(x, y), (x, y + 1), (x + 1, y + 1), (x + 1, y)] {
+                mesh.vertices.push(Vertex { pos: [cx as f32, level, cy as f32], normal: [0, 127, 0, 0], color: [255, 255, 255, 255] });
+            }
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    (!mesh.indices.is_empty()).then_some(mesh)
+}
+
 /// Меши одного чанка карты.
 pub struct ChunkMeshes {
     /// `None` — стен в чанке нет.
     pub walls: Option<Mesh>,
     pub terrain: Mesh,
+    /// `None` — воды в чанке нет.
+    pub water: Option<Mesh>,
 }
 
 /// Помнит, какие версии чанков уже превращены в меши.
@@ -241,6 +266,8 @@ pub struct MapMesher {
     /// Прочность целой стены и руины (см. [`Walls`]).
     full: Vec<u8>,
     rubble: Vec<u8>,
+    /// Уровень воды в прошлый раз: сменился (редактор) — перестраиваем всё.
+    water: Option<f32>,
 }
 
 /// Что поменялось в мешах карты с прошлого кадра.
@@ -273,9 +300,10 @@ impl MapMesher {
     /// `key` различает карты (например, локальную и сетевую).
     pub fn update(&mut self, map: &Map, key: u64) -> MapUpdate {
         let n = map.chunk_revisions.len();
-        let reset = key != self.key || self.seen.len() != n;
+        let reset = key != self.key || self.seen.len() != n || map.water != self.water;
         if reset {
             self.key = key;
+            self.water = map.water;
             self.seen = vec![u32::MAX; n];
             self.prev = map.solid.clone();
             self.full = map.solid.clone();
@@ -339,7 +367,7 @@ impl MapMesher {
                 self.seen[c] = map.chunk_revisions[c];
                 let mesh = mesh_chunk(map, &walls, c);
                 let terrain = terrain_chunk(map, c);
-                (c as u32, ChunkMeshes { walls: (!mesh.indices.is_empty()).then_some(mesh), terrain })
+                (c as u32, ChunkMeshes { walls: (!mesh.indices.is_empty()).then_some(mesh), terrain, water: water_chunk(map, c) })
             })
             .collect();
         MapUpdate { reset, chunks, broken }

@@ -35,6 +35,10 @@ pub struct Me {
     pub squad: Vec<u32>,
     pub squad_max: u32,
     pub hold: Option<Vec2>,
+    /// В лодке, за рулём, рядом с лодкой, где есть место (для подсказки «V — сесть»).
+    pub in_boat: bool,
+    pub driving: bool,
+    pub near_boat: bool,
 }
 
 impl Me {
@@ -109,6 +113,8 @@ pub struct View {
     pub round: RoundView,
     /// Как называется сервер (в своей игре — пусто).
     pub server_name: String,
+    /// Лодки на воде: (где, куда смотрит нос).
+    pub boats: Vec<(Vec2, f32)>,
 }
 
 /// Оба варианта большие, а `Source` переезжает при смене боя — держим их в куче.
@@ -255,6 +261,25 @@ impl Source {
         }
     }
 
+    /// Свой солдат в лодке: его везёт лодка, а не клиент.
+    pub fn own_in_boat(&self) -> bool {
+        match self {
+            Source::Local(l) => l.me.is_some_and(|i| l.world.soldiers[i as usize].boat != wind_sim::boat::NO_BOAT),
+            Source::Remote(c) => c.world.as_ref().is_some_and(|w| w.me.in_boat),
+        }
+    }
+
+    /// Где свой солдат по серверу — сглаженно, как рисуются остальные (для лодки).
+    pub fn own_drawn_pos(&self) -> Option<Vec2> {
+        match self {
+            Source::Local(l) => l.me.map(|i| &l.world.soldiers[i as usize]).filter(|s| s.alive).map(|s| s.drawn_pos(l.accumulator)),
+            Source::Remote(c) => {
+                let w = c.world.as_ref()?;
+                w.my_soldier().filter(|_| w.me.alive).map(|s| w.render_pos(s, c.now()))
+            }
+        }
+    }
+
     pub fn own_id(&self) -> Option<u32> {
         match self {
             Source::Local(l) => l.me,
@@ -358,6 +383,7 @@ fn local_view(l: &Local) -> View {
                 reloading: s.reload_timer > 0.0,
                 throwing: s.throw_timer > 0.0,
                 aiming: s.aiming(),
+                in_boat: s.boat != wind_sim::boat::NO_BOAT,
             })
             .collect(),
         blasts: l.blasts.clone(),
@@ -392,10 +418,15 @@ fn local_view(l: &Local) -> View {
             kills: me.kills,
             squad: w.squad_of(l.me.unwrap_or(0)),
             hold: me.hold.map(|h| h.at),
+            in_boat: me.boat != wind_sim::boat::NO_BOAT,
+            driving: w.boats.get(me.boat as usize).is_some_and(|b| Some(b.seats[0]) == l.me),
+            near_boat: w.boats.iter().any(|b| b.afloat() && b.seats.contains(&wind_sim::boat::NO_BOAT) && b.pos.distance(me.pos) < wind_sim::boat::BOARD_RANGE),
             ..Default::default()
         }
         .ranked(&w.config.ranks.ranks, me.xp);
     }
+    // Лодки — как солдаты: чуть вперёд по ходу, на долю тика.
+    v.boats = w.boats.iter().filter(|b| b.afloat()).map(|b| (b.pos + b.forward() * b.speed * l.accumulator, b.heading)).collect();
     let name = |i: u32| if Some(i) == l.me { "Ты".to_string() } else { format!("#{i}") };
     v.kill_feed = l
         .feed
@@ -465,6 +496,7 @@ fn remote_view(c: &NetClient) -> View {
                     reloading: s.net.is_reloading(),
                     throwing: s.net.is_throwing(),
                     aiming: s.net.is_aiming(),
+                    in_boat: s.net.in_boat(),
                 })
             })
             .collect(),
@@ -491,9 +523,13 @@ fn remote_view(c: &NetClient) -> View {
             kills: w.me.kills,
             squad: w.me.squad.clone(),
             hold: w.me.hold,
+            in_boat: w.me.in_boat,
+            driving: w.me.driving,
+            near_boat: w.my_soldier().is_some_and(|s| w.boats.iter().any(|b| b.afloat && b.pos.distance(s.pos) < wind_sim::boat::BOARD_RANGE)),
             ..Default::default()
         }
         .ranked(&w.welcome.ranks, w.me.xp),
+        boats: w.boats.iter().filter(|b| b.afloat).map(|b| w.boat_render(b, now)).collect(),
         score: w.score,
         kill_feed: w
             .kill_feed

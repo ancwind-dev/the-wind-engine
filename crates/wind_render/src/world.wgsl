@@ -576,3 +576,81 @@ fn fs_post(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let m = line * ao * v;
     return vec4<f32>(m, m, m, 1.0);
 }
+
+// --- Вода ----------------------------------------------------------------------------
+// Плоскость на уровне воды, прозрачная. Что под ней (дно, стены, солдаты) — из прохода
+// нормалей и глубины: по разнице глубин узнаём, сколько воды до дна или до предмета.
+// Мелко — светлая и прозрачная, глубже — темнее и гуще; совсем у дна или у предмета —
+// пенная кайма с рваным краем, чуть дальше — вторая, тоньше (как на референсе Артёма);
+// по воде бегут светлые полосы течения. Рябь — из шума, с бликом солнца.
+
+struct WOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+};
+
+@vertex
+fn vs_water(v: VIn) -> WOut {
+    var out: WOut;
+    out.world = v.pos;
+    out.clip = g.view_proj * vec4<f32>(v.pos, 1.0);
+    return out;
+}
+
+// Высота ряби (условная): два слоя шума, бегущих в разные стороны.
+fn water_wave(p: vec2<f32>, t: f32) -> f32 {
+    return noise(p * 0.55 + vec2<f32>(t * 0.35, t * 0.22)) * 0.6 + noise(p * 1.4 - vec2<f32>(t * 0.27, -t * 0.31)) * 0.4;
+}
+
+@fragment
+fn fs_water(in: WOut) -> @location(0) vec4<f32> {
+    let t = g.params.y;
+    let p = in.world.xz;
+    let view_dir = normalize(in.world - g.eye.xyz);
+
+    // Сколько воды под этой точкой: по лучу — до того, что видно под водой, и по вертикали.
+    let px = vec2<i32>(floor(in.clip.xy - g.screen.xy));
+    let below = nd_at(px).w;
+    let surface = -(g.view * vec4<f32>(in.world, 1.0)).z;
+    var depth = 40.0;
+    if (below > 0.0) {
+        depth = max(below - surface, 0.0) * abs(view_dir.y);
+    }
+
+    // Рябь: нормаль по наклону шума.
+    let e = 0.08;
+    let dx = water_wave(p + vec2<f32>(e, 0.0), t) - water_wave(p - vec2<f32>(e, 0.0), t);
+    let dz = water_wave(p + vec2<f32>(0.0, e), t) - water_wave(p - vec2<f32>(0.0, e), t);
+    let n = normalize(vec3<f32>(-dx * 2.2, 1.0, -dz * 2.2));
+
+    // Цвет по глубине (sRGB): мелко — бирюза, глубоко — синева.
+    let k = 1.0 - exp(-depth * 1.5);
+    let shallow = vec3<f32>(0.52, 0.86, 0.92);
+    let deep = vec3<f32>(0.12, 0.40, 0.60);
+    let albedo = to_linear(mix(shallow, deep, k));
+    let sun = max(dot(n, g.sun_dir.xyz), 0.0);
+    var c = albedo * (g.ambient_sky.rgb * 1.1 + g.sun_color.rgb * (0.35 + 0.45 * sun));
+    // Под острым углом вода светлее — отражает небо.
+    let fresnel = pow(1.0 - max(dot(-view_dir, n), 0.0), 4.0);
+    c = mix(c, to_linear(vec3<f32>(0.78, 0.92, 1.0)) * g.ambient_sky.rgb * 1.6, fresnel * 0.45);
+    // Блик солнца.
+    let h = normalize(g.sun_dir.xyz - view_dir);
+    let spec = pow(max(dot(n, h), 0.0), 140.0) * 0.9;
+    var col = to_srgb(c) + vec3<f32>(spec);
+
+    // Пена: кайма у дна и у предметов — ширина гуляет по шуму, край рваный.
+    let fn1 = noise(p * 2.6 + vec2<f32>(t * 0.45, -t * 0.3));
+    let fn2 = noise(p * 5.5 - vec2<f32>(t * 0.6, t * 0.2));
+    let edge = 0.035 + 0.045 * fn1;
+    let foam = 1.0 - smoothstep(edge * 0.5, edge, depth - (fn2 - 0.5) * 0.02);
+    // Вторая кайма — тоньше, чуть дальше, медленно дышит.
+    let ring_at = edge + 0.07 + 0.015 * sin(t * 1.3 + fn1 * 6.0);
+    let ring = (1.0 - smoothstep(0.004, 0.014, abs(depth - ring_at))) * smoothstep(0.35, 0.55, fn2) * 0.7;
+    // Полосы течения: вытянутый шум, бежит вдоль x; на глубине, едва заметно.
+    let streak = smoothstep(0.84, 0.88, noise(vec2<f32>(p.x * 0.3 - t * 0.5, p.y * 2.4))) * 0.18 * smoothstep(0.3, 1.2, depth);
+    let white = max(max(foam, ring), streak);
+    col = mix(col, vec3<f32>(0.88, 0.98, 1.0), white);
+
+    let alpha = clamp(max(mix(0.4, 0.97, k), white) + spec * 0.5, 0.0, 1.0);
+    return vec4<f32>(fogged(col, in.world), alpha);
+}

@@ -178,7 +178,8 @@ pub struct WorldRenderer {
     capacity: usize,
     identity: wgpu::Buffer,
     /// Чанк карты: стены (если есть) и земля.
-    chunks: HashMap<u32, (Option<GpuMesh>, GpuMesh)>,
+    /// Меши чанков карты: стены, земля, вода.
+    chunks: HashMap<u32, (Option<GpuMesh>, GpuMesh, Option<GpuMesh>)>,
     batches: Vec<(usize, u32, u32)>,
     visible: Vec<u32>,
     /// Свои солдаты и оружие: тени — гранями, картинка — точками, как у RWR.
@@ -200,6 +201,7 @@ pub struct WorldRenderer {
     nd_voxel: wgpu::RenderPipeline,
     nd_char: wgpu::RenderPipeline,
     post: wgpu::RenderPipeline,
+    water: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     /// Пыль и дым: прозрачные, рисуются последними.
     particles: wgpu::RenderPipeline,
@@ -651,6 +653,24 @@ impl WorldRenderer {
             cache: None,
         });
 
+        // Вода: прозрачная, глубину не пишет (видно то, что под ней), рисуется после обводки.
+        let water = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("water"),
+            layout: Some(&post_pipeline_layout),
+            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_water"), compilation_options: Default::default(), buffers: &layouts },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(depth(false, Default::default())),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_water"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: color_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // Пыль и дым: квадрат из 6 вершин на клуб, прозрачность, без записи глубины.
         const PARTICLE_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x4];
         let particles = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -759,6 +779,7 @@ impl WorldRenderer {
             nd_voxel,
             nd_char,
             post,
+            water,
             post_layout,
             particles,
             particle_buffer: particle_buffer(device, particle_capacity),
@@ -778,7 +799,8 @@ impl WorldRenderer {
             for (chunk, meshes) in pending.chunks.drain(..) {
                 let walls = meshes.walls.map(|m| GpuMesh::new(device, &m, "map walls"));
                 let terrain = GpuMesh::new(device, &meshes.terrain, "map terrain");
-                self.chunks.insert(chunk, (walls, terrain));
+                let water = meshes.water.map(|m| GpuMesh::new(device, &m, "map water"));
+                self.chunks.insert(chunk, (walls, terrain, water));
             }
             if let Some((w, h, cells)) = pending.ground.take() {
                 let size = self.ground_texture.size();
@@ -906,7 +928,7 @@ impl WorldRenderer {
         pass.set_pipeline(&self.nd_voxel);
         pass.set_vertex_buffer(1, self.identity.slice(..));
         for chunk in &self.visible {
-            if let Some((_, terrain)) = self.chunks.get(chunk) {
+            if let Some((_, terrain, _)) = self.chunks.get(chunk) {
                 terrain.draw(&mut pass, 0..1);
             }
         }
@@ -932,7 +954,7 @@ impl WorldRenderer {
         pass.set_bind_group(1, &self.ground_bind, &[]);
         pass.set_vertex_buffer(1, self.identity.slice(..));
         for chunk in &self.visible {
-            if let Some((_, terrain)) = self.chunks.get(chunk) {
+            if let Some((_, terrain, _)) = self.chunks.get(chunk) {
                 terrain.draw(pass, 0..1);
             }
         }
@@ -947,6 +969,18 @@ impl WorldRenderer {
             pass.set_pipeline(&self.post);
             pass.set_bind_group(1, &nd.bind, &[]);
             pass.draw(0..3, 0..1);
+        }
+        // Вода — после обводки (контуры под водой — под ней) и до дыма. Глубину под водой
+        // берёт из прохода нормалей и глубины.
+        if let Some(nd) = &self.nd {
+            pass.set_pipeline(&self.water);
+            pass.set_bind_group(1, &nd.bind, &[]);
+            pass.set_vertex_buffer(1, self.identity.slice(..));
+            for chunk in &self.visible {
+                if let Some((_, _, Some(water))) = self.chunks.get(chunk) {
+                    water.draw(pass, 0..1);
+                }
+            }
         }
         // Пыль и дым — после обводки: контуры стен не должны просвечивать сквозь дым.
         if self.particle_count > 0 {
@@ -974,7 +1008,7 @@ impl WorldRenderer {
     fn draw_geometry(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_vertex_buffer(1, self.identity.slice(..));
         for chunk in &self.visible {
-            if let Some((Some(walls), _)) = self.chunks.get(chunk) {
+            if let Some((Some(walls), _, _)) = self.chunks.get(chunk) {
                 walls.draw(pass, 0..1);
             }
         }

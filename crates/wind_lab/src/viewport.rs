@@ -28,6 +28,8 @@ pub struct SceneSoldier {
     pub reloading: bool,
     pub throwing: bool,
     pub aiming: bool,
+    /// Сидит в лодке.
+    pub in_boat: bool,
 }
 
 pub struct ScenePoint {
@@ -79,6 +81,8 @@ pub struct Scene<'a> {
     pub lines: Vec<(Vec2, Vec2)>,
     /// Убитые (для 3D): лежат, пока не возродятся.
     pub corpses: Vec<wind_render::CorpseDraw>,
+    /// Лодки на воде: (где, куда смотрит нос).
+    pub boats: Vec<(Vec2, f32)>,
     /// Атмосфера карты (для 3D).
     pub atmosphere: wind_sim::atmosphere::Atmosphere,
 }
@@ -144,8 +148,8 @@ pub struct Viewport {
     generation: u64,
     last_frame: std::time::Instant,
     texture: Option<TextureHandle>,
-    /// Карта, нарисованная в текстуре: адрес в памяти и ревизия.
-    texture_key: (usize, u64, u64),
+    /// Карта, нарисованная в текстуре: адрес в памяти, ревизии и уровень воды.
+    texture_key: (usize, u64, u64, Option<u32>),
     framed: bool,
 }
 
@@ -165,7 +169,7 @@ impl Viewport {
             generation: 0,
             last_frame: std::time::Instant::now(),
             texture: None,
-            texture_key: (0, u64::MAX, 0),
+            texture_key: (0, u64::MAX, 0, None),
             framed: false,
         }
     }
@@ -173,7 +177,7 @@ impl Viewport {
     /// Новый мир — заново подгоняем вид и перерисовываем карту.
     pub fn reset(&mut self) {
         self.framed = false;
-        self.texture_key = (0, u64::MAX, 0);
+        self.texture_key = (0, u64::MAX, 0, None);
         self.generation += 1;
     }
 
@@ -185,7 +189,7 @@ impl Viewport {
     /// Перестроить карту (2D-текстуру и 3D-меши), не трогая камеру.
     /// 3D-отрисовщик один на всё окно и помнит только последнюю показанную карту.
     pub fn refresh_map(&mut self) {
-        self.texture_key = (0, u64::MAX, 0);
+        self.texture_key = (0, u64::MAX, 0, None);
         self.generation += 1;
     }
 
@@ -321,6 +325,7 @@ impl Viewport {
                 reloading: s.reloading,
                 throwing: s.throwing,
                 aiming: s.aiming,
+                in_boat: s.in_boat,
             })
             .collect();
         let bullets: Vec<(Vec2, Vec2)> = scene.bullets.iter().map(|&(tail, head)| (head, head - tail)).collect();
@@ -343,6 +348,7 @@ impl Viewport {
             marker: scene.selected.as_ref().map(|s| s.pos),
             rings: &scene.rings,
             corpses: &scene.corpses,
+            boats: &scene.boats,
             own_team: None,
             atmosphere: &scene.atmosphere,
             viewport_px: {
@@ -599,7 +605,7 @@ impl Viewport {
     }
 
     fn update_texture(&mut self, ctx: &egui::Context, map: &Map) {
-        let key = (map as *const Map as usize, map.revision, map.ground_revision);
+        let key = (map as *const Map as usize, map.revision, map.ground_revision, map.water.map(f32::to_bits));
         if self.texture.is_some() && self.texture_key == key {
             return;
         }
@@ -619,7 +625,14 @@ fn map_image(map: &Map) -> ColorImage {
     let mut pixels = Vec::with_capacity(map.solid.len());
     for (i, &hp) in map.solid.iter().enumerate() {
         let (x, y) = (i as i32 % w, i as i32 / w);
+        let depth = map.water_depth(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
         let color = match hp {
+            // Вода: мелко — светлее, глубоко — темнее.
+            EMPTY if depth > 0.0 => {
+                let k = (depth / 1.5).min(1.0);
+                let lerp = |a: f32, b: f32| (a + (b - a) * k) as u8;
+                Color32::from_rgb(lerp(110.0, 40.0), lerp(190.0, 105.0), lerp(210.0, 160.0))
+            }
             EMPTY => {
                 let base = GROUND_2D[(map.ground[i] as usize).min(GROUND_2D.len() - 1)];
                 // Наклон по углам клетки: склоны к свету светлее, от света — темнее.
