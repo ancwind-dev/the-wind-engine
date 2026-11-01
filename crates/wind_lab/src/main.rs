@@ -2,6 +2,9 @@
 //! или подключаемся к серверу и играем за солдата.
 //!
 //! cargo run --release -p wind_lab
+//! cargo run --release -p wind_lab -- --import-mocap запись.bvh run "источник"
+//!     — круг шага из записи движений в data/animations/run.ron (с кадрами
+//!       `from to` после источника — действие целиком, не круг)
 
 mod editor;
 mod editor_ui;
@@ -34,6 +37,17 @@ const INPUT_RATE: f32 = 30.0;
 const MSAA: u32 = 4;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--import-mocap") {
+        match import_mocap(&args[2..]) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("The Wind Engine — Лаборатория")
@@ -1156,6 +1170,31 @@ fn with_settings(base: &SimConfig, s: &MatchSettings) -> SimConfig {
     config.soldiers_per_team = s.soldiers_per_team;
     config.capture_points = s.capture_points;
     config
+}
+
+/// Запись движений (BVH) — в клип `data/animations/<имя>.ron` (см. `wind_render::mocap`).
+/// Аргументы: файл, имя клипа, источник и, для действия, кадры `from to`.
+fn import_mocap(args: &[String]) -> Result<String, String> {
+    let [file, name, source, rest @ ..] = args else {
+        return Err("нужно: --import-mocap файл.bvh имя \"источник\" [from to]".into());
+    };
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+    let bvh = wind_render::mocap::Bvh::parse(&text)?;
+    let clip = match rest {
+        [from, to] => {
+            let f = |v: &String| v.parse::<usize>().map_err(|_| format!("не номер кадра: {v}"));
+            wind_render::mocap::Clip::action_from(&bvh, f(from)?, f(to)?, source)?
+        }
+        [] => wind_render::mocap::Clip::cycle_from(&bvh, source)?,
+        _ => return Err("кадры — два числа: from to".into()),
+    };
+    let dir = find_config().with_file_name("animations");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join(format!("{name}.ron"));
+    let body = clip.to_ron()?;
+    let header = format!("// Клип «{name}» из записи движений. Источник: {source}.\n// Сделан командой wind_lab --import-mocap; оси наши: x — вперёд, y — вверх, z — вправо.\n");
+    std::fs::write(&path, header + &body).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(format!("{}: {} кадров, {:.2} с записи, путь за круг {:.2} длины ноги, пик на {:.0} %", path.display(), clip.frames.len(), clip.duration, clip.stride, clip.peak * 100.0))
 }
 
 /// `data/sim.ron` ищем от текущей папки, а если запустили не из корня — от корня проекта.

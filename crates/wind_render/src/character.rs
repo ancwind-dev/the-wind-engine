@@ -9,8 +9,10 @@
 //! по форме, остались только для теней.
 
 mod actions;
+mod gait;
 
 pub use actions::{Acted, Action, ReloadKind, THROW_RELEASE, THROW_TIME};
+pub use gait::{Gait, Gaits};
 use crate::ragdoll::Rig;
 use crate::rwr::{self, RwrModel, VOXEL};
 use wind_sim::arsenal::Arsenal;
@@ -85,6 +87,10 @@ pub struct CharModel {
     rest_body: Mat3,
     /// Тело для физики — когда солдата убьют.
     pub(crate) rig: Rig,
+    /// Шаг и бег из записей движений (`None` — процедурные).
+    pub gaits: Option<Gaits>,
+    /// Бросок гранаты из записи движений (`None` — процедурный).
+    pub throw: Option<Gait>,
 }
 
 pub struct WeaponModel {
@@ -156,7 +162,30 @@ impl CharacterSet {
                 teams[team].push((model, weapon));
             }
         }
+        // Шаг и бег из записей движений — на каждой модели с её длинами.
+        if let Some((walk, run)) = gait::load_clips(data_dir)? {
+            for m in &mut models {
+                m.gaits = m.gait(&walk).zip(m.gait(&run)).map(|(walk, run)| Gaits { walk, run });
+            }
+        }
+        if let Some(throw) = gait::load_action(data_dir, "throw")? {
+            for m in &mut models {
+                m.throw = m.gait(&throw);
+            }
+        }
         Ok(CharacterSet { meshes: builder.meshes, models, weapons, teams, team_names: arsenal.team_names.clone(), arsenal })
+    }
+
+    /// Радиан фазы шага на метр пути при скорости `speed`: по длине круга шага и бега
+    /// из записей движений (у всех моделей скелет один), а без них — `stride_rate`.
+    pub fn stride_rate(&self, speed: f32) -> f32 {
+        match self.models.first().and_then(|m| m.gaits.as_ref()) {
+            Some(g) => {
+                let stride = g.walk.stride + (g.run.stride - g.walk.stride) * run_share(speed);
+                std::f32::consts::TAU / stride.max(0.1)
+            }
+            None => stride_rate(speed),
+        }
     }
 
     /// Какая модель и оружие у солдата — тот же набор, что выбрала симуляция.
@@ -194,48 +223,19 @@ pub fn stride_rate(speed: f32) -> f32 {
 impl CharModel {
     /// Живой солдат: ноги шагают или бегут, руки держат оружие стволом вперёд.
     pub fn pose(&self, m: Motion) -> Pose {
-        let mut p = self.rest.clone();
-        let Some(j) = self.joints else { return p };
+        let Some(j) = self.joints else { return self.rest.clone() };
         let r = &self.rest;
         // Насколько солдат движется (0 — стоит) и насколько бежит.
         let moving = (m.speed / 1.2).clamp(0.0, 1.0);
         let run = run_share(m.speed);
         let dir = m.dir.normalize_or(Vec2::X);
-        let along = Vec3::new(dir.x, 0.0, dir.y);
         let ph = m.phase;
 
-        // Стопа ходит вперёд-назад: шагом размах — четверть круга (за полкруга опоры
-        // стопа проходит столько же, сколько тело, и не скользит), бегом — 17 вокселей:
-        // шаг длинный, но и часть круга обе ноги в воздухе.
-        let reach = (12.0 + 5.0 * run) * (m.speed / 2.0).min(1.0);
-        let lift = (3.0 + 5.0 * run) * moving;
-        // Корпус: шагом выше всего над опорной ногой, бегом — в полёте. Бегом наклонён
-        // вперёд по ходу и чуть поворачивается плечами навстречу шагу.
-        let bob = ((0.5 - ph.sin().abs()) * 1.0 * (1.0 - run) + (ph.sin().abs() - 0.6) * 2.4 * run) * moving;
-        let lean = (0.06 + 0.2 * run) * moving;
-        let twist = 0.12 * run * moving * ph.sin();
-        let hip_y = (r[j.hip[0]].y + r[j.hip[1]].y) * 0.5;
-        let upper = [j.head, j.neck, j.mid, j.shoulder[0], j.shoulder[1], j.elbow[0], j.elbow[1], j.hand[0], j.hand[1]];
-        for i in upper {
-            p[i] += along * (r[i].y - hip_y) * lean;
-            p[i].y += bob;
-        }
-        for i in [j.hip[0], j.hip[1]] {
-            p[i].y += bob;
-        }
-
-        // Ноги: стопа ходит по ходу движения по синусоиде и поднимается, пока идёт
-        // вперёд; бегом пятка подлетает раньше — позади.
-        for side in 0..2 {
-            let ph = ph + side as f32 * std::f32::consts::PI;
-            let hip = p[j.hip[side]];
-            let mut foot = r[j.foot[side]] + along * (ph.sin() * reach);
-            foot.y += (ph + 0.6 * run).cos().max(0.0) * lift;
-            let thigh = r[j.hip[side]].distance(r[j.knee[side]]);
-            let shin = r[j.knee[side]].distance(r[j.foot[side]]);
-            p[j.foot[side]] = foot;
-            p[j.knee[side]] = two_bone(hip, foot, thigh, shin, Vec3::X);
-        }
+        // Ноги и корпус — из записей движений (см. `gait`); без них — процедурно.
+        let (mut p, twist) = match self.gait_pose(m.speed, ph, dir) {
+            Some(p) => (p, 0.0),
+            None => (self.legs_procedural(m, j), 0.12 * run * moving * ph.sin()),
+        };
 
         // Руки: правая у приклада, левая на цевье, ствол вперёд — туда, куда смотрит
         // солдат. Бегом оружие чуть ниже, стволом немного вниз, и покачивается с плечами.
@@ -263,6 +263,49 @@ impl CharModel {
             let bend = Vec3::new(0.0, -1.0, 0.6 * out * side_sign(r[j.shoulder[side]].z));
             p[j.elbow[side]] = two_bone(shoulder, hand, upper, fore, bend);
             p[j.hand[side]] = shoulder + (hand - shoulder).clamp_length_max(upper + fore - 0.01);
+        }
+        p
+    }
+
+    /// Шаг без записей движений: стопы по синусоиде, корпус пружинит и наклоняется.
+    fn legs_procedural(&self, m: Motion, j: Joints) -> Pose {
+        let mut p = self.rest.clone();
+        let r = &self.rest;
+        let moving = (m.speed / 1.2).clamp(0.0, 1.0);
+        let run = run_share(m.speed);
+        let dir = m.dir.normalize_or(Vec2::X);
+        let along = Vec3::new(dir.x, 0.0, dir.y);
+        let ph = m.phase;
+        // Стопа ходит вперёд-назад: шагом размах — четверть круга (за полкруга опоры
+        // стопа проходит столько же, сколько тело, и не скользит), бегом — 17 вокселей:
+        // шаг длинный, но и часть круга обе ноги в воздухе.
+        let reach = (12.0 + 5.0 * run) * (m.speed / 2.0).min(1.0);
+        let lift = (3.0 + 5.0 * run) * moving;
+        // Корпус: шагом выше всего над опорной ногой, бегом — в полёте. Бегом наклонён
+        // вперёд по ходу и чуть поворачивается плечами навстречу шагу.
+        let bob = ((0.5 - ph.sin().abs()) * 1.0 * (1.0 - run) + (ph.sin().abs() - 0.6) * 2.4 * run) * moving;
+        let lean = (0.06 + 0.2 * run) * moving;
+        let hip_y = (r[j.hip[0]].y + r[j.hip[1]].y) * 0.5;
+        let upper = [j.head, j.neck, j.mid, j.shoulder[0], j.shoulder[1], j.elbow[0], j.elbow[1], j.hand[0], j.hand[1]];
+        for i in upper {
+            p[i] += along * (r[i].y - hip_y) * lean;
+            p[i].y += bob;
+        }
+        for i in [j.hip[0], j.hip[1]] {
+            p[i].y += bob;
+        }
+
+        // Ноги: стопа ходит по ходу движения по синусоиде и поднимается, пока идёт
+        // вперёд; бегом пятка подлетает раньше — позади.
+        for side in 0..2 {
+            let ph = ph + side as f32 * std::f32::consts::PI;
+            let hip = p[j.hip[side]];
+            let mut foot = r[j.foot[side]] + along * (ph.sin() * reach);
+            foot.y += (ph + 0.6 * run).cos().max(0.0) * lift;
+            let thigh = r[j.hip[side]].distance(r[j.knee[side]]);
+            let shin = r[j.knee[side]].distance(r[j.foot[side]]);
+            p[j.foot[side]] = foot;
+            p[j.knee[side]] = two_bone(hip, foot, thigh, shin, Vec3::X);
         }
         p
     }
@@ -416,7 +459,7 @@ impl Builder {
         let inv_mass: Vec<f32> = m.particles.iter().map(|p| p.inv_mass).collect();
         let torso = joints.map(|j| ([j.neck, j.mid, j.shoulder[0], j.shoulder[1], j.hip[0], j.hip[1]], j.head));
         let rig = Rig::new(&rest, &m.sticks, &inv_mass, torso);
-        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rig };
+        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rig, gaits: None, throw: None };
         model.rest_body = model.body_frame(&model.rest);
         model
     }
@@ -709,9 +752,12 @@ mod tests {
         };
         let reach = |v: &[Vec2]| v.iter().map(|f| f.length()).fold(0.0, f32::max);
         assert!(reach(&spread(4.5, Vec2::X)) > reach(&spread(2.0, Vec2::X)));
-        assert!(stride_rate(4.5) < stride_rate(2.0), "бегом круг шага длиннее");
+        assert!(set.stride_rate(4.5) < set.stride_rate(2.0), "бегом круг шага длиннее");
         // Идёт вправо — стопы ходят вправо-влево, а не вперёд-назад.
         let side = spread(2.0, Vec2::Y);
-        assert!(side.iter().all(|f| f.x.abs() < 1.0) && reach(&side) > 8.0);
+        let (along_x, along_z) = side.iter().fold((0.0f32, 0.0f32), |(x, z), f| (x.max(f.x.abs()), z.max(f.y.abs())));
+        assert!(along_z > 8.0 && along_z > along_x * 2.5, "вбок: размах вбок {along_z:.1}, вперёд {along_x:.1}");
+        // Из записей движений: у моделей есть шаг и бег.
+        assert!(set.models.iter().all(|m| m.gaits.is_some()), "клипы data/animations не подхватились");
     }
 }

@@ -6,6 +6,7 @@ pub mod character;
 mod decals;
 mod effects;
 pub mod mapmesh;
+pub mod mocap;
 pub mod models;
 pub mod ragdoll;
 pub mod renderer;

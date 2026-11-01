@@ -490,7 +490,8 @@ impl SceneBuilder {
         a.prone += (goal - a.prone).clamp(-dt * 3.0, dt * 3.0);
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };
         a.speed += (speed - a.speed) * 0.25;
-        a.phase += moved * stride_rate(a.speed);
+        // Круг шага — по записям движений, если они есть.
+        a.phase += moved * self.characters.as_ref().map_or_else(|| stride_rate(a.speed), |c| c.stride_rate(a.speed));
         // Направление шага — в осях солдата: вперёд по взгляду и вправо от него.
         if moved > 0.001 {
             let step = (s.pos - a.last) / moved;

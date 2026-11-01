@@ -172,6 +172,10 @@ impl CharModel {
     /// замахивается из-за плеча и бросает через верх, потом всё возвращается.
     fn throw(&self, mut p: Pose, j: Joints, t: f32, rest: Hold, fore_len: f32) -> Acted {
         let t = t.clamp(0.0, THROW_TIME);
+        // Бросок из записи движений, если есть (см. `throw_recorded`).
+        if let Some(acted) = self.throw_recorded(&mut p, j, t, rest, fore_len) {
+            return acted;
+        }
         // Поворот плеч вокруг поясницы: минус — правое плечо назад.
         let twist = if t < 0.12 {
             -0.5 * ramp(t, 0.0, 0.12)
@@ -213,6 +217,41 @@ impl CharModel {
         let hand = self.reach(&mut p, j, 0, right, Some(bend));
         // Граната в руке — когда рука ушла с оружия и до броска.
         Acted { pose: p, weapon: Some(hold.frame()), grenade: (t > 0.04 && t < THROW_RELEASE).then_some(hand) }
+    }
+
+    /// Бросок из записи движений (`data/animations/throw.ron`): корпус, плечи и правая
+    /// рука — из записи, приставленные к нашему тазу; ноги — как шли; винтовка — в левой
+    /// руке, как у процедурного броска. Время записи подогнано: замах — до выпуска на
+    /// `THROW_RELEASE`, доводка — до конца броска.
+    fn throw_recorded(&self, p: &mut Pose, j: Joints, t: f32, rest: Hold, fore_len: f32) -> Option<Acted> {
+        let clip = self.throw.as_ref()?;
+        let u = if t < THROW_RELEASE {
+            clip.peak * t / THROW_RELEASE
+        } else {
+            clip.peak + (1.0 - clip.peak) * (t - THROW_RELEASE) / (THROW_TIME - THROW_RELEASE)
+        };
+        let c = clip.at_clamped(u);
+        // Из записи — плавно в начале и в конце, чтобы войти из бега и вернуться к оружию.
+        let w = ramp(t, 0.0, 0.06) * (1.0 - ramp(t, THROW_TIME - 0.22, THROW_TIME));
+        let ours = (p[j.hip[0]] + p[j.hip[1]]) * 0.5;
+        let theirs = (c[j.hip[0]] + c[j.hip[1]]) * 0.5;
+        for i in [j.mid, j.neck, j.head, j.shoulder[0], j.shoulder[1], j.elbow[0], j.hand[0]] {
+            p[i] = p[i].lerp(ours + (c[i] - theirs), w);
+        }
+        // Винтовка — в левой руке, стволом вниз и вперёд, у левого бедра.
+        let lowered_left = p[j.hip[1]] + Vec3::new(7.0, 2.0, 1.5);
+        let lowered_aim = Vec3::new(0.7, -0.65, -0.25);
+        let lowered = Hold { grip: lowered_left - lowered_aim.normalize() * fore_len, aim: lowered_aim, roll: 0.3 };
+        let hold = rest.lerp(lowered, w);
+        self.reach(p, j, 1, hold.at(fore_len, 0.0), None);
+        // Правая рука: в записи — бросок; в начале и в конце — к рукояти.
+        if w < 1.0 {
+            let hand = p[j.hand[0]].lerp(hold.grip, 1.0 - w);
+            let bend = (p[j.elbow[0]] - (p[j.shoulder[0]] + hand) * 0.5).normalize_or(Vec3::new(0.0, -1.0, 0.6));
+            self.reach(p, j, 0, hand, Some(bend));
+        }
+        let hand = p[j.hand[0]];
+        Some(Acted { pose: p.clone(), weapon: Some(hold.frame()), grenade: (t > 0.04 && t < THROW_RELEASE).then_some(hand) })
     }
 }
 

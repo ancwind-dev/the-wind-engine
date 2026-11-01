@@ -249,8 +249,9 @@ impl Studio {
         let now = Instant::now();
         let dt = now.duration_since(self.last).as_secs_f32().min(0.1) * if self.paused { 0.0 } else { self.tempo };
         self.last = now;
-        // Фаза — как в игре: на метр пути `stride_rate` (шагом круг 1,5 м, бегом 2,5 м).
-        self.phase = (self.phase + self.speed * dt * wind_render::character::stride_rate(self.speed)) % std::f32::consts::TAU;
+        // Фаза — как в игре: на метр пути — по длине круга шага и бега.
+        let rate = self.characters.as_ref().map_or_else(|| wind_render::character::stride_rate(self.speed), |c| c.stride_rate(self.speed));
+        self.phase = (self.phase + self.speed * dt * rate) % std::f32::consts::TAU;
         if let Some(age) = &mut self.dead {
             *age += dt;
         }
