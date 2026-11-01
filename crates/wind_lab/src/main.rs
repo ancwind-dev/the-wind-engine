@@ -6,6 +6,7 @@
 //!     — круг шага из записи движений в data/animations/run.ron (с кадрами
 //!       `from to` после источника — действие целиком, не круг)
 
+mod anim_editor;
 mod editor;
 mod editor_ui;
 mod icons;
@@ -1149,6 +1150,12 @@ impl Lab {
             .frame(egui::Frame::new().fill(theme::REGION).inner_margin(egui::Margin::same(6)))
             .show(ui, |ui| egui::ScrollArea::vertical().show(ui, |ui| self.studio.properties(ui)));
         egui::CentralPanel::no_frame().show(ui, |ui| self.studio.viewport(ui));
+        // Сохранили клип — модели перечитаны: и в остальных видах новые движения.
+        if let Some(set) = self.studio.take_reloaded() {
+            for v in [&mut self.viewport, &mut self.editor_view] {
+                v.set_characters(Some(set.clone()));
+            }
+        }
     }
 
     fn set_workspace(&mut self, workspace: Workspace) {

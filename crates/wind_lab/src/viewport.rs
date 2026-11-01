@@ -216,6 +216,11 @@ impl Viewport {
         self.scene_3d.rwr_exact = on;
     }
 
+    /// Готовая поза для солдата студии (`None` — по движению, как в игре).
+    pub fn set_pose_override(&mut self, pose: Option<Vec<wind_render::glam::Vec3>>) {
+        self.scene_3d.pose_override = pose;
+    }
+
     /// Точки скелета тела убитого солдата `id` (мир, м).
     pub fn corpse_points(&self, id: u32) -> Option<&[wind_render::glam::Vec3]> {
         self.scene_3d.corpse_points(id)

@@ -11,8 +11,11 @@
 //! с её длинами — любой рост, любые пропорции (см. `Gait`).
 //!
 //! Оси клипа — наши: x — вперёд (куда идёт), y — вверх, z — вправо.
+//!
+//! Клип из записи — кадры через равные доли времени. Свой клип (из редактора в студии
+//! персонажей) — ключевые кадры в моменты `times`; между ними — плавно.
 
-use glam::{Mat3, Mat4, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::f32::consts::TAU;
 
@@ -237,7 +240,28 @@ pub struct Clip {
     /// У действия: доля клипа, когда правая кисть быстрее всего (выпуск гранаты).
     #[serde(default)]
     pub peak: f32,
+    /// Ключевые кадры: доля клипа (0..1) каждого кадра, по возрастанию. Пусто — кадры
+    /// через равные доли (клип из записи).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub times: Vec<f32>,
     pub frames: Vec<ClipFrame>,
+}
+
+impl ClipFrame {
+    /// Плавно между двумя кадрами: таз — по прямой, направления — по дуге.
+    pub fn lerp(&self, other: &ClipFrame, t: f32) -> ClipFrame {
+        let hips = Vec3::from_array(self.hips).lerp(Vec3::from_array(other.hips), t).to_array();
+        let dirs = self
+            .dirs
+            .iter()
+            .zip(&other.dirs)
+            .map(|(&a, &b)| {
+                let (a, b) = (Vec3::from_array(a), Vec3::from_array(b));
+                (Quat::IDENTITY.slerp(Quat::from_rotation_arc(a, b), t) * a).normalize_or(a).to_array()
+            })
+            .collect();
+        ClipFrame { hips, dirs }
+    }
 }
 
 /// Сколько кадров в клипе: на глаз хватает, файл маленький.
@@ -338,7 +362,114 @@ impl Clip {
             }
         }
         let peak = if cycle { 0.0 } else { (peak - a) as f32 / (b - a) as f32 };
-        Ok(Clip { source: source.to_owned(), cycle, duration: (b - a) as f32 * bvh.frame_time, stride, peak, frames: out })
+        Ok(Clip { source: source.to_owned(), cycle, duration: (b - a) as f32 * bvh.frame_time, stride, peak, times: Vec::new(), frames: out })
+    }
+
+    /// Новый клип из двух одинаковых ключей — начало и конец (правится в редакторе).
+    pub fn keyed(source: &str, frame: ClipFrame, duration: f32, cycle: bool) -> Clip {
+        Clip { source: source.to_owned(), cycle, duration, stride: 0.0, peak: 0.0, times: vec![0.0, 1.0], frames: vec![frame.clone(), frame] }
+    }
+
+    /// Ключевые ли кадры (иначе — равномерные из записи).
+    pub fn is_keyed(&self) -> bool {
+        !self.times.is_empty()
+    }
+
+    /// Доля клипа кадра `k`.
+    pub fn time_of(&self, k: usize) -> f32 {
+        let n = self.frames.len();
+        if self.is_keyed() {
+            self.times[k]
+        } else if self.cycle {
+            k as f32 / n as f32
+        } else {
+            k as f32 / (n - 1).max(1) as f32
+        }
+    }
+
+    /// Ближайший к доле `u` кадр.
+    pub fn nearest(&self, u: f32) -> usize {
+        let d = |k: usize| {
+            let d = (self.time_of(k) - u).abs();
+            if self.cycle { d.min(1.0 - d) } else { d }
+        };
+        (0..self.frames.len()).min_by(|&a, &b| d(a).total_cmp(&d(b))).unwrap_or(0)
+    }
+
+    /// Кадр на доле `u`: между соседними — плавно. Круг — по кругу.
+    pub fn sample(&self, u: f32) -> ClipFrame {
+        let n = self.frames.len();
+        if n == 1 {
+            return self.frames[0].clone();
+        }
+        let u = if self.cycle { u.rem_euclid(1.0) } else { u.clamp(0.0, 1.0) };
+        // Соседние кадры: последний перед `u` и следующий (у круга — первый через 1).
+        let k = (0..n).rev().find(|&k| self.time_of(k) <= u).unwrap_or(0);
+        let (next, t1) = if k + 1 < n {
+            (k + 1, self.time_of(k + 1))
+        } else if self.cycle {
+            (0, self.time_of(0) + 1.0)
+        } else {
+            return self.frames[k].clone();
+        };
+        let t0 = self.time_of(k);
+        let t = ((u - t0) / (t1 - t0).max(1e-5)).clamp(0.0, 1.0);
+        self.frames[k].lerp(&self.frames[next], t)
+    }
+
+    /// Те же движения равномерными кадрами — для сборки на модели.
+    pub fn uniform(&self) -> Clip {
+        if !self.is_keyed() {
+            return self.clone();
+        }
+        let n = CLIP_FRAMES;
+        let frames = (0..n).map(|k| self.sample(k as f32 / if self.cycle { n as f32 } else { (n - 1) as f32 })).collect();
+        Clip { times: Vec::new(), frames, ..self.clone() }
+    }
+
+    /// Ключ на доле `u` (если там уже кадр — он), возвращает номер кадра. У клипа из
+    /// записи ключи — все кадры: ближайший.
+    pub fn key_at(&mut self, u: f32) -> usize {
+        if !self.is_keyed() {
+            return self.nearest(u);
+        }
+        let k = self.nearest(u);
+        if (self.time_of(k) - u).abs() < 0.005 {
+            return k;
+        }
+        let frame = self.sample(u);
+        let at = self.times.iter().position(|&t| t > u).unwrap_or(self.times.len());
+        self.times.insert(at, u);
+        self.frames.insert(at, frame);
+        at
+    }
+
+    /// Убрать ключ (первый и последний не убираются).
+    pub fn remove_key(&mut self, k: usize) {
+        if self.is_keyed() && k > 0 && k + 1 < self.frames.len() {
+            self.times.remove(k);
+            self.frames.remove(k);
+        }
+    }
+
+    /// Заменить кадр `k` на `new`; правка мягко расходится на `soft` соседних кадров
+    /// (у клипа из записи кадров много — по одному не поправить).
+    pub fn apply(&mut self, k: usize, new: &ClipFrame, soft: usize) {
+        let old = self.frames[k].clone();
+        let turn: Vec<Quat> = old.dirs.iter().zip(&new.dirs).map(|(&a, &b)| Quat::from_rotation_arc(Vec3::from_array(a), Vec3::from_array(b))).collect();
+        let shift = Vec3::from_array(new.hips) - Vec3::from_array(old.hips);
+        let n = self.frames.len() as i64;
+        let soft = if self.is_keyed() { 0 } else { soft as i64 };
+        for d in -soft..=soft {
+            let i = k as i64 + d;
+            let i = if self.cycle { i.rem_euclid(n) } else if (0..n).contains(&i) { i } else { continue };
+            let w = 1.0 - d.abs() as f32 / (soft + 1) as f32;
+            let f = &mut self.frames[i as usize];
+            for (dir, q) in f.dirs.iter_mut().zip(&turn) {
+                *dir = (Quat::IDENTITY.slerp(*q, w) * Vec3::from_array(*dir)).normalize_or_zero().to_array();
+            }
+            f.hips = (Vec3::from_array(f.hips) + shift * w).to_array();
+        }
     }
 
     /// Клип текстом для `data/animations`: по кадру на строку.
@@ -385,6 +516,43 @@ Frame Time: 0.5
 0 20 0 0 0 0 0 0 0
 0 20 5 0 0 0 0 0 90
 ";
+
+    fn frame(x: f32) -> ClipFrame {
+        ClipFrame { hips: [x, 1.0, 0.0], dirs: vec![[1.0, 0.0, 0.0]; EDGES.len()] }
+    }
+
+    #[test]
+    fn keys_interpolate_and_edits_spread() {
+        // Свой клип: два ключа, третий — посередине со сдвигом таза.
+        let mut c = Clip::keyed("тест", frame(0.0), 1.0, false);
+        let k = c.key_at(0.5);
+        assert_eq!((k, c.frames.len()), (1, 3));
+        let mut moved = c.frames[1].clone();
+        moved.hips[0] = 1.0;
+        moved.dirs[0] = [0.0, 1.0, 0.0];
+        c.apply(1, &moved, 5);
+        // Между ключами — плавно; правка у ключевого клипа на соседей не расходится.
+        assert!((c.sample(0.25).hips[0] - 0.5).abs() < 1e-4);
+        assert_eq!(c.frames[0], frame(0.0));
+        let d = Vec3::from_array(c.sample(0.25).dirs[0]);
+        assert!((d.length() - 1.0).abs() < 1e-4 && d.x > 0.6 && d.y > 0.6, "по дуге: {d:?}");
+        // В равномерные кадры: начало, середина и конец те же.
+        let u = c.uniform();
+        assert_eq!(u.frames.len(), CLIP_FRAMES);
+        assert!((u.frames[CLIP_FRAMES - 1].hips[0] - 0.0).abs() < 1e-4);
+        c.remove_key(1);
+        assert_eq!(c.frames.len(), 2);
+
+        // Клип из записи (равномерный круг): правка расходится на соседей, слабея.
+        let mut r = Clip { source: String::new(), cycle: true, duration: 1.0, stride: 1.0, peak: 0.0, times: Vec::new(), frames: (0..10).map(|_| frame(0.0)).collect() };
+        let mut moved = r.frames[0].clone();
+        moved.hips[0] = 1.0;
+        r.apply(0, &moved, 2);
+        let xs: Vec<f32> = r.frames.iter().map(|f| f.hips[0]).collect();
+        assert_eq!(xs[0], 1.0);
+        assert!(xs[1] > 0.5 && xs[1] < 1.0 && xs[9] > 0.5, "соседи — слабее, и через шов круга: {xs:?}");
+        assert!(xs[3] == 0.0 && xs[5] == 0.0);
+    }
 
     #[test]
     fn reads_bvh_and_bends_joints() {

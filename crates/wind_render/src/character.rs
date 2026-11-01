@@ -12,7 +12,7 @@ mod actions;
 mod gait;
 
 pub use actions::{Acted, Action, ReloadKind, THROW_RELEASE, THROW_TIME};
-pub use gait::{Gait, Gaits};
+pub use gait::{Gait, Gaits, Skeleton};
 use crate::ragdoll::Rig;
 use crate::rwr::{self, RwrModel, VOXEL};
 use wind_sim::arsenal::Arsenal;
@@ -224,7 +224,6 @@ impl CharModel {
     /// Живой солдат: ноги шагают или бегут, руки держат оружие стволом вперёд.
     pub fn pose(&self, m: Motion) -> Pose {
         let Some(j) = self.joints else { return self.rest.clone() };
-        let r = &self.rest;
         // Насколько солдат движется (0 — стоит) и насколько бежит.
         let moving = (m.speed / 1.2).clamp(0.0, 1.0);
         let run = run_share(m.speed);
@@ -237,8 +236,23 @@ impl CharModel {
             None => (self.legs_procedural(m, j), 0.12 * run * moving * ph.sin()),
         };
 
-        // Руки: правая у приклада, левая на цевье, ствол вперёд — туда, куда смотрит
-        // солдат. Бегом оружие чуть ниже, стволом немного вниз, и покачивается с плечами.
+        self.hold_weapon(&mut p, j, run, moving, ph, twist);
+        p
+    }
+
+    /// Руки держат оружие поверх позы `p` (стоит, как в игре: стволом по взгляду) —
+    /// для редактора анимаций: показать клип так, как он будет в игре.
+    pub fn with_weapon(&self, mut p: Pose) -> Pose {
+        if let Some(j) = self.joints {
+            self.hold_weapon(&mut p, j, 0.0, 0.0, 0.0, 0.0);
+        }
+        p
+    }
+
+    /// Руки: правая у приклада, левая на цевье, ствол вперёд — туда, куда смотрит
+    /// солдат. Бегом оружие чуть ниже, стволом немного вниз, и покачивается с плечами.
+    fn hold_weapon(&self, p: &mut Pose, j: Joints, run: f32, moving: f32, ph: f32, twist: f32) {
+        let r = &self.rest;
         let shoulder_y = (p[j.shoulder[0]].y + p[j.shoulder[1]].y) * 0.5;
         let chest = (p[j.shoulder[0]] + p[j.shoulder[1]]) * 0.5;
         let sway = Vec3::Y * (2.0 * ph).cos() * 0.6 * run * moving;
@@ -264,7 +278,6 @@ impl CharModel {
             p[j.elbow[side]] = two_bone(shoulder, hand, upper, fore, bend);
             p[j.hand[side]] = shoulder + (hand - shoulder).clamp_length_max(upper + fore - 0.01);
         }
-        p
     }
 
     /// Шаг без записей движений: стопы по синусоиде, корпус пружинит и наклоняется.

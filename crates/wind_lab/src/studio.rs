@@ -1,7 +1,8 @@
 //! Студия персонажей: один солдат вблизи. Модель, оружие, шаг и бег, падение,
 //! скелет поверх модели и ширина плавного сгиба у суставов — чтобы подбирать вид
-//! солдата, не запуская бой.
+//! солдата, не запуская бой. Здесь же — редактор анимаций (см. `anim_editor`).
 
+use crate::anim_editor::AnimEditor;
 use crate::icons::{self, Icon};
 use crate::theme;
 use crate::viewport::{Scene, SceneSoldier, Viewport};
@@ -47,6 +48,10 @@ pub struct Studio {
     blend: f32,
     skeleton: bool,
     last: Instant,
+    /// Редактор анимаций: клипы `data/animations`.
+    editor: AnimEditor,
+    /// Модели перечитаны (клип сохранён) — лаборатории обновить остальные виды.
+    reloaded: Option<Arc<CharacterSet>>,
 }
 
 impl Studio {
@@ -78,6 +83,26 @@ impl Studio {
             blend: JOINT_BLEND,
             skeleton: false,
             last: Instant::now(),
+            editor: AnimEditor::new(data_dir().join("animations")),
+            reloaded: None,
+        }
+    }
+
+    /// Модели перечитаны после сохранения клипа — один раз.
+    pub fn take_reloaded(&mut self) -> Option<Arc<CharacterSet>> {
+        self.reloaded.take()
+    }
+
+    /// Перечитать модели с клипами — после сохранения клипа.
+    fn reload_characters(&mut self) {
+        match CharacterSet::load(&data_dir()) {
+            Ok(set) => {
+                let set = Arc::new(set);
+                self.characters = Some(set.clone());
+                self.view.set_characters(Some(set.clone()));
+                self.reloaded = Some(set);
+            }
+            Err(e) => eprintln!("модели не перечитались: {e}"),
         }
     }
 
@@ -170,6 +195,15 @@ impl Studio {
                 self.paused = !self.paused;
             }
         });
+        let model = self.characters.clone();
+        let m = model.as_ref().and_then(|c| c.models.get(self.model));
+        let mut saved = false;
+        theme::panel(ui, Icon::Run, "Редактор анимаций", true, |ui| {
+            saved = self.editor.panel(ui, m);
+        });
+        if saved {
+            self.reload_characters();
+        }
         theme::panel(ui, Icon::Skeleton, "Сгиб у суставов", true, |ui| {
             theme::props(ui, "studio_blend", |ui| {
                 theme::label(ui, "Ширина");
@@ -256,12 +290,18 @@ impl Studio {
             *age += dt;
         }
         self.act_time += dt;
+        self.editor.advance(dt);
         self.view.set_joint_blend(self.blend);
 
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
         let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()) };
         let action = self.action();
+        // Редактор анимаций: солдат в позе клипа, без действий и падения.
+        let editing = self.editor.on && self.dead.is_none();
+        let edited = editing.then(|| self.characters.as_ref().and_then(|c| self.editor.pose(&c.models[model]))).flatten();
+        let (action, weapon) = if editing { (None, self.weapon.filter(|_| self.editor.weapon)) } else { (action, self.weapon) };
+        self.view.set_pose_override(edited);
         let id = 0;
         // Стреляют спереди: тело отлетает назад.
         let push = -Vec2::from_angle(self.facing) * if self.blast { wind_sim::world::BLAST_PUSH } else { wind_sim::world::BULLET_PUSH };
@@ -275,7 +315,7 @@ impl Studio {
                 facing: self.facing,
                 team: self.team,
                 player: false,
-                look: Some(Look { model, weapon: self.weapon, motion, action }),
+                look: Some(Look { model, weapon, motion, action }),
                 prone: false,
                 reloading: false,
                 throwing: false,
@@ -304,13 +344,19 @@ impl Studio {
         };
         let rect = ui.max_rect();
         self.view.show(ui, &scene, true);
+        let root = Mat4::from_translation(Vec3::new(center.x, 0.0, center.y)) * Mat4::from_rotation_y(-self.facing);
+        if editing && let Some(set) = &self.characters {
+            let cam = self.view.camera_3d();
+            let view_proj = cam.view_proj(rect.width() / rect.height().max(1.0));
+            self.editor.interact(ui, rect, view_proj, cam.eye(), root, &set.models[model]);
+            return;
+        }
 
         if self.skeleton
             && let Some(set) = &self.characters
         {
             let m = &set.models[model];
             // Точки скелета в мире, м: у живого — из позы, у убитого — тело-рэгдолл.
-            let root = Mat4::from_translation(Vec3::new(center.x, 0.0, center.y)) * Mat4::from_rotation_y(-self.facing);
             let pose: Vec<Vec3> = match self.dead {
                 Some(_) => self.view.corpse_points(id).map(<[Vec3]>::to_vec).unwrap_or_default(),
                 None => {
@@ -345,3 +391,9 @@ enum Act {
     Reload,
     Throw,
 }
+
+/// Папка `data/` — рядом с `sim.ron`.
+fn data_dir() -> std::path::PathBuf {
+    crate::find_config().parent().map_or_else(|| std::path::PathBuf::from("data"), |p| p.to_path_buf())
+}
+

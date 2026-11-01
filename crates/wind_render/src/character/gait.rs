@@ -4,7 +4,7 @@
 //! назад — круг крутится в обратную сторону. Руки с оружием ставит `pose` поверх.
 
 use super::{CharModel, Joints, Pose, two_bone};
-use crate::mocap::{Clip, EDGES};
+use crate::mocap::{Clip, ClipFrame, EDGES};
 use crate::rwr::VOXEL;
 use glam::{Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -78,38 +78,30 @@ impl CharModel {
         (0..2).map(|s| r[j.hip[s]].distance(r[j.knee[s]]) + r[j.knee[s]].distance(r[j.foot[s]])).sum::<f32>() / 2.0
     }
 
-    /// Клип круга шага — на этой модели.
+    /// Клип — на этой модели (клип с ключами — сначала в равномерные кадры).
     pub(crate) fn gait(&self, clip: &Clip) -> Option<Gait> {
+        let sk = self.skeleton()?;
+        let clip = clip.uniform();
+        let frames = clip.frames.iter().map(|f| sk.pose(f)).collect();
+        Some(Gait { frames, stride: clip.stride * sk.leg * VOXEL, peak: clip.peak })
+    }
+
+    /// Скелет модели для клипов: длины её отрезков, где таз и стопы.
+    pub fn skeleton(&self) -> Option<Skeleton> {
         let j = self.joints?;
         let r = &self.rest;
-        let leg = self.leg(j);
         let center = (r[j.hip[0]] + r[j.hip[1]]) * 0.5;
-        let foot_y = (r[j.foot[0]].y + r[j.foot[1]].y) * 0.5;
         let at = |name: &str| if name == "hips" { Some(center) } else { j.named(name).map(|i| r[i]) };
-        let lengths: Vec<f32> = EDGES.iter().map(|&(a, b)| Some(at(a)?.distance(at(b)?))).collect::<Option<_>>()?;
-        let frames = clip
-            .frames
-            .iter()
-            .map(|f| {
-                let mut p = r.clone();
-                let hips = Vec3::new(center.x + f.hips[0] * leg, foot_y + f.hips[1] * leg, center.z + f.hips[2] * leg);
-                let mut place = |name: &str, v: Vec3| {
-                    if let Some(i) = j.named(name) {
-                        p[i] = v;
-                    }
-                };
-                // Точки — от таза наружу: родитель уже стоит (`EDGES` так упорядочены).
-                let mut placed: Vec<(&str, Vec3)> = vec![("hips", hips)];
-                for (e, &(from, to)) in EDGES.iter().enumerate() {
-                    let base = placed.iter().find(|(n, _)| *n == from).map_or(hips, |x| x.1);
-                    let v = base + Vec3::from_array(f.dirs[e]) * lengths[e];
-                    placed.push((to, v));
-                    place(to, v);
-                }
-                p
-            })
-            .collect();
-        Some(Gait { frames, stride: clip.stride * leg * VOXEL, peak: clip.peak })
+        let lengths = EDGES.iter().map(|&(a, b)| Some(at(a)?.distance(at(b)?))).collect::<Option<_>>()?;
+        let index = EDGES.iter().map(|&(_, b)| j.named(b)).collect::<Option<_>>()?;
+        Some(Skeleton {
+            lengths,
+            index,
+            center,
+            foot_y: (r[j.foot[0]].y + r[j.foot[1]].y) * 0.5,
+            leg: self.leg(j),
+            rest: r.clone(),
+        })
     }
 
     /// Ноги и корпус из кругов шага и бега: `None`, если клипов нет. Руки — как в клипе
@@ -153,6 +145,90 @@ impl CharModel {
     }
 }
 
+/// Скелет модели для клипов: длины отрезков `EDGES`, где таз и стопы в позе покоя.
+/// Собирает позу из кадра клипа, кадр — из позы и правит кадр, когда в редакторе
+/// тянут точку.
+#[derive(Clone, Debug)]
+pub struct Skeleton {
+    lengths: Vec<f32>,
+    /// Номер точки модели для конца каждого отрезка `EDGES`.
+    index: Vec<usize>,
+    center: Vec3,
+    foot_y: f32,
+    /// Длина ноги, воксели.
+    pub leg: f32,
+    rest: Pose,
+}
+
+/// Отрезки, которые тянутся вдвоём, как рука или нога: (верхний, нижний) — по номерам
+/// `EDGES`. Тянут кисть или стопу — сгиб (локоть, колено) ставится сам.
+const CHAINS: [(usize, usize); 4] = [(11, 12), (13, 14), (2, 3), (4, 5)];
+
+impl Skeleton {
+    /// Точки кадра: 0 — таз, `1 + e` — конец отрезка `e` (воксели, оси модели).
+    pub fn points(&self, f: &ClipFrame) -> Vec<Vec3> {
+        let hips = Vec3::new(self.center.x + f.hips[0] * self.leg, self.foot_y + f.hips[1] * self.leg, self.center.z + f.hips[2] * self.leg);
+        let mut out = Vec::with_capacity(EDGES.len() + 1);
+        out.push(hips);
+        for (e, &(from, _)) in EDGES.iter().enumerate() {
+            let base = out[Self::point_of(from)];
+            out.push(base + Vec3::from_array(f.dirs[e]) * self.lengths[e]);
+        }
+        out
+    }
+
+    /// Номер точки (как в `points`) по имени.
+    pub fn point_of(name: &str) -> usize {
+        if name == "hips" { 0 } else { 1 + EDGES.iter().position(|&(_, to)| to == name).unwrap_or(0) }
+    }
+
+    /// Поза модели из кадра клипа.
+    pub fn pose(&self, f: &ClipFrame) -> Pose {
+        let mut p = self.rest.clone();
+        for (e, v) in self.points(f).into_iter().skip(1).enumerate() {
+            p[self.index[e]] = v;
+        }
+        p
+    }
+
+    /// Кадр клипа из позы модели (обратно к `pose`).
+    pub fn frame_of(&self, p: &Pose) -> ClipFrame {
+        let at = |name: &str| if name == "hips" { (p[self.index[0]] + p[self.index[1]]) * 0.5 } else { p[self.index[Self::point_of(name) - 1]] };
+        let hips = at("hips");
+        let h = Vec3::new(hips.x - self.center.x, hips.y - self.foot_y, hips.z - self.center.z) / self.leg;
+        let dirs = EDGES.iter().map(|&(a, b)| (at(b) - at(a)).normalize_or(Vec3::Y).to_array()).collect();
+        ClipFrame { hips: h.to_array(), dirs }
+    }
+
+    /// Кадр, в котором точку `point` (номер как в `points`) потянули в `target`. Таз
+    /// сдвигается целиком; кисть и стопа тянут за собой локоть и колено (сгиб — в ту же
+    /// сторону, что был); остальные — поворачивают свой отрезок.
+    pub fn drag(&self, f: &ClipFrame, point: usize, target: Vec3) -> ClipFrame {
+        let pts = self.points(f);
+        let mut out = f.clone();
+        if point == 0 {
+            let d = (target - pts[0]) / self.leg;
+            out.hips = (Vec3::from_array(f.hips) + d).to_array();
+            return out;
+        }
+        let e = point - 1;
+        let start = |e: usize| pts[Self::point_of(EDGES[e].0)];
+        if let Some(&(upper, lower)) = CHAINS.iter().find(|c| c.1 == e) {
+            let root = start(upper);
+            let (a, b) = (self.lengths[upper], self.lengths[lower]);
+            let mid = pts[1 + upper];
+            let bend = mid - (root + pts[1 + lower]) * 0.5;
+            let target = root + (target - root).clamp_length_max(a + b - 0.01);
+            let joint = two_bone(root, target, a, b, bend);
+            out.dirs[upper] = (joint - root).normalize_or(Vec3::Y).to_array();
+            out.dirs[lower] = (target - joint).normalize_or(Vec3::Y).to_array();
+        } else {
+            out.dirs[e] = (target - start(e)).normalize_or(Vec3::from_array(f.dirs[e])).to_array();
+        }
+        out
+    }
+}
+
 impl Gait {
     /// Поза действия на доле `u` (0..1, без повтора).
     pub(crate) fn at_clamped(&self, u: f32) -> Pose {
@@ -181,6 +257,30 @@ mod tests {
 
     fn set() -> CharacterSet {
         CharacterSet::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data")).unwrap()
+    }
+
+    #[test]
+    fn skeleton_round_trips_and_drags_a_hand() {
+        let set = set();
+        let m = &set.models[0];
+        let sk = m.skeleton().unwrap();
+        let j = m.joints.unwrap();
+        // Поза → кадр → поза: те же точки.
+        let pose = m.pose(Motion { speed: 4.5, phase: 1.0, dir: Vec2::X });
+        let back = sk.pose(&sk.frame_of(&pose));
+        for i in [j.hand[0], j.foot[1], j.head, j.knee[0]] {
+            assert!(back[i].distance(pose[i]) < 0.05, "точка {i}: {:?} → {:?}", pose[i], back[i]);
+        }
+        // Тянем правую кисть вперёд: кисть приходит, локоть сам, длины руки те же.
+        let f = sk.frame_of(&pose);
+        let hand = super::Skeleton::point_of("righthand");
+        let target = sk.points(&f)[super::Skeleton::point_of("rightshoulder")] + glam::Vec3::new(10.0, 2.0, 0.0);
+        let moved = sk.pose(&sk.drag(&f, hand, target));
+        assert!(moved[j.hand[0]].distance(target) < 0.1, "кисть не дотянулась");
+        let upper = m.rest[j.shoulder[0]].distance(m.rest[j.elbow[0]]);
+        assert!((moved[j.shoulder[0]].distance(moved[j.elbow[0]]) - upper).abs() < 0.05);
+        // Остальное не сдвинулось.
+        assert!(moved[j.hand[1]].distance(pose[j.hand[1]]) < 0.05 && moved[j.foot[0]].distance(pose[j.foot[0]]) < 0.05);
     }
 
     #[test]

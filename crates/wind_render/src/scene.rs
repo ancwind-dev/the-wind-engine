@@ -136,6 +136,9 @@ pub struct SceneBuilder {
     pub rwr_exact: bool,
     /// Где в этом кадре рушились стены — для звука (одно место на кусок стены).
     pub crumbled: Vec<Vec2>,
+    /// Готовая поза для солдат с явным видом (`Look`) — редактор анимаций в студии
+    /// показывает так правленый клип.
+    pub pose_override: Option<crate::character::Pose>,
 }
 
 /// Ширина сгиба по умолчанию, воксели.
@@ -157,6 +160,7 @@ impl Default for SceneBuilder {
             joint_blend: JOINT_BLEND,
             rwr_exact: true,
             crumbled: Vec::new(),
+            pose_override: None,
         }
     }
 }
@@ -274,7 +278,10 @@ impl SceneBuilder {
                 && let Some(look) = look
             {
                 let model = &set.models[look.model];
-                let pose = model.pose(look.motion);
+                let pose = match (&self.pose_override, s.look.is_some()) {
+                    (Some(p), true) => p.clone(),
+                    _ => model.pose(look.motion),
+                };
                 // Лёжа руки заняты позой лёжа — действия пока не показываем.
                 let (pose, grip, grenade) = match look.action {
                     Some(action) if a.prone <= 0.0 => {
