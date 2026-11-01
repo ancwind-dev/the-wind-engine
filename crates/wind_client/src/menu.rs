@@ -173,7 +173,32 @@ impl Menu {
                 s.volume = percent as f32 / 100.0;
             }
             ui.end_row();
+
+            ui.label("Экран");
+            let mode = if s.fullscreen { "Во весь экран" } else { "В окне" };
+            egui::ComboBox::from_id_salt("screen").selected_text(mode).width(170.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut s.fullscreen, true, "Во весь экран");
+                ui.selectable_value(&mut s.fullscreen, false, "В окне");
+            });
+            ui.end_row();
+
+            // Во весь экран — в разрешении монитора; в окне — размер окна.
+            ui.label("Разрешение");
+            let monitor = monitor_pixels(ui.ctx());
+            let size = |r: (u32, u32)| format!("{} × {}", r.0, r.1);
+            if s.fullscreen {
+                let shown = monitor.map_or("как у монитора".to_string(), |m| format!("{} — монитор", size(m)));
+                ui.add_enabled_ui(false, |ui| egui::ComboBox::from_id_salt("resolution").selected_text(shown).width(170.0).show_ui(ui, |_| {}));
+            } else {
+                egui::ComboBox::from_id_salt("resolution").selected_text(size(s.resolution)).width(170.0).show_ui(ui, |ui| {
+                    for r in settings::resolutions(monitor, s.resolution) {
+                        ui.selectable_value(&mut s.resolution, r, size(r));
+                    }
+                });
+            }
+            ui.end_row();
         });
+        ui.label(RichText::new("Alt+Enter или F11 — переключить экран").small().color(DIM));
         ui.add_space(4.0);
         ui.label(RichText::new("Бой против ИИ").strong());
         ui.label(RichText::new("Применяется в следующем бою").small().color(DIM));
@@ -239,6 +264,15 @@ impl Menu {
         }
         action
     }
+}
+
+/// Размер монитора в пикселях (egui знает его в точках).
+pub fn monitor_pixels(ctx: &egui::Context) -> Option<(u32, u32)> {
+    ctx.input(|i| {
+        let v = i.viewport();
+        let size = v.monitor_size? * v.native_pixels_per_point?;
+        Some((size.x.round() as u32, size.y.round() as u32))
+    })
 }
 
 fn heading(ui: &mut egui::Ui, text: &str) {

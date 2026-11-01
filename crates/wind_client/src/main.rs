@@ -52,6 +52,8 @@ struct Args {
     vsync: bool,
     volume: Option<f32>,
     mute: bool,
+    /// В окне на этот запуск, хоть в настройках и «во весь экран».
+    window: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -69,6 +71,7 @@ fn parse_args() -> Result<Args, String> {
         vsync: false,
         volume: None,
         mute: false,
+        window: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -85,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
             "--vsync" => a.vsync = true,
             "--volume" => a.volume = Some((num(value()?)? as f32).clamp(0.0, 1.0)),
             "--mute" => a.mute = true,
+            "--window" => a.window = true,
             "--spectate" => a.spectate = true,
             "--follow" => {
                 a.spectate = true;
@@ -114,6 +118,7 @@ fn parse_args() -> Result<Args, String> {
                      wind_client --export-sounds                — сохранить все звуки в notes/Звуки/*.wav\n\
                      --soldiers N на команду, --map сторона, --map-file имя, --seed N — бой против ИИ на этот запуск\n\
                      --volume 0..1 — громкость, --mute — без звука\n\
+                     --window — в окне на этот запуск (по умолчанию во весь экран; Alt+Enter или F11 — переключить)\n\
                      --vsync — включить вертикальную синхронизацию (по умолчанию выключена, чтобы мерить FPS)\n\
                      Настройки: {}",
                     Settings::path().display()
@@ -162,8 +167,15 @@ fn main() -> eframe::Result {
         eprintln!("{e}");
         std::process::exit(2);
     });
+    // Во весь экран — сразу, чтобы не мелькало окно; размер окна выставим в первом кадре,
+    // когда будет известен масштаб экрана. Замер FPS — всегда в окне 1600 × 900.
+    let fullscreen = !args.window && args.bench.is_none() && Settings::load(&Settings::path(), Settings::default()).0.fullscreen;
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("The Wind Engine").with_inner_size([1600.0, 900.0]),
+        viewport: if fullscreen {
+            egui::ViewportBuilder::default().with_title("The Wind Engine").with_fullscreen(true)
+        } else {
+            egui::ViewportBuilder::default().with_title("The Wind Engine").with_inner_size([1600.0, 900.0])
+        },
         depth_buffer: 32,
         multisampling: MSAA as u16,
         wgpu_options: egui_wgpu::WgpuConfiguration {
@@ -384,6 +396,10 @@ struct Game {
     settings: Settings,
     /// Какая громкость сейчас у звука — чтобы слать новую только при изменении.
     volume_applied: f32,
+    /// Какой экран уже выставлен: во весь экран ли и размер окна (`None` — ещё никакой).
+    screen_applied: Option<(bool, (u32, u32))>,
+    /// Замер FPS — в окне как создали, не трогаем.
+    keep_window: bool,
     /// `--seed`: тогда каждый бой с ним, иначе каждый раз новый.
     seed: Option<u64>,
     /// После меню кнопка мыши ещё зажата — не стрелять, пока не отпустят.
@@ -442,6 +458,9 @@ impl Game {
         if let Some(v) = args.volume {
             settings.volume = v;
         }
+        if args.window || args.bench.is_some() {
+            settings.fullscreen = false;
+        }
 
         // Флаги режима — сразу в бой, иначе главное меню над боем ИИ.
         let seed = args.seed.or(args.bench.map(|_| 1));
@@ -484,6 +503,8 @@ impl Game {
             session,
             menu: Menu::new(menu_open, maps),
             volume_applied: settings.volume,
+            screen_applied: None,
+            keep_window: args.bench.is_some(),
             settings,
             seed,
             fire_lock: false,
@@ -498,6 +519,26 @@ impl Game {
             notes,
             render_state,
         }
+    }
+
+    /// Выставить экран по настройкам, если он не такой.
+    fn apply_screen(&mut self, ctx: &egui::Context) {
+        let want = (self.settings.fullscreen, self.settings.resolution);
+        if self.keep_window || self.screen_applied == Some(want) {
+            return;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(want.0));
+        if !want.0 {
+            // Размер окна — в пикселях, а egui просит точки: ждём, пока узнаем масштаб.
+            let Some(ppp) = ctx.input(|i| i.viewport().native_pixels_per_point) else { return };
+            let size = egui::vec2(want.1.0 as f32, want.1.1 as f32) / ppp;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+                let corner = ((monitor - size) / 2.0).max(egui::Vec2::ZERO);
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(corner.to_pos2()));
+            }
+        }
+        self.screen_applied = Some(want);
     }
 
     fn save_settings(&mut self) {
@@ -608,6 +649,12 @@ impl eframe::App for Game {
             self.audio.set_volume(self.settings.volume);
             self.volume_applied = self.settings.volume;
         }
+        // Alt+Enter или F11 — во весь экран или в окно (и запомнить).
+        if ctx.input(|i| i.key_pressed(egui::Key::F11) || (i.modifiers.alt && i.key_pressed(egui::Key::Enter))) {
+            self.settings.fullscreen = !self.settings.fullscreen;
+            self.save_settings();
+        }
+        self.apply_screen(&ctx);
 
         self.finish_bench(&ctx);
         ctx.request_repaint();
