@@ -95,7 +95,7 @@ fn rank_and_squad(painter: &Painter, bar: Rect, view: &View) {
     // Отряд: сколько бойцов, приказ и подсказка по клавишам.
     let right = panel.right_top() - vec2(14.0, 0.0);
     let (squad, hint) = if me.squad_max == 0 {
-        ("Отряда нет — звание растёт за убийства и захват точек".to_string(), String::new())
+        ("Отряда нет".to_string(), "звание — за убийства и захват точек".to_string())
     } else {
         let order = if me.squad.is_empty() {
             "пусто"

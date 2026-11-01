@@ -279,6 +279,7 @@ fn prone_soldier_is_prone_on_client() {
 fn client_never_learns_about_hidden_enemies() {
     use wind_net::replication::Heard;
     use wind_net::vision::Vision;
+    use wind_sim::sight::on_screen;
     let config = ReplicationConfig { packet_budget: 64 * 1024, ..Default::default() };
     // Обзор короткий: иначе на карте 256 почти каждого врага кто-то из своих видит,
     // и проверять было бы нечего.
@@ -286,7 +287,7 @@ fn client_never_learns_about_hidden_enemies() {
     link.world.config.soldier.vision_range = 20.0;
     let mut vision = Vision::default();
     let team = link.world.soldiers[link.soldier as usize].team;
-    let (mut hidden_in_range, mut hidden_shots) = (0, 0);
+    let (mut hidden_in_range, mut hidden_shots, mut screen_only) = (0, 0, 0);
     for _ in 0..900 {
         // Игрок идёт к середине карты — туда, где бой.
         let me = link.world.soldiers[link.soldier as usize].pos;
@@ -299,19 +300,22 @@ fn client_never_learns_about_hidden_enemies() {
         let now = link.world.tick as f64 * 0.05;
         link.client.apply_snapshot(data, now).unwrap();
         link.replica.on_ack(link.client.tick);
-        // Каждый враг, о котором знает клиент, — виден его команде.
+        // Каждый враг, о котором знает клиент, — виден его команде или на экране игрока
+        // (экран игрок видит целиком, как в RWR).
+        let me = link.world.soldiers[link.soldier as usize].pos;
+        let shown = |id: u32| vision.sees(&link.world, team, id) || on_screen(me, input.aim, link.world.soldiers[id as usize].pos);
         for (id, s) in link.client.soldiers.iter().enumerate() {
             if s.as_ref().is_some_and(|s| s.net.team() != team) {
-                assert!(vision.sees(&link.world, team, id as u32), "клиент знает о скрытом враге #{id}");
+                assert!(shown(id as u32), "клиент знает о скрытом враге #{id}");
+                screen_only += !vision.sees(&link.world, team, id as u32) as u32;
             }
         }
-        let me = link.world.soldiers[link.soldier as usize].pos;
         hidden_in_range += link
             .world
             .soldiers
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.alive && s.team != team && s.pos.distance(me) < link.config.interest_radius && !vision.sees(&link.world, team, *i as u32))
+            .filter(|(i, s)| s.alive && s.team != team && s.pos.distance(me) < link.config.interest_radius && !shown(*i as u32))
             .count();
         // Выстрелы тех, кого не видно, всё равно слышны — с места стрелка.
         for h in link.client.heard.drain(..) {
@@ -322,9 +326,10 @@ fn client_never_learns_about_hidden_enemies() {
             }
         }
     }
-    println!("скрытых врагов в радиусе интереса (сумма по тикам): {hidden_in_range}, выстрелов скрытых стрелков: {hidden_shots}");
+    println!("скрытых врагов в радиусе интереса (сумма по тикам): {hidden_in_range}, выстрелов скрытых стрелков: {hidden_shots}; видно только по экрану: {screen_only}");
     assert!(hidden_in_range > 100, "проверка что-то значит: враги в радиусе бывают скрыты");
     assert!(hidden_shots > 0, "выстрелы из-за стен слышны");
+    assert!(screen_only > 0, "враги на экране игрока видны, даже если их не видит команда");
 }
 
 #[test]

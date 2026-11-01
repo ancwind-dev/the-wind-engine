@@ -13,7 +13,7 @@
     soldier: (
         speed: 4.5,
         radius: 0.35,
-        vision_range: 55.0,
+        vision_range: 32.0,
         vision_candidates: 4,
         respawn_time: 6.0,
     ),
@@ -104,10 +104,10 @@
     // точки сами, как раньше.
     command: (
         enabled: true,
-        interval: 5.0,
+        interval: 3.0,
         threat_radius: 40.0,
         garrison: 3.0,
-        attack_extra: 12.0,
+        attack_extra: 16.0,
         enemy_weight: 2.5,
         stickiness: 60.0,
     ),

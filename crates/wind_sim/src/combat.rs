@@ -1,6 +1,7 @@
 //! Стрельба, полёт пуль и гранат, взрывы.
 
 use crate::arsenal::{BlastSpec, MAX_HEAT, WeaponSpec};
+use crate::sight::SightSpec;
 use crate::suppression::SuppressionSpec;
 use crate::rng::Rng;
 use crate::world::{BLAST_PUSH, BULLET_PUSH, Controller, Event, Projectile, ProjectileKind, Soldier, World, snapshot};
@@ -16,6 +17,7 @@ pub(crate) fn fire(world: &mut World) {
     let prev = snapshot(&world.soldiers);
     let map = &world.map;
     let sup = &world.config.suppression;
+    let sight = &world.config.sight;
 
     let shots: Vec<Projectile> = world
         .soldiers
@@ -30,6 +32,18 @@ pub(crate) fn fire(world: &mut World) {
             s.cooldown -= dt;
             s.grenade_timer -= dt;
             s.throw_timer = (s.throw_timer - dt).max(0.0);
+            s.shot_ago += dt;
+            s.reaction -= dt;
+            // Очередь идёт, пока не кончится время; потом пауза (у ИИ).
+            if s.pause > 0.0 {
+                s.pause -= dt;
+            } else if s.burst > 0.0 {
+                s.burst -= dt;
+                if s.burst <= 0.0 {
+                    let mut rng = Rng::for_entity(seed ^ 0xB0257, tick, i as u32);
+                    s.pause = rng.range(sight.pause_min, sight.pause_max);
+                }
+            }
             s.heat = (s.heat - weapon.sustained_fire_diminish_rate * dt).max(0.0);
             if s.reload_timer > 0.0 {
                 s.reload_timer -= dt;
@@ -46,6 +60,16 @@ pub(crate) fn fire(world: &mut World) {
                 s.reload_timer = weapon.reload_time;
                 return None;
             }
+            // ИИ в затишье (врага не видит и не бьёт на подавление) перезаряжает
+            // полупустой магазин — чтобы не остаться пустым в начале следующей стычки.
+            if s.controller == Controller::Ai
+                && s.target.is_none()
+                && s.last_seen_timer <= 0.0
+                && s.ammo * 2 < weapon.magazine_size
+            {
+                s.reload_timer = weapon.reload_time;
+                return None;
+            }
             let to = match s.controller {
                 // Игрок стреляет куда целится, видимость не проверяем.
                 Controller::Player(input) => {
@@ -54,6 +78,8 @@ pub(crate) fn fire(world: &mut World) {
                     }
                     input.aim - s.pos
                 }
+                // ИИ стреляет очередями: в паузе — нет.
+                Controller::Ai if s.pause > 0.0 => return None,
                 Controller::Ai => {
                     let Some(target) = s.target else {
                         // Огонь на подавление: врага не видно, но он только что был вон
@@ -72,7 +98,8 @@ pub(crate) fn fire(world: &mut World) {
                             return None;
                         }
                         s.cooldown = weapon.retrigger_time;
-                        return shoot(s, i, to, weapon, kit.weapon, radius, seed, tick, sup);
+                        start_burst(s, sight, seed, tick, i);
+                        return shoot(s, i, to, weapon, kit.weapon, radius, seed, tick, sup, sight);
                     };
                     let (target_pos, target_alive) = prev[target as usize];
                     if !target_alive {
@@ -94,6 +121,11 @@ pub(crate) fn fire(world: &mut World) {
                     if weapon.blast.as_ref().is_some_and(|b| to.length() < b.radius * 1.3) {
                         return None;
                     }
+                    // Заметил недавно — ещё целится.
+                    if s.reaction > 0.0 {
+                        return None;
+                    }
+                    start_burst(s, sight, seed, tick, i);
                     to
                 }
             };
@@ -104,7 +136,7 @@ pub(crate) fn fire(world: &mut World) {
             // в 3 тика вместо 8,8 раза в секунду). Но не больше тика: после паузы очереди
             // «за прошлое» нет.
             s.cooldown = s.cooldown.max(-dt);
-            shoot(s, i, to, weapon, kit.weapon, radius, seed, tick, sup)
+            shoot(s, i, to, weapon, kit.weapon, radius, seed, tick, sup, sight)
         })
         .collect();
     for p in &shots {
@@ -132,14 +164,25 @@ pub(crate) fn fire(world: &mut World) {
     }
 }
 
+/// ИИ открывает огонь — начинается очередь (если не идёт).
+fn start_burst(s: &mut Soldier, sight: &SightSpec, seed: u64, tick: u64, i: usize) {
+    if s.burst <= 0.0 && s.controller == Controller::Ai {
+        let mut rng = Rng::for_entity(seed ^ 0xB025, tick, i as u32);
+        s.burst = rng.range(sight.burst_min, sight.burst_max);
+    }
+}
+
 /// Выстрел в направлении `to`: разброс (больше в очереди и под подавлением),
 /// пауза до следующего, патроны, снаряд.
 #[allow(clippy::too_many_arguments)]
-fn shoot(s: &mut Soldier, i: usize, to: Vec2, weapon: &WeaponSpec, weapon_index: usize, radius: f32, seed: u64, tick: u64, sup: &SuppressionSpec) -> Option<Projectile> {
+fn shoot(s: &mut Soldier, i: usize, to: Vec2, weapon: &WeaponSpec, weapon_index: usize, radius: f32, seed: u64, tick: u64, sup: &SuppressionSpec, sight: &SightSpec) -> Option<Projectile> {
     let mut rng = Rng::for_entity(seed ^ 0xF17E, tick, i as u32);
     // Подавленный ИИ мажет; игрок целится сам.
     let shaken = if s.controller == Controller::Ai { 1.0 + s.suppression * sup.spread_penalty } else { 1.0 };
-    let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * weapon.spread(s.heat) * shaken;
+    // На бегу разброс почти втрое больше, чем стоя (как в RWR).
+    let moving = sight.spread_factor(s.vel.length(), s.prone);
+    let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * weapon.spread(s.heat) * shaken * moving;
+    s.shot_ago = 0.0;
     let dir = Vec2::new(angle.cos(), angle.sin());
     s.heat = (s.heat + weapon.sustained_fire_grow_step).min(MAX_HEAT);
     s.cooldown += weapon.retrigger_time;
@@ -402,7 +445,7 @@ mod tests {
         for tick in 0..400 {
             s.heat = 0.0;
             s.ammo = 30;
-            let p = shoot(&mut s, 0, Vec2::X, &weapon, 0, 0.35, 7, tick, &sup).unwrap();
+            let p = shoot(&mut s, 0, Vec2::X, &weapon, 0, 0.35, 7, tick, &sup, &SightSpec::default()).unwrap();
             sum += p.vel.y.atan2(p.vel.x).abs();
         }
         sum / 400.0

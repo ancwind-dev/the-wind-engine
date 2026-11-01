@@ -1,11 +1,13 @@
-//! Туман войны: врага видно, только если его видит свой солдат или кто-то из своих
-//! рядом — в пределах дальности обзора и по прямой, не сквозь стены. Считается
-//! на клиенте (сервер присылает всех в радиусе интереса).
+//! Туман войны: врага видно, если он на экране своего солдата (как в RWR — экран игрок
+//! видит целиком, и за стенами) или его видит кто-то из своих — в пределах дальности
+//! обзора и по прямой, не сквозь стены. По сети сервер присылает только таких, а
+//! в своей игре считает клиент.
 
 use std::collections::HashSet;
 use wind_render::SoldierDraw;
 use wind_sim::Vec2;
 use wind_sim::map::Map;
+use wind_sim::sight::on_screen;
 
 /// Сколько своих солдат (ближайших) «смотрят» за команду.
 const OBSERVERS: usize = 16;
@@ -20,8 +22,10 @@ pub struct Fog {
 
 impl Fog {
     /// `own_team` — наша команда (`None` — наблюдаем, видно всех), `center` — свой
-    /// солдат или центр камеры, если он убит.
-    pub fn update(&mut self, dt: f32, map: &Map, vision: f32, own_team: Option<u8>, center: Vec2, soldiers: &[SoldierDraw]) {
+    /// солдат или центр камеры, если он убит. `screen` — свой солдат и куда он целится:
+    /// всё на его экране видно и за стенами.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&mut self, dt: f32, map: &Map, vision: f32, own_team: Option<u8>, center: Vec2, screen: Option<(Vec2, Vec2)>, soldiers: &[SoldierDraw]) {
         self.timer -= dt;
         if self.timer > 0.0 {
             return;
@@ -34,7 +38,8 @@ impl Fog {
         observers.truncate(OBSERVERS);
         let v2 = vision * vision;
         for s in soldiers.iter().filter(|s| s.team != team) {
-            let seen = observers.iter().any(|&o| o.distance_squared(s.pos) < v2 && map.line_of_sight(o, s.pos));
+            let seen = screen.is_some_and(|(me, aim)| on_screen(me, aim, s.pos))
+                || observers.iter().any(|&o| o.distance_squared(s.pos) < v2 && map.line_of_sight(o, s.pos));
             if seen {
                 self.visible.insert(s.id);
             }
@@ -71,9 +76,14 @@ mod tests {
             soldier(3, 1, 10.0, 63.5),
         ];
         let mut fog = Fog::default();
-        fog.update(1.0, &map, 30.0, Some(0), soldiers[0].pos, &soldiers);
+        fog.update(1.0, &map, 30.0, Some(0), soldiers[0].pos, None, &soldiers);
         let shown: Vec<u32> = soldiers.iter().filter(|s| fog.shows(s, Some(0))).map(|s| s.id).collect();
         assert_eq!(shown, vec![0, 1]);
+        // Свой экран — целиком, и за стеной: целимся вправо, враг за стеной в 30 м.
+        let me = soldiers[0].pos;
+        fog.update(1.0, &map, 30.0, Some(0), me, Some((me, me + Vec2::new(40.0, 0.0))), &soldiers);
+        let shown: Vec<u32> = soldiers.iter().filter(|s| fog.shows(s, Some(0))).map(|s| s.id).collect();
+        assert_eq!(shown, vec![0, 1, 2], "за стеной, но на экране — видно");
         // Наблюдатель видит всех.
         assert!(soldiers.iter().all(|s| fog.shows(s, None)));
     }

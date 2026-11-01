@@ -15,6 +15,7 @@ pub mod nav;
 pub mod prefab;
 pub mod rng;
 pub mod round;
+pub mod sight;
 pub mod squad;
 pub mod suppression;
 pub mod world;

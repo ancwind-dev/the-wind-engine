@@ -17,6 +17,7 @@ use wind_sim::arsenal::{Arsenal, WeaponSpec};
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::round::{EndReason, Phase, Round};
 use wind_sim::mapfile::MapFile;
+use wind_sim::sight::on_screen;
 use wind_sim::{Event, Soldier, Vec2, World, mapgen};
 
 /// Сколько отправленных снимков помнит сервер и сколько полученных — клиент.
@@ -181,15 +182,24 @@ impl ServerReplica {
         let empty = View::new();
         let base_view = baseline.map_or(&empty, |s| &s.view);
 
-        // Кого клиент должен видеть сейчас: в радиусе интереса — своих и тех врагов,
-        // кого видит его команда.
+        // Кого клиент должен видеть сейчас: в радиусе интереса — своих, тех врагов,
+        // кого видит его команда, и всех, кто на его экране (как в RWR: у самого игрока
+        // тумана войны нет — экран он видит целиком, и за стенами).
         let r2 = cfg.interest_radius * cfg.interest_radius;
         let team = me.team;
+        let aim = match me.controller {
+            wind_sim::Controller::Player(input) => input.aim,
+            wind_sim::Controller::Ai => me.pos,
+        };
         let current: View = world
             .soldiers
             .iter()
             .enumerate()
-            .filter(|(i, s)| s.alive && s.pos.distance_squared(center) < r2 && vision.is_none_or(|v| v.sees(world, team, *i as u32)))
+            .filter(|(i, s)| {
+                s.alive
+                    && s.pos.distance_squared(center) < r2
+                    && (vision.is_none_or(|v| v.sees(world, team, *i as u32)) || on_screen(me.pos, aim, s.pos))
+            })
             .map(|(i, s)| (i as u32, NetSoldier::from_soldier(s)))
             .collect();
 

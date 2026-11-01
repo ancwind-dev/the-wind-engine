@@ -270,6 +270,15 @@ impl Source {
         }
     }
 
+    /// Прицел и обзор: в своей игре — из `sim.ron`, по сети — как по умолчанию (сервер
+    /// их не присылает).
+    pub fn sight(&self) -> wind_sim::sight::SightSpec {
+        match self {
+            Source::Local(l) => l.world.config.sight.clone(),
+            Source::Remote(_) => wind_sim::sight::SightSpec::default(),
+        }
+    }
+
     /// Оружие своего солдата.
     pub fn own_weapon(&self) -> Option<WeaponSpec> {
         match self {

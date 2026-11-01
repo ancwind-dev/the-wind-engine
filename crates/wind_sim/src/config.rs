@@ -8,6 +8,7 @@ use crate::command::CommandSpec;
 use crate::commander::RankSpec;
 use crate::cover::CoverSpec;
 use crate::round::RoundSpec;
+use crate::sight::SightSpec;
 use crate::squad::SquadSpec;
 use crate::suppression::SuppressionSpec;
 use serde::Deserialize;
@@ -46,6 +47,8 @@ pub struct SimConfig {
     pub command: CommandSpec,
     /// Звания игроков: опыт за убийства и захват, сколько бойцов можно вести.
     pub ranks: RankSpec,
+    /// Прицел и обзор как в RWR: заметность, реакция и очереди ИИ, точность на ходу.
+    pub sight: SightSpec,
     /// Оружие и классы: из `weapons.ron` и `factions.ron` рядом с этим файлом,
     /// а без них — одно оружие `weapon` на всех.
     #[serde(skip)]
@@ -58,7 +61,8 @@ pub struct SoldierSpec {
     /// Скорость бега, м/с.
     pub speed: f32,
     pub radius: f32,
-    /// Дальность обзора, м.
+    /// Дальность обзора ИИ, м: столько до бегущего, до стоящего и лежащего — меньше
+    /// (см. `sight`). Игрок видит свой экран целиком.
     pub vision_range: f32,
     /// Сколько ближайших врагов проверять на прямую видимость за одно «обдумывание».
     pub vision_candidates: u32,
@@ -137,6 +141,7 @@ impl Default for SimConfig {
             suppression: SuppressionSpec::default(),
             command: CommandSpec::default(),
             ranks: RankSpec::default(),
+            sight: SightSpec::default(),
             arsenal: Arsenal::default(),
         }
     }
@@ -147,7 +152,7 @@ impl Default for SoldierSpec {
         SoldierSpec {
             speed: 4.5,
             radius: 0.35,
-            vision_range: 55.0,
+            vision_range: 32.0,
             vision_candidates: 4,
             respawn_time: 6.0,
         }

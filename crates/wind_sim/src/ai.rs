@@ -60,6 +60,11 @@ pub(crate) fn think(world: &mut World) -> u32 {
     for d in &decisions {
         let seen = d.target.map(|t| world.soldiers[t as usize].pos);
         let s = &mut world.soldiers[d.soldier as usize];
+        // Новая цель — огонь не сразу: сначала надо прицелиться.
+        if d.target.is_some() && d.target != s.target {
+            let mut rng = Rng::for_entity(world.seed ^ 0x5EE, world.tick, d.soldier);
+            s.reaction = rng.range(world.config.sight.reaction_min, world.config.sight.reaction_max);
+        }
         s.target = d.target;
         s.retreat = d.retreat;
         // Где видели врага — туда и стрелять на подавление, когда он спрячется.
@@ -143,23 +148,30 @@ fn decide(w: &World, i: usize, taken: &HashMap<(i32, i32), u32>) -> Decision {
     let me = &w.soldiers[i];
     let mut rng = Rng::for_entity(w.seed, w.tick, i as u32);
     let vision = w.config.soldier.vision_range;
-    let vision2 = vision * vision;
+    let sight = &w.config.sight;
+    // Дальше всего видно стреляющего — по вспышкам; бегущего — на всю дальность обзора.
+    let farthest = vision.max((vision * sight.muzzle_factor).min(sight.muzzle_range));
+    let seen = |o: &crate::world::Soldier| {
+        let r = sight.sight_range(vision, o);
+        o.pos.distance_squared(me.pos) < r * r
+    };
 
-    // --- Восприятие: ближайшие враги, потом проверка прямой видимости.
+    // --- Восприятие: ближайшие враги, которых заметно с их расстояния, потом проверка
+    // прямой видимости.
     let mut target = me.target.filter(|&t| {
         let o = &w.soldiers[t as usize];
-        o.alive && o.pos.distance_squared(me.pos) < vision2 && w.map.line_of_sight(me.pos, o.pos)
+        o.alive && seen(o) && w.map.line_of_sight(me.pos, o.pos)
     });
     if target.is_none() {
         let k = (w.config.soldier.vision_candidates as usize).clamp(1, MAX_CANDIDATES);
         let mut nearest: [(f32, u32); MAX_CANDIDATES] = [(f32::INFINITY, 0); MAX_CANDIDATES];
-        w.grid.query(me.pos, vision, |j| {
+        w.grid.query(me.pos, farthest, |j| {
             let o = &w.soldiers[j as usize];
-            if o.team == me.team {
+            if o.team == me.team || !seen(o) {
                 return;
             }
             let d2 = o.pos.distance_squared(me.pos);
-            if d2 >= vision2 || d2 >= nearest[k - 1].0 {
+            if d2 >= nearest[k - 1].0 {
                 return;
             }
             // Вставка в маленький отсортированный массив.

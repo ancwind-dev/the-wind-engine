@@ -44,7 +44,7 @@ pub struct CommandSpec {
 
 impl Default for CommandSpec {
     fn default() -> Self {
-        CommandSpec { enabled: true, interval: 5.0, threat_radius: 40.0, garrison: 3.0, attack_extra: 12.0, enemy_weight: 2.5, stickiness: 60.0 }
+        CommandSpec { enabled: true, interval: 3.0, threat_radius: 40.0, garrison: 3.0, attack_extra: 16.0, enemy_weight: 2.5, stickiness: 60.0 }
     }
 }
 
@@ -174,7 +174,9 @@ mod tests {
         // Пять ничьих точек, десять отрядов у базы: раньше все шли к ближайшей.
         let points: Vec<_> = (0..5).map(|i| point(100.0 + i as f32 * 50.0, None)).collect();
         let squads: Vec<_> = (0..10).map(|_| squad(10.0, NO_OBJECTIVE)).collect();
-        let (orders, plans) = plan(&points, 0, Vec2::ZERO, &squads, &[0; 5], &[0; 5], &CommandSpec::default());
+        // Перевес для атаки 12: на ничью точку нужно два отряда — десяти хватает на все пять.
+        let spec = CommandSpec { attack_extra: 12.0, ..CommandSpec::default() };
+        let (orders, plans) = plan(&points, 0, Vec2::ZERO, &squads, &[0; 5], &[0; 5], &spec);
         assert!(orders.iter().all(|&o| o != NO_OBJECTIVE));
         // На каждую точку — по отряду (6 бойцов закрывают нужду 6), лишние — по нехватке.
         assert!(plans.iter().all(|p| p.squads >= 1), "{plans:?}");

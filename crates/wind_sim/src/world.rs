@@ -165,6 +165,13 @@ pub struct Soldier {
     pub hold: Option<Hold>,
     /// Только у игрока: куда смотрит строй его отряда — куда он шёл последний раз.
     pub squad_heading: Vec2,
+    /// Сколько секунд назад стрелял: стреляющего ИИ замечает дальше (см. `sight`).
+    pub shot_ago: f32,
+    /// ИИ: сколько ещё ждать до первого выстрела по новой цели, с.
+    pub reaction: f32,
+    /// ИИ: сколько ещё длится очередь и пауза после неё, с.
+    pub burst: f32,
+    pub pause: f32,
 }
 
 impl Soldier {
@@ -988,6 +995,10 @@ impl World {
             commander: NO_COMMANDER,
             hold: None,
             squad_heading: Vec2::ZERO,
+            shot_ago: f32::INFINITY,
+            reaction: 0.0,
+            burst: 0.0,
+            pause: 0.0,
             last_seen_timer: 0.0,
             calm: 0.0,
             retreat: None,

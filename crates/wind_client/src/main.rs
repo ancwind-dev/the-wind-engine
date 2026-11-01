@@ -239,6 +239,8 @@ struct Session {
     command: (Command, f32),
     /// Звание в прошлом кадре — чтобы сказать о новом.
     rank_seen: Option<usize>,
+    /// С какой скоростью свой солдат идёт, м/с: от неё разброс прицела.
+    move_speed: f32,
     fog: fog::Fog,
     minimap: minimap::Minimap,
     shots_seen: u32,
@@ -260,6 +262,7 @@ impl Session {
             reload_hold: 0.0,
             command: (Command::None, 0.0),
             rank_seen: None,
+            move_speed: 0.0,
             fog: fog::Fog::default(),
             minimap: minimap::Minimap::default(),
             shots_seen: 0,
@@ -351,11 +354,13 @@ impl Session {
     }
 
     /// Разброс оружия на расстоянии до прицела — в пикселях экрана: с ростом
-    /// разброса в очереди и толчком отдачи.
+    /// разброса в очереди, на бегу и с толчком отдачи.
     fn spread_px(&self, view: &source::View, rect: egui::Rect, aspect: f32) -> f32 {
         let (Some(weapon), Some(me), Some(map)) = (self.source.own_weapon(), view.me_pos, self.source.map()) else { return 4.0 };
         let to = self.aim - me;
-        let half = to.length() * (weapon.spread(self.heat) * 0.5).tan();
+        // На бегу разброс почти втрое больше, чем стоя (как в RWR), — прицел это показывает.
+        let moving = self.source.sight().spread_factor(self.move_speed, false);
+        let half = to.length() * (weapon.spread(self.heat) * moving * 0.5).tan();
         let side = to.normalize_or_zero().perp() * half;
         let vp = self.camera.view_proj(aspect);
         let screen = |p: Vec2| {
@@ -655,6 +660,7 @@ impl Game {
             let server = s.source.own_server_pos();
             if let Some(map) = s.source.map() {
                 input.pos = s.pilot.update(map, server, input.move_dir, speed, radius, dt);
+                s.move_speed = input.move_dir.length() * speed;
             }
             s.source.set_own_pos(input.pos);
         }
@@ -676,7 +682,8 @@ impl Game {
         let own_team = view.round.own_team.filter(|_| view.has_me && self.bench.is_none());
         if let Some(map) = s.source.map() {
             let center = view.me_pos.unwrap_or(s.camera.target);
-            s.fog.update(dt, map, s.source.vision_range(), own_team, center, &view.soldiers);
+            let screen = view.me_pos.filter(|_| view.me.alive).map(|p| (p, s.aim));
+            s.fog.update(dt, map, s.source.vision_range(), own_team, center, screen, &view.soldiers);
         }
         view.soldiers.retain(|x| s.fog.shows(x, own_team));
         if controls && ctx.input(|i| i.key_pressed(egui::Key::M)) {
@@ -711,8 +718,10 @@ impl Game {
         });
         if let Some(me) = focus {
             // Своего солдата камера чуть выносит к прицелу — видно, куда стреляешь.
+            // Как в RWR: камера выносится к курсору — в сторону прицела видно на ~80 %
+            // дальше (та же формула, по которой сервер решает, кто на экране).
             let ahead = if view.me_pos.is_some() {
-                (s.aim - me).clamp_length_max(s.camera.distance * 0.6) * 0.3
+                wind_sim::sight::view_center(me, s.aim) - me
             } else {
                 Vec2::ZERO
             };

@@ -96,17 +96,25 @@ fn rifleman_keeps_firing_where_the_enemy_hid() {
     // Синий видел врага в 20 м, тот исчез; синий стоит и бьёт туда.
     let spot = w.soldiers[0].pos + Vec2::new(20.0, 0.0);
     w.soldiers[0].last_seen = Some(spot);
-    w.soldiers[0].last_seen_timer = 2.0;
+    w.soldiers[0].last_seen_timer = 3.0;
     // При появлении у каждого случайная пауза до первого выстрела — убираем её.
     w.soldiers[0].cooldown = 0.0;
+    // ИИ бьёт очередями с паузами (как в RWR): за 2,5 с — не меньше двух очередей.
     let mut shots = 0;
-    for _ in 0..20 {
+    let mut bursts = 0;
+    let mut last = None;
+    for t in 0..50 {
         w.step();
-        shots += w.events.iter().filter(|e| matches!(e, Event::Shot { shooter: 0, .. })).count();
+        if w.events.iter().any(|e| matches!(e, Event::Shot { shooter: 0, .. })) {
+            shots += 1;
+            // Новая очередь — если перед выстрелом была пауза дольше полсекунды.
+            bursts += last.is_none_or(|l| t - l > 10) as u32;
+            last = Some(t);
+        }
     }
-    assert!(shots >= 3, "огонь на подавление: {shots} выстрелов");
-    // Через 2 с перестаёт.
-    for _ in 0..40 {
+    assert!(shots >= 2 && bursts >= 2, "огонь на подавление: {shots} выстрелов, {bursts} очередей");
+    // Через 3 с перестаёт.
+    for _ in 0..30 {
         w.step();
     }
     w.events.clear();
