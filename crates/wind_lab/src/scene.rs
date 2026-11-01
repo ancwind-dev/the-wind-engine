@@ -68,7 +68,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
                 target: s.target.map(|t| &world.soldiers[t as usize]).filter(|t| t.alive).map(|t| t.pos),
             }
         }),
-        flow: sel.and_then(|i| world.flow.get(world.soldiers[i as usize].objective as usize)),
+        flow: sel.and_then(|i| world.flow.get(world.soldiers[i as usize].objective as usize)).map(|f| (&world.nav, f)),
         hud: None,
         kill_feed: Vec::new(),
         rings,

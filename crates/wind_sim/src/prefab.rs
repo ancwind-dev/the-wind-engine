@@ -238,7 +238,7 @@ pub fn save(path: &Path, prefabs: &[Prefab]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nav::{FlowField, UNREACHABLE};
+    use crate::nav::{UNREACHABLE, distances};
     use glam::Vec2;
 
     /// Пол каждого здания достижим снаружи: двери есть и проходимы. И встроенные,
@@ -253,13 +253,12 @@ mod tests {
                 let p = p.rotated(q);
                 let mut map = Map::new((p.width + 6) as u32, (p.height + 6) as u32);
                 p.stamp(&mut map, 3, 3);
-                let mut field = FlowField::new(Vec2::new(1.5, 1.5));
-                field.compute(&map);
+                let dist = distances(&map, Vec2::new(1.5, 1.5));
                 for y in 0..p.height {
                     for x in 0..p.width {
                         if p.cell(x, y).ground == Some(FLOOR) {
                             let i = map.index(x + 3, y + 3).unwrap();
-                            assert_ne!(field.dist[i], UNREACHABLE, "«{}» (поворот {q}): в клетку ({x}, {y}) не войти", p.name);
+                            assert_ne!(dist[i], UNREACHABLE, "«{}» (поворот {q}): в клетку ({x}, {y}) не войти", p.name);
                         }
                     }
                 }

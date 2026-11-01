@@ -372,7 +372,7 @@ fn fill_circle(map: &mut Map, c: Vec2, r: f32, strength: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nav::{FlowField, UNREACHABLE};
+    use crate::nav::{UNREACHABLE, distances};
     use std::time::Instant;
 
     #[test]
@@ -391,11 +391,10 @@ mod tests {
             let mut targets = layout.capture_points.clone();
             targets.extend(layout.bases);
             for &from in &layout.capture_points {
-                let mut field = FlowField::new(from);
-                field.compute(&map);
+                let dist = distances(&map, from);
                 for &to in &targets {
                     let (x, y) = Map::cell_of(to);
-                    assert_ne!(field.dist[map.index(x, y).unwrap()], UNREACHABLE, "карта {size}/{seed}: от {from:?} не дойти до {to:?}");
+                    assert_ne!(dist[map.index(x, y).unwrap()], UNREACHABLE, "карта {size}/{seed}: от {from:?} не дойти до {to:?}");
                 }
             }
             // Точки и базы — на свободном месте.

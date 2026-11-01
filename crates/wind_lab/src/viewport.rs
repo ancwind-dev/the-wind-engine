@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use wind_sim::Vec2;
 use wind_sim::map::{EMPTY, INDESTRUCTIBLE, Map};
-use wind_sim::nav::FlowField;
+use wind_sim::nav::{FlowField, NavGraph};
 
 pub struct SceneSoldier {
     pub id: u32,
@@ -72,7 +72,7 @@ pub struct Scene<'a> {
     /// Взрывы: (позиция, радиус, возраст в секундах).
     pub blasts: Vec<(Vec2, f32, f32)>,
     pub selected: Option<SelectedInfo>,
-    pub flow: Option<&'a FlowField>,
+    pub flow: Option<(&'a NavGraph, &'a FlowField)>,
     pub hud: Option<Hud>,
     pub kill_feed: Vec<(String, Color32)>,
     /// Кольца на земле (центр, радиус, цвет sRGB 0..1): кисть редактора и т.п.
@@ -472,7 +472,7 @@ impl Viewport {
         // Поле путей к цели выделенного солдата.
         if self.overlays.flow
             && cam.zoom > 3.0
-            && let Some(field) = scene.flow
+            && let Some((nav, field)) = scene.flow
         {
             let step = if cam.zoom > 8.0 { 2 } else { 4 };
             let (x0, y0) = Map::cell_of(Vec2::new(visible.min.x, visible.min.y));
@@ -481,7 +481,7 @@ impl Viewport {
             for y in (y0.max(0)..y1.min(scene.map.height as i32)).step_by(step) {
                 for x in (x0.max(0)..x1.min(scene.map.width as i32)).step_by(step) {
                     let at = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
-                    if let Some(dir) = field.direction(scene.map, at) {
+                    if let Some(dir) = field.direction(nav, scene.map, at) {
                         let a = cam.to_screen(rect, at);
                         painter.arrow(a, vec2(dir.x, dir.y) * step as f32 * cam.zoom * 0.6, stroke);
                     }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use wind_sim::map::{CHUNK, EMPTY, INDESTRUCTIBLE, Map};
 use wind_sim::mapfile::MapFile;
 use wind_sim::mapgen::Layout;
-use wind_sim::nav::{FlowField, UNREACHABLE};
+use wind_sim::nav::{UNREACHABLE, distances};
 use wind_sim::prefab::{Cell, Prefab};
 use wind_sim::Vec2;
 
@@ -673,11 +673,10 @@ impl MapEditor {
                 issues.push(format!("Точка {letter} стоит в стене"));
                 continue;
             }
-            let mut field = FlowField::new(*p);
-            field.compute(m);
+            let dist = distances(m, *p);
             for (team, base) in l.bases.iter().enumerate() {
                 let (bx, by) = Map::cell_of(*base);
-                let reachable = m.index(bx, by).is_some_and(|c| field.dist[c] != UNREACHABLE);
+                let reachable = m.index(bx, by).is_some_and(|c| dist[c] != UNREACHABLE);
                 if !reachable {
                     issues.push(format!("До точки {letter} не дойти от базы {}", names[team]));
                 }

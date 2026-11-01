@@ -11,7 +11,7 @@ use crate::map::{Map, SWIM_DEPTH, WADE_DEPTH};
 use crate::atmosphere::Atmosphere;
 use crate::mapfile::MapFile;
 use crate::mapgen::{self, Layout};
-use crate::nav::FlowField;
+use crate::nav::{FlowField, NavGraph};
 use crate::rng::Rng;
 use crate::round::{EndReason, Phase, Round};
 use crate::squad::{self, NO_SQUAD, Order, Squad};
@@ -24,8 +24,8 @@ use std::time::Instant;
 /// Солдат не идёт ни к какой точке (выберет на следующем «обдумывании»).
 pub const NO_OBJECTIVE: u32 = u32::MAX;
 
-/// Устаревшее поле путей пересчитываем не чаще, тиков (15 с).
-const NAV_REFRESH: u64 = 300;
+/// Граф путей после разрушений пересчитываем не чаще, тиков (3 с).
+const NAV_REFRESH: u64 = 60;
 
 /// С какой скоростью толкает тело убитого пуля и взрыв (у самого центра), м/с
 /// (см. `Soldier::death_push`). Пуля — чтобы тело отпало назад, взрыв — чуть сильнее
@@ -286,6 +286,10 @@ pub struct World {
     pub map: Map,
     pub bases: [Vec2; 2],
     pub points: Vec<CapturePoint>,
+    /// Граф проходов между чанками — общий для всех полей путей (см. `nav`).
+    pub nav: NavGraph,
+    /// На каком тике граф путей пересчитали в последний раз.
+    nav_tick: u64,
     /// Поле путей к каждой точке захвата, по индексу точки.
     pub flow: Vec<FlowField>,
     /// Поле путей к базе каждой команды — для отхода раненых.
@@ -314,9 +318,6 @@ pub struct World {
     pub boats: Vec<Boat>,
     /// Карта в начале — новый раунд начинается с целыми стенами.
     initial_map: Map,
-    /// Глубокая вода по клеткам (`Map::deep_mask`) — для полей путей. Высоты и вода в
-    /// бою не меняются, считаем раз.
-    deep: Vec<bool>,
     pub(crate) grid: SpatialGrid,
 }
 
@@ -342,11 +343,11 @@ impl World {
         // Размер и число точек берём у карты, а не из настроек.
         config.map_size = map.width;
         config.capture_points = capture_points.len() as u32;
-        let deep = map.deep_mask();
+        let nav = NavGraph::build(&map);
         let mut flow: Vec<FlowField> = capture_points.iter().map(|&p| FlowField::new(p)).collect();
-        flow.par_iter_mut().for_each(|f| f.compute_with(&map, &deep));
+        flow.par_iter_mut().for_each(|f| f.compute(&nav, &map));
         let mut base_flow: Vec<FlowField> = bases.iter().map(|&p| FlowField::new(p)).collect();
-        base_flow.par_iter_mut().for_each(|f| f.compute_with(&map, &deep));
+        base_flow.par_iter_mut().for_each(|f| f.compute(&nav, &map));
 
         let points = capture_points
             .iter()
@@ -368,10 +369,11 @@ impl World {
             plans: [Vec::new(), Vec::new()],
             boats: Vec::new(),
             initial_map: map.clone(),
-            deep,
             map,
             bases,
             points,
+            nav,
+            nav_tick: 0,
             flow,
             base_flow,
             soldiers: Vec::new(),
@@ -548,33 +550,27 @@ impl World {
         self.grid.rebuild(soldiers.len(), |i| soldiers[i].alive.then_some(soldiers[i].pos));
     }
 
-    /// После разрушений поля путей устаревают. Пересчитываем не больше одного
-    /// поля за тик, чтобы взрыв не давал рывка.
-    /// Поля путей после разрушений устаревают. Но в бою стены только рушатся,
-    /// новых не бывает — устаревшее поле по-прежнему ведёт куда надо, просто не
-    /// знает о новых проломах. Поэтому пересчитываем не больше одного поля за тик
-    /// и каждое — не чаще раза в `NAV_REFRESH` тиков: в застроенном городе стены
-    /// рушатся почти каждый тик, а поле на карте 1024 считается миллисекунды.
+    /// Пути после разрушений устаревают. Но в бою стены только рушатся, новых не
+    /// бывает — устаревший граф по-прежнему ведёт куда надо, просто не знает о новых
+    /// проломах. Поэтому пересчитываем не чаще раза в `NAV_REFRESH` тиков: в застроенном
+    /// городе стены рушатся почти каждый тик. Пересчёт дешёвый — только задетые чанки
+    /// и расстояния по графу.
     fn update_navigation(&mut self) {
-        let map = &self.map;
-        let tick = self.tick;
-        let due = |f: &FlowField| f.is_stale(map) && tick >= f.computed_tick + NAV_REFRESH;
-        if let Some(field) = self.flow.iter_mut().chain(self.base_flow.iter_mut()).filter(|f| due(f)).min_by_key(|f| f.computed_tick) {
-            field.compute_with(map, &self.deep);
-            field.computed_tick = tick;
+        if self.tick < self.nav_tick + NAV_REFRESH || !self.nav.refresh(&self.map) {
+            return;
         }
+        self.nav_tick = self.tick;
+        let (nav, map) = (&self.nav, &self.map);
+        self.flow.par_iter_mut().chain(self.base_flow.par_iter_mut()).for_each(|f| f.compute(nav, map));
     }
 
-    /// Все поля сразу — когда стены вернулись на место (новый раунд): старые поля
-    /// могут вести сквозь восстановленные стены.
+    /// Всё заново — когда стены вернулись на место (новый раунд): старый граф может вести
+    /// сквозь восстановленные стены.
     fn rebuild_navigation(&mut self) {
-        let map = &self.map;
-        let tick = self.tick;
-        let deep = &self.deep;
-        self.flow.par_iter_mut().chain(self.base_flow.par_iter_mut()).for_each(|f| {
-            f.compute_with(map, deep);
-            f.computed_tick = tick;
-        });
+        self.nav = NavGraph::build(&self.map);
+        self.nav_tick = self.tick;
+        let (nav, map) = (&self.nav, &self.map);
+        self.flow.par_iter_mut().chain(self.base_flow.par_iter_mut()).for_each(|f| f.compute(nav, map));
     }
 
     fn move_soldiers(&mut self) {
@@ -584,6 +580,7 @@ impl World {
         let (seed, tick) = (self.seed, self.tick);
         let prev = snapshot(&self.soldiers);
         let map = &self.map;
+        let nav = &self.nav;
         let flow = &self.flow;
         let grid = &self.grid;
         let radius = spec.radius;
@@ -658,7 +655,7 @@ impl World {
                 if let Some(field) = field {
                     let off = field.target - s.pos;
                     if off.length() > capture_radius * 0.5 {
-                        desired = field.direction(map, s.pos).unwrap_or_else(|| off.normalize_or_zero());
+                        desired = field.direction(nav, map, s.pos).unwrap_or_else(|| off.normalize_or_zero());
                         s.facing = desired.y.atan2(desired.x);
                     }
                 }
@@ -705,7 +702,7 @@ impl World {
                 }
                 let to_objective = field.target - s.pos;
                 if to_objective.length() > capture_radius * 0.5 {
-                    let dir = field.direction(map, s.pos).unwrap_or_else(|| to_objective.normalize_or_zero());
+                    let dir = field.direction(nav, map, s.pos).unwrap_or_else(|| to_objective.normalize_or_zero());
                     // У каждого солдата своё боковое смещение — иначе все идут
                     // по одной линии поля путей гуськом.
                     let lane = (i as u32).wrapping_mul(2_654_435_761) >> 16;

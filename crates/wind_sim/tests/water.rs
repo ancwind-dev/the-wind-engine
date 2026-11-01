@@ -92,7 +92,7 @@ fn ai_paths_go_around_deep_water() {
             if w.map.is_solid_at(from) || w.map.water_depth(from) > 0.0 {
                 continue;
             }
-            if let Some(dir) = field.direction(&w.map, from) {
+            if let Some(dir) = field.direction(&w.nav, &w.map, from) {
                 let next = from + dir * 1.0;
                 let (x, y) = Map::cell_of(next);
                 assert!(!w.map.is_deep(x, y), "путь ведёт в глубину из {from:?}");
