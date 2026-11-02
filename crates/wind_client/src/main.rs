@@ -509,7 +509,7 @@ impl Game {
             seed,
             fire_lock: false,
             toast: None,
-            scene: SceneBuilder::with_characters(characters),
+            scene: SceneBuilder::with_characters(characters).with_props(data_dir().join("models/props")),
             last_frame: Instant::now(),
             started: Instant::now(),
             fps: Fps { frames: 0, window: Instant::now(), worst: 0.0, fps: 0.0, worst_ms: 0.0 },
@@ -811,12 +811,14 @@ impl Game {
                 rings: &squad_rings(&view, s.aim),
                 corpses: &view.corpses,
                 own_team,
+                props: s.source.props(),
                 atmosphere: &atmosphere,
                 viewport_px: [rect.left() * ppp, rect.top() * ppp, rect.width() * ppp, rect.height() * ppp],
                 time,
                 dt,
             };
             let frame = self.scene.build(&input);
+            self.notes.extend(self.scene.take_notes());
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, WorldPaint(Arc::new(frame))));
         }
 

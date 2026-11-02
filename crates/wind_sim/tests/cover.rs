@@ -28,7 +28,7 @@ fn ruins() -> MapFile {
         }
     }
     let layout = Layout { bases: [Vec2::new(8.0, 80.0), Vec2::new(152.0, 80.0)], capture_points: vec![point] };
-    MapFile { name: "руины".into(), map, layout, atmosphere: Atmosphere::default() }
+    MapFile { name: "руины".into(), map, layout, atmosphere: Atmosphere::default(), props: Vec::new() }
 }
 
 #[derive(Default)]

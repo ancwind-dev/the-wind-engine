@@ -10,7 +10,7 @@ use eframe::egui::{self, Color32, RichText};
 use std::path::PathBuf;
 use wind_sim::map::{GROUND_NAMES, INDESTRUCTIBLE};
 use wind_sim::atmosphere::{Atmosphere, Preset};
-use wind_sim::mapfile::MapFile;
+use wind_sim::mapfile::{MapFile, Prop};
 use wind_sim::{SimConfig, Vec2};
 
 /// Цвета покрытия в 2D-виде (sRGB). Порядок — как в `GROUND_NAMES`.
@@ -55,6 +55,11 @@ pub struct MapWorkspace {
     user: Vec<Prefab>,
     /// Имя, под которым сохранить выделенное как здание.
     prefab_name: String,
+    /// Модели предметов в `data/models/props` и когда папку смотрели.
+    prop_models: Vec<String>,
+    prop_models_at: Option<std::time::Instant>,
+    /// Предметы для 3D: карты и тот, что встанет под курсором.
+    shown_props: Vec<Prop>,
 }
 
 impl MapWorkspace {
@@ -76,6 +81,9 @@ impl MapWorkspace {
             builtin: prefab::builtin(),
             user: Vec::new(),
             prefab_name: "моё здание".into(),
+            prop_models: Vec::new(),
+            prop_models_at: None,
+            shown_props: Vec::new(),
         }
         .with_user_prefabs()
     }
@@ -186,6 +194,7 @@ impl MapWorkspace {
                 (egui::Key::Num4, Tool::Points),
                 (egui::Key::Num5, Tool::Select),
                 (egui::Key::Num6, Tool::Buildings),
+                (egui::Key::Num7, Tool::Props),
             ]
             .into_iter()
             .find(|(k, _)| i.key_pressed(*k))
@@ -221,6 +230,9 @@ impl MapWorkspace {
         if rotate && self.editor.tool == Tool::Buildings {
             self.editor.rotate_stamp();
         }
+        if rotate && self.editor.tool == Tool::Props {
+            self.editor.rotate_prop();
+        }
         if escape {
             self.editor.selection = None;
         }
@@ -242,6 +254,29 @@ impl MapWorkspace {
         if let Some(t) = tool {
             self.editor.tool = t;
         }
+        self.refresh_props();
+    }
+
+    /// Модели из папки (не чаще раза в секунду) и предметы для 3D: карты и тот, что
+    /// встанет под курсором.
+    fn refresh_props(&mut self) {
+        if self.prop_models_at.is_none_or(|t| t.elapsed().as_secs_f32() > 1.0) {
+            let dir = self.maps_dir.parent().map_or_else(|| PathBuf::from("data/models/props"), |d| d.join("models/props"));
+            self.prop_models = wind_render::props::list(&dir).into_iter().map(|(name, _, _)| name).collect();
+            self.prop_models_at = Some(std::time::Instant::now());
+            if self.editor.prop_model.is_empty()
+                && let Some(first) = self.prop_models.first()
+            {
+                self.editor.prop_model = first.clone();
+            }
+        }
+        self.shown_props.clone_from(&self.editor.file.props);
+        if self.editor.tool == Tool::Props
+            && !self.pointer.ctrl
+            && let Some(ghost) = self.pointer.world.and_then(|at| self.editor.ghost(at))
+        {
+            self.shown_props.push(ghost);
+        }
     }
 
     /// Применяет инструмент по тому, что произошло во вьюпорте.
@@ -256,6 +291,7 @@ impl MapWorkspace {
             shift,
         };
         self.editor.handle(self.pointer, dt);
+        self.refresh_props();
     }
 
     // --- Отрисовка -----------------------------------------------------------------
@@ -284,8 +320,17 @@ impl MapWorkspace {
             }
             rings.push((at, 0.6, [1.0, 1.0, 1.0]));
         }
+        // Предмет под курсором; с Ctrl — тот, что уберём.
+        if e.tool == Tool::Props
+            && let Some(at) = self.pointer.world
+        {
+            match e.prop_near(at).filter(|_| self.pointer.ctrl) {
+                Some(i) => rings.push((file.props[i].at(), 2.0, [1.0, 0.45, 0.4])),
+                None => rings.push((at, 0.6, [1.0, 1.0, 1.0])),
+            }
+        }
         if let Some(at) = self.pointer.world
-            && !matches!(e.tool, Tool::Points | Tool::Select | Tool::Buildings)
+            && !matches!(e.tool, Tool::Points | Tool::Select | Tool::Buildings | Tool::Props)
         {
             let erase = self.pointer.ctrl && matches!(e.tool, Tool::Walls);
             let color = if erase { [1.0, 0.45, 0.4] } else { [1.0, 1.0, 1.0] };
@@ -324,6 +369,7 @@ impl MapWorkspace {
             lines: lines.unwrap_or_default().into_iter().chain(extra).collect(),
             corpses: Vec::new(),
             boats: Vec::new(),
+            props: &self.shown_props,
             atmosphere: file.atmosphere.clone(),
         }
     }
@@ -340,6 +386,7 @@ impl MapWorkspace {
             Tool::Points => "ЛКМ по пустому месту — новая точка · тяни точку или базу — двигать · Ctrl+ЛКМ — удалить точку",
             Tool::Select => "Тяни ЛКМ — выделить · Ctrl+C — копировать · Ctrl+V — вставить · Delete — стереть стены · Esc — снять",
             Tool::Buildings => "ЛКМ — поставить здание · R — повернуть · Ctrl+V — вставить скопированное · Ctrl+Z — отмена",
+            Tool::Props => "ЛКМ — поставить предмет · R — повернуть на 45° · Ctrl+ЛКМ — убрать ближайший · Ctrl+Z — отмена",
         }
     }
 
@@ -354,6 +401,7 @@ impl MapWorkspace {
             ("4", Tool::Points, Icon::Flag, "Точки и базы"),
             ("5", Tool::Select, Icon::Select, "Выделение"),
             ("6", Tool::Buildings, Icon::Building, "Здания"),
+            ("7", Tool::Props, Icon::Terrain, "Предметы"),
         ];
         for (key, tool, icon, name) in tools {
             let text = format!("{name}   {key}");
@@ -406,6 +454,7 @@ impl MapWorkspace {
         match self.editor.tool {
             Tool::Select => return self.select_panel(ui),
             Tool::Buildings => return self.buildings_panel(ui),
+            Tool::Props => return self.props_panel(ui),
             _ => {}
         }
         let e = &mut self.editor;
@@ -474,7 +523,7 @@ impl MapWorkspace {
                 ui.label(format!("{} из {}", e.file.layout.capture_points.len(), crate::editor::MAX_POINTS));
                 ui.end_row();
             }
-            Tool::Select | Tool::Buildings => {}
+            Tool::Select | Tool::Buildings | Tool::Props => {}
         });
         ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
     }
@@ -539,6 +588,39 @@ impl MapWorkspace {
                 self.editor.rotate_stamp();
             }
         }
+        ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
+    }
+
+    fn props_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Модели").strong());
+        if self.prop_models.is_empty() {
+            ui.label(RichText::new("Нет моделей: положи .glb из Blender в data/models/props").small().color(theme::TEXT_DIM));
+        }
+        for name in &self.prop_models {
+            let count = self.editor.file.props.iter().filter(|p| &p.model == name).count();
+            let text = if count > 0 { format!("{name}   ×{count}") } else { name.clone() };
+            if ui.selectable_label(self.editor.prop_model == *name, text).clicked() {
+                self.editor.prop_model = name.clone();
+            }
+        }
+        ui.add_space(4.0);
+        let e = &mut self.editor;
+        theme::props(ui, "prop_props", |ui| {
+            theme::label(ui, "Поворот");
+            let mut degrees = e.prop_angle.to_degrees().round();
+            if ui.add(egui::DragValue::new(&mut degrees).range(0.0..=359.0).speed(1.0).suffix("°")).changed() {
+                e.prop_angle = degrees.to_radians();
+            }
+            ui.end_row();
+            theme::label(ui, "Размер");
+            ui.add(egui::Slider::new(&mut e.prop_scale, 0.5..=2.0).fixed_decimals(2));
+            ui.end_row();
+            theme::label(ui, "Разброс");
+            ui.checkbox(&mut e.prop_scatter, "свой поворот и размер").on_hover_text("Для деревьев: каждое новое — со своим поворотом и размером ±20 %");
+            ui.end_row();
+        });
+        ui.label(RichText::new(format!("На карте предметов: {}", self.editor.file.props.len())).small());
+        ui.label(RichText::new("Модели — data/models/props/*.glb из Blender; сохранишь там — обновятся тут.").small().color(theme::TEXT_DIM));
         ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
     }
 

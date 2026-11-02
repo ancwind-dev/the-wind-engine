@@ -141,6 +141,7 @@ fn main() {
             ],
         },
         atmosphere: Default::default(),
+        props: Vec::new(),
     };
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/maps/пример");
     file.save(&dir).expect("не удалось сохранить");

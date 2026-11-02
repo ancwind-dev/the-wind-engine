@@ -716,6 +716,8 @@ pub struct RemoteWorld {
     pub corpses: Vec<Corpse>,
     /// Атмосфера карты — для картинки.
     pub atmosphere: Atmosphere,
+    /// Предметы карты (дома, деревья) — из файла карты.
+    pub props: Vec<wind_sim::mapfile::Prop>,
     /// Оружие и классы — из своих `data/weapons.ron` и `data/factions.ron`.
     pub arsenal: Arsenal,
     /// Раунд по последнему снимку.
@@ -745,16 +747,16 @@ impl RemoteWorld {
         if arsenal.fingerprint() != welcome.arsenal_fingerprint {
             return Err("оружие у тебя не такое, как на сервере (data/weapons.ron, data/factions.ron)".into());
         }
-        let (map, layout, atmosphere) = if welcome.map_name.is_empty() {
+        let (map, layout, atmosphere, props) = if welcome.map_name.is_empty() {
             let (map, layout) = mapgen::generate(welcome.map_size, welcome.capture_points, welcome.seed);
-            (map, layout, Atmosphere::default())
+            (map, layout, Atmosphere::default(), Vec::new())
         } else {
             let name = &welcome.map_name;
             let file = MapFile::load(&maps_dir.join(name)).map_err(|e| format!("нет карты «{name}»: {e}"))?;
             if file.fingerprint() != welcome.map_fingerprint {
                 return Err(format!("карта «{name}» у тебя не такая, как на сервере"));
             }
-            (file.map, file.layout, file.atmosphere)
+            (file.map, file.layout, file.atmosphere, file.props)
         };
         let points = layout
             .capture_points
@@ -777,6 +779,7 @@ impl RemoteWorld {
             kill_feed: VecDeque::new(),
             corpses: Vec::new(),
             atmosphere,
+            props,
             arsenal,
             round: Round::default(),
             board: Vec::new(),

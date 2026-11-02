@@ -90,6 +90,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
             })
             .collect(),
         boats: world.boats.iter().filter(|b| b.afloat()).map(|b| (b.pos, b.heading)).collect(),
+        props: &world.props,
         atmosphere: world.atmosphere.clone(),
     }
 }
@@ -185,6 +186,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
         lines: Vec::new(),
         corpses: w.corpses.iter().map(|c| wind_render::CorpseDraw { id: c.id, pos: c.pos, facing: c.facing, team: c.team, age: c.age, push: c.push, blast: c.blast, model: None }).collect(),
         boats: w.boats.iter().filter(|b| b.afloat).map(|b| w.boat_render(b, now)).collect(),
+        props: &w.props,
         atmosphere: w.atmosphere.clone(),
     })
 }

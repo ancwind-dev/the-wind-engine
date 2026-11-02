@@ -3,7 +3,8 @@
 //! - `map.ron` — название, размер, базы, точки захвата;
 //! - `walls.png` — прочность стен (8 бит, 0 — пусто, 255 — скала);
 //! - `height.png` — высота земли в углах клеток (16 бит, 1/256 м), на 1 больше по каждой стороне;
-//! - `ground.png` — покрытие земли (8 бит, номер из `GROUND_NAMES`).
+//! - `ground.png` — покрытие земли (8 бит, номер из `GROUND_NAMES`);
+//! - предметы (дома, деревья, заборы — модели из `data/models/props`) — в `map.ron`.
 //!
 //! Слои — обычные картинки, их можно посмотреть и поправить любым графическим редактором,
 //! как карты RWR.
@@ -28,6 +29,32 @@ struct Meta {
     /// Уровень воды, м; нет — воды нет.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     water: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    props: Vec<Prop>,
+}
+
+/// Предмет на карте: модель `data/models/props/<model>.glb`. Пока только для глаза —
+/// сквозь предметы ходят и стреляют (стены дома, если нужны, рисуют на карте).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Prop {
+    pub model: String,
+    /// Где стоит на карте, м.
+    pub pos: (f32, f32),
+    /// Поворот, рад: при 0 ось +X модели смотрит вдоль +x карты.
+    #[serde(default)]
+    pub angle: f32,
+    #[serde(default = "one")]
+    pub scale: f32,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Prop {
+    pub fn at(&self) -> Vec2 {
+        Vec2::new(self.pos.0, self.pos.1)
+    }
 }
 
 #[derive(Clone)]
@@ -36,13 +63,14 @@ pub struct MapFile {
     pub map: Map,
     pub layout: Layout,
     pub atmosphere: Atmosphere,
+    pub props: Vec<Prop>,
 }
 
 impl MapFile {
     /// Процедурная карта — как раньше генерировал `World::new`.
     pub fn generated(name: &str, size: u32, capture_points: u32, seed: u64) -> Self {
         let (map, layout) = mapgen::generate(size, capture_points, seed);
-        MapFile { name: name.to_owned(), map, layout, atmosphere: Atmosphere::default() }
+        MapFile { name: name.to_owned(), map, layout, atmosphere: Atmosphere::default(), props: Vec::new() }
     }
 
     pub fn load(dir: &Path) -> Result<Self, String> {
@@ -65,6 +93,7 @@ impl MapFile {
                 capture_points: meta.capture_points.into_iter().map(v).collect(),
             },
             atmosphere: meta.atmosphere,
+            props: meta.props,
         })
     }
 
@@ -81,6 +110,7 @@ impl MapFile {
             capture_points: self.layout.capture_points.iter().copied().map(p).collect(),
             atmosphere: self.atmosphere.clone(),
             water: self.map.water,
+            props: self.props.clone(),
         };
         let text = ron::ser::to_string_pretty(&meta, ron::ser::PrettyConfig::default()).map_err(|e| err("map.ron", &e))?;
         std::fs::write(dir.join("map.ron"), text).map_err(|e| err("map.ron", &e))?;

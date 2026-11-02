@@ -6,11 +6,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use wind_sim::map::{CHUNK, EMPTY, INDESTRUCTIBLE, Map};
-use wind_sim::mapfile::MapFile;
+use wind_sim::mapfile::{MapFile, Prop};
 use wind_sim::mapgen::Layout;
 use wind_sim::nav::{UNREACHABLE, distances};
 use wind_sim::prefab::{Cell, Prefab};
 use wind_sim::Vec2;
+use wind_sim::rng::Rng;
 
 pub const HOUSE_WALL: u8 = 120;
 pub const FENCE: u8 = 40;
@@ -27,6 +28,8 @@ pub enum Tool {
     Select,
     /// Ставить готовое здание или скопированный кусок.
     Buildings,
+    /// Ставить предметы: дома, деревья, заборы — модели из `data/models/props`.
+    Props,
 }
 
 /// Выделенные клетки: от (`x0`, `y0`) до (`x1`, `y1`) включительно.
@@ -93,13 +96,18 @@ struct ChunkBackup {
 struct Stroke {
     chunks: HashMap<usize, ChunkBackup>,
     layout: Option<Layout>,
+    /// Предметы карты до шага.
+    props: Option<Vec<Prop>>,
 }
 
 impl Stroke {
     fn is_empty(&self) -> bool {
-        self.chunks.is_empty() && self.layout.is_none()
+        self.chunks.is_empty() && self.layout.is_none() && self.props.is_none()
     }
 }
+
+/// Ctrl+ЛКМ убирает ближайший предмет не дальше этого, м.
+const PROP_PICK: f32 = 3.0;
 
 /// Что сейчас тащим инструментом «Точки».
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -136,6 +144,14 @@ pub struct MapEditor {
     pub clipboard: Option<Prefab>,
     /// Что ставит инструмент «Здания» — уже повёрнутое.
     pub stamp: Option<Prefab>,
+    /// Что ставит инструмент «Предметы»: модель, поворот (рад) и размер.
+    pub prop_model: String,
+    pub prop_angle: f32,
+    pub prop_scale: f32,
+    /// У каждого нового предмета свой поворот и чуть другой размер — для деревьев.
+    pub prop_scatter: bool,
+    /// Сколько предметов поставлено — от этого зависит разброс следующего.
+    placed: u32,
 }
 
 impl MapEditor {
@@ -162,6 +178,11 @@ impl MapEditor {
             selection: None,
             clipboard: None,
             stamp: None,
+            prop_model: String::new(),
+            prop_angle: 0.0,
+            prop_scale: 1.0,
+            prop_scatter: false,
+            placed: 0,
         };
         editor.validate();
         editor
@@ -187,6 +208,7 @@ impl MapEditor {
                 capture_points: vec![Vec2::splat(s * 0.5)],
             },
             atmosphere: Default::default(),
+            props: Vec::new(),
         }
     }
 
@@ -218,6 +240,7 @@ impl MapEditor {
             match self.tool {
                 Tool::Points => self.press_points(at, p.ctrl),
                 Tool::Buildings => self.place_stamp(at),
+                Tool::Props => self.press_props(at, p.ctrl),
                 _ => {}
             }
         }
@@ -245,7 +268,7 @@ impl MapEditor {
                 Tool::Terrain => self.sculpt(at, p, dt),
                 Tool::Points => self.drag_handle(at),
                 Tool::Select => self.selection = self.drag_from.map(|from| Selection::between(from, at)),
-                Tool::Walls | Tool::Buildings => {}
+                Tool::Walls | Tool::Buildings | Tool::Props => {}
             }
         }
         if p.released {
@@ -354,6 +377,48 @@ impl MapEditor {
         }
         if ground_changed {
             self.file.map.ground_revision += 1;
+        }
+    }
+
+    // --- Предметы ---------------------------------------------------------------
+
+    /// Какой предмет встанет в `at`: с разбросом — со своим поворотом и размером.
+    pub fn ghost(&self, at: Vec2) -> Option<Prop> {
+        if self.prop_model.is_empty() {
+            return None;
+        }
+        let (mut angle, mut scale) = (self.prop_angle, self.prop_scale);
+        if self.prop_scatter {
+            let mut rng = Rng::new(0x9E37 + self.placed as u64);
+            angle += rng.range(0.0, std::f32::consts::TAU);
+            scale *= rng.range(0.85, 1.25);
+        }
+        Some(Prop { model: self.prop_model.clone(), pos: (at.x, at.y), angle, scale })
+    }
+
+    /// Ближайший к `at` предмет, который уберёт Ctrl+ЛКМ.
+    pub fn prop_near(&self, at: Vec2) -> Option<usize> {
+        let d = |p: &Prop| p.at().distance(at);
+        (0..self.file.props.len()).filter(|&i| d(&self.file.props[i]) < PROP_PICK).min_by(|&a, &b| d(&self.file.props[a]).total_cmp(&d(&self.file.props[b])))
+    }
+
+    /// R: повернуть следующий предмет на 45°.
+    pub fn rotate_prop(&mut self) {
+        self.prop_angle = (self.prop_angle + std::f32::consts::FRAC_PI_4).rem_euclid(std::f32::consts::TAU);
+    }
+
+    fn press_props(&mut self, at: Vec2, remove: bool) {
+        let before = self.file.props.clone();
+        if remove {
+            let Some(i) = self.prop_near(at) else { return };
+            self.file.props.remove(i);
+        } else {
+            let Some(p) = self.ghost(at) else { return };
+            self.file.props.push(p);
+            self.placed += 1;
+        }
+        if let Some(stroke) = &mut self.stroke {
+            stroke.props = Some(before);
         }
     }
 
@@ -631,6 +696,9 @@ impl MapEditor {
         if let Some(layout) = &mut stroke.layout {
             std::mem::swap(layout, &mut self.file.layout);
         }
+        if let Some(props) = &mut stroke.props {
+            std::mem::swap(props, &mut self.file.props);
+        }
     }
 
     pub fn undo(&mut self) {
@@ -799,5 +867,40 @@ mod tests {
         assert_eq!(e.file.layout.capture_points.len(), 1);
         e.undo();
         assert_eq!(e.file.layout.capture_points.len(), 2);
+    }
+
+    #[test]
+    fn props_place_remove_and_undo() {
+        let mut e = MapEditor::new(MapEditor::blank("t", 128), 10.0);
+        e.tool = Tool::Props;
+        // Без выбранной модели ставить нечего.
+        click(&mut e, Vec2::new(30.0, 30.0), false);
+        assert!(e.file.props.is_empty() && !e.can_undo());
+        e.prop_model = "изба".into();
+        e.rotate_prop();
+        click(&mut e, Vec2::new(30.0, 30.0), false);
+        e.prop_model = "берёза".into();
+        e.prop_scatter = true;
+        click(&mut e, Vec2::new(50.0, 30.0), false);
+        click(&mut e, Vec2::new(60.0, 30.0), false);
+        assert_eq!(e.file.props.len(), 3);
+        assert!((e.file.props[0].angle - std::f32::consts::FRAC_PI_4).abs() < 1e-6);
+        // С разбросом у берёз разные поворот и размер.
+        assert_ne!(e.file.props[1].angle, e.file.props[2].angle);
+        assert_ne!(e.file.props[1].scale, e.file.props[2].scale);
+        // Ctrl+ЛКМ убирает ближайший, а далеко от предметов — ничего.
+        click(&mut e, Vec2::new(51.0, 31.0), true);
+        assert_eq!(e.file.props.len(), 2);
+        assert!(e.file.props.iter().all(|p| p.at() != Vec2::new(50.0, 30.0) || p.model != "берёза"));
+        click(&mut e, Vec2::new(100.0, 100.0), true);
+        assert_eq!(e.file.props.len(), 2);
+        e.undo();
+        assert_eq!(e.file.props.len(), 3);
+        e.undo();
+        e.undo();
+        e.undo();
+        assert!(e.file.props.is_empty());
+        e.redo();
+        assert_eq!(e.file.props[0].model, "изба");
     }
 }

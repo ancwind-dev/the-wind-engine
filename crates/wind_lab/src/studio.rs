@@ -350,6 +350,7 @@ impl Studio {
             lines: Vec::new(),
             corpses,
             boats: Vec::new(),
+            props: &[],
             atmosphere: self.atmosphere.clone(),
         };
         let rect = ui.max_rect();
@@ -403,7 +404,7 @@ enum Act {
 }
 
 /// Папка `data/` — рядом с `sim.ron`.
-fn data_dir() -> std::path::PathBuf {
+pub fn data_dir() -> std::path::PathBuf {
     crate::find_config().parent().map_or_else(|| std::path::PathBuf::from("data"), |p| p.to_path_buf())
 }
 

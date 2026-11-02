@@ -146,6 +146,14 @@ impl Local {
 }
 
 impl Source {
+    /// Предметы карты: дома, деревья, заборы.
+    pub fn props(&self) -> &[wind_sim::mapfile::Prop] {
+        match self {
+            Source::Local(l) => &l.world.props,
+            Source::Remote(c) => c.world.as_ref().map_or(&[], |w| &w.props),
+        }
+    }
+
     pub fn map(&self) -> Option<&Map> {
         match self {
             Source::Local(l) => Some(&l.world.map),

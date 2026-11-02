@@ -15,6 +15,9 @@ use std::sync::{Arc, Mutex};
 use glam::camera::rh::{proj::directx as proj, view};
 use glam::{Mat4, Vec2, Vec3};
 use wind_sim::map::{CHUNK, Map};
+use wind_sim::mapfile::Prop;
+use crate::props::PropLibrary;
+use std::path::PathBuf;
 
 pub struct SoldierDraw {
     pub id: u32,
@@ -95,6 +98,8 @@ pub struct DrawInput<'a> {
     pub corpses: &'a [CorpseDraw],
     /// Наша команда: силуэты сквозь стены — только у неё. `None` — видно всех.
     pub own_team: Option<u8>,
+    /// Предметы карты: дома, деревья, заборы (модели из `data/models/props`).
+    pub props: &'a [Prop],
     pub time: f32,
     /// Время с прошлого кадра, с — для анимации шага.
     pub dt: f32,
@@ -147,6 +152,10 @@ pub struct SceneBuilder {
     /// Готовая поза для солдат с явным видом (`Look`) — редактор анимаций в студии
     /// показывает так правленый клип.
     pub pose_override: Option<crate::character::Pose>,
+    /// Модели предметов из папки — перечитываются на лету.
+    props: PropLibrary,
+    /// Что не прочиталось из моделей предметов — забирает `take_notes`.
+    notes: Vec<String>,
 }
 
 /// Ширина сгиба по умолчанию, воксели.
@@ -169,6 +178,8 @@ impl Default for SceneBuilder {
             rwr_exact: true,
             crumbled: Vec::new(),
             pose_override: None,
+            props: PropLibrary::default(),
+            notes: Vec::new(),
         }
     }
 }
@@ -197,6 +208,17 @@ fn view_radius(camera: &Camera) -> f32 {
 impl SceneBuilder {
     pub fn with_characters(characters: Option<Arc<CharacterSet>>) -> Self {
         SceneBuilder { characters, ..Default::default() }
+    }
+
+    /// Модели предметов — из папки `dir` (обычно `data/models/props`).
+    pub fn with_props(mut self, dir: PathBuf) -> Self {
+        self.props = PropLibrary::new(dir);
+        self
+    }
+
+    /// Ошибки чтения моделей предметов с прошлого раза.
+    pub fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
     }
 
     /// Точки скелета тела убитого солдата `id` (мир, м) — для скелета в студии.
@@ -420,6 +442,35 @@ impl SceneBuilder {
             batches.push((mesh, instances.len() as u32, list.len() as u32));
             instances.extend_from_slice(list);
         }
+
+        // Предметы: новые и изменённые модели — на GPU, экземпляры — по моделям.
+        let (loaded, errors) = self.props.poll();
+        self.notes.extend(errors);
+        if !loaded.is_empty() {
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).props.extend(loaded);
+        }
+        let mut by_prop: Vec<(&str, Vec<Instance>)> = Vec::new();
+        for p in input.props {
+            let Some(radius) = self.props.radius(&p.model) else { continue };
+            let at = p.at();
+            let reach = reach + radius * p.scale;
+            if at.distance_squared(cam.target) > reach * reach {
+                continue;
+            }
+            let m = Mat4::from_translation(to_3d(at, input.map.height_at(at)))
+                * Mat4::from_rotation_y(-p.angle)
+                * Mat4::from_scale(Vec3::splat(p.scale));
+            let instance = Instance { model: m.to_cols_array_2d(), tint: [1.0, 1.0, 1.0, 0.5] };
+            match by_prop.iter_mut().find(|(name, _)| *name == p.model) {
+                Some((_, list)) => list.push(instance),
+                None => by_prop.push((&p.model, vec![instance])),
+            }
+        }
+        let mut prop_batches = Vec::new();
+        for (name, list) in by_prop {
+            prop_batches.push((name.to_owned(), instances.len() as u32, list.len() as u32));
+            instances.extend(list);
+        }
         let mut skins = Vec::new();
         let mut char_batches = Vec::new();
         for (mesh, list) in by_char.iter().enumerate() {
@@ -433,6 +484,7 @@ impl SceneBuilder {
             globals: self.globals(input),
             instances,
             batches,
+            prop_batches,
             char_batches,
             skins,
             bones,

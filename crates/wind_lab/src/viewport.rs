@@ -83,6 +83,8 @@ pub struct Scene<'a> {
     pub corpses: Vec<wind_render::CorpseDraw>,
     /// Лодки на воде: (где, куда смотрит нос).
     pub boats: Vec<(Vec2, f32)>,
+    /// Предметы карты (для 3D): дома, деревья, заборы.
+    pub props: &'a [wind_sim::mapfile::Prop],
     /// Атмосфера карты (для 3D).
     pub atmosphere: wind_sim::atmosphere::Atmosphere,
 }
@@ -183,7 +185,7 @@ impl Viewport {
 
     /// Свои солдаты для 3D (из `wind_render::install`).
     pub fn set_characters(&mut self, characters: Option<std::sync::Arc<wind_render::character::CharacterSet>>) {
-        self.scene_3d = wind_render::SceneBuilder::with_characters(characters);
+        self.scene_3d = wind_render::SceneBuilder::with_characters(characters).with_props(crate::studio::data_dir().join("models/props"));
     }
 
     /// Перестроить карту (2D-текстуру и 3D-меши), не трогая камеру.
@@ -349,6 +351,7 @@ impl Viewport {
             rings: &scene.rings,
             corpses: &scene.corpses,
             boats: &scene.boats,
+            props: scene.props,
             own_team: None,
             atmosphere: &scene.atmosphere,
             viewport_px: {

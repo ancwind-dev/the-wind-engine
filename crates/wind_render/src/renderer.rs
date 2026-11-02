@@ -96,6 +96,8 @@ pub struct PendingMap {
     pub decal_size: Option<(u32, u32)>,
     /// Изменённые прямоугольники следов: (x, y, ширина, высота) и тексели по 2 байта.
     pub decal_rects: Vec<([u32; 4], Vec<u8>)>,
+    /// Новые и изменённые модели предметов: (имя, меш).
+    pub props: Vec<(String, Mesh)>,
 }
 
 /// Всё, что нужно GPU для одного кадра. Собирает [`crate::scene::SceneBuilder`].
@@ -105,6 +107,8 @@ pub struct FrameData {
     pub instances: Vec<Instance>,
     /// (меш, первый экземпляр, сколько).
     pub batches: Vec<(usize, u32, u32)>,
+    /// Предметы: (модель, первый экземпляр, сколько) — экземпляры после обычных.
+    pub prop_batches: Vec<(String, u32, u32)>,
     /// Свои солдаты и оружие: (меш, уровень детализации, первый экземпляр, сколько).
     pub char_batches: Vec<(usize, usize, u32, u32)>,
     pub skins: Vec<SkinInstance>,
@@ -181,6 +185,9 @@ pub struct WorldRenderer {
     /// Меши чанков карты: стены, земля, вода.
     chunks: HashMap<u32, (Option<GpuMesh>, GpuMesh, Option<GpuMesh>)>,
     batches: Vec<(usize, u32, u32)>,
+    /// Модели предметов по имени (см. `props`).
+    props: HashMap<String, GpuMesh>,
+    prop_batches: Vec<(String, u32, u32)>,
     visible: Vec<u32>,
     /// Свои солдаты и оружие: тени — гранями, картинка — точками, как у RWR.
     character_shadow: wgpu::RenderPipeline,
@@ -757,6 +764,8 @@ impl WorldRenderer {
             identity,
             chunks: HashMap::new(),
             batches: Vec::new(),
+            props: HashMap::new(),
+            prop_batches: Vec::new(),
             visible: Vec::new(),
             character_shadow,
             char_meshes,
@@ -801,6 +810,10 @@ impl WorldRenderer {
                 let terrain = GpuMesh::new(device, &meshes.terrain, "map terrain");
                 let water = meshes.water.map(|m| GpuMesh::new(device, &m, "map water"));
                 self.chunks.insert(chunk, (walls, terrain, water));
+            }
+            for (name, mesh) in pending.props.drain(..) {
+                let gpu = GpuMesh::new(device, &mesh, &format!("prop {name}"));
+                self.props.insert(name, gpu);
             }
             if let Some((w, h, cells)) = pending.ground.take() {
                 let size = self.ground_texture.size();
@@ -847,6 +860,7 @@ impl WorldRenderer {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&frame.instances));
         }
         self.batches.clone_from(&frame.batches);
+        self.prop_batches.clone_from(&frame.prop_batches);
         self.char_batches.clone_from(&frame.char_batches);
         if frame.particles.len() > self.particle_capacity {
             self.particle_capacity = frame.particles.len().next_power_of_two();
@@ -1016,6 +1030,11 @@ impl WorldRenderer {
         for &(mesh, first, count) in &self.batches {
             if count > 0 {
                 self.meshes[mesh].draw(pass, first..first + count);
+            }
+        }
+        for (name, first, count) in &self.prop_batches {
+            if let Some(mesh) = self.props.get(name) {
+                mesh.draw(pass, *first..first + count);
             }
         }
     }

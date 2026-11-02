@@ -305,6 +305,8 @@ pub struct World {
     pub map_file: Option<(String, u64)>,
     /// Атмосфера карты — только для картинки.
     pub atmosphere: Atmosphere,
+    /// Предметы карты (дома, деревья) — только для отрисовки.
+    pub props: Vec<crate::mapfile::Prop>,
     /// Раунд: идёт бой или перерыв, сколько времени, кто держит все точки.
     pub round: Round,
     /// Отряды обеих команд и приказ каждому солдату на этот тик (по номеру солдата).
@@ -331,10 +333,11 @@ impl World {
     /// Мир на карте из файла (или из редактора).
     pub fn from_file(config: SimConfig, seed: u64, file: MapFile) -> Self {
         let id = (file.name.clone(), file.fingerprint());
-        let atmosphere = file.atmosphere;
+        let (atmosphere, props) = (file.atmosphere, file.props);
         let mut world = Self::with_map(config, seed, file.map, file.layout);
         world.map_file = Some(id);
         world.atmosphere = atmosphere;
+        world.props = props;
         world
     }
 
@@ -362,6 +365,7 @@ impl World {
             tick: 0,
             map_file: None,
             atmosphere: Atmosphere::default(),
+            props: Vec::new(),
             round: Round::default(),
             squads: Vec::new(),
             orders: Vec::new(),
