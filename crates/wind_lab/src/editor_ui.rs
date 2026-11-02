@@ -15,8 +15,8 @@ use wind_sim::{SimConfig, Vec2};
 
 /// Цвета покрытия в 2D-виде (sRGB). Порядок — как в `GROUND_NAMES`.
 pub const GROUND_2D: [Color32; 6] = [
-    Color32::from_rgb(78, 92, 58),
-    Color32::from_rgb(110, 106, 72),
+    Color32::from_rgb(104, 96, 56),
+    Color32::from_rgb(128, 110, 66),
     Color32::from_rgb(102, 86, 64),
     Color32::from_rgb(170, 156, 116),
     Color32::from_rgb(66, 66, 70),

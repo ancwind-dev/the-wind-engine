@@ -233,16 +233,16 @@ fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec
 fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
     var c: vec3<f32>;
     switch m {
-        case 1u: { c = vec3<f32>(0.52, 0.50, 0.33); }  // сухая трава
+        case 1u: { c = vec3<f32>(0.56, 0.48, 0.28); }  // сухая трава
         case 2u: { c = vec3<f32>(0.47, 0.40, 0.30); }  // земля
         case 3u: { c = vec3<f32>(0.74, 0.68, 0.50); }  // песок
         case 4u: { c = vec3<f32>(0.30, 0.30, 0.31); }  // асфальт
         case 5u: { c = vec3<f32>(0.62, 0.61, 0.58); }  // бетон
-        default: { c = vec3<f32>(0.42, 0.48, 0.28); }  // трава
+        default: { c = vec3<f32>(0.47, 0.43, 0.24); }  // трава (осенняя)
     }
     // Под травяным ковром земля темнее: просветы между травинками — глубина, а не пятна.
     if (m <= 1u && g.wind.w > 0.5) {
-        c = select(vec3<f32>(0.16, 0.30, 0.15), vec3<f32>(0.36, 0.34, 0.18), m == 1u);
+        c = select(vec3<f32>(0.26, 0.24, 0.12), vec3<f32>(0.33, 0.29, 0.15), m == 1u);
     }
     // Лёгкая разница по клеткам (воксельный вид) и мягкие пятна внутри материала.
     return c * (0.95 + 0.05 * hash2(floor(p))) * (0.94 + 0.08 * noise(p / 4.0));
@@ -289,7 +289,7 @@ fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
 fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
     let size = g.params.x;
-    let albedo = vec3<f32>(0.42, 0.48, 0.28) * 0.45 * (0.95 + 0.05 * hash2(floor(p)));
+    let albedo = vec3<f32>(0.47, 0.43, 0.24) * 0.45 * (0.95 + 0.05 * hash2(floor(p)));
     let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
@@ -388,22 +388,24 @@ fn vs_grass(v: GrassIn) -> GrassOut {
 @fragment
 fn fs_grass(in: GrassOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
-    // Пятна по полю: крупный шум с мелким поверх, высокий контраст.
-    let n = noise(p * 0.11) * 0.75 + noise(p * 0.37 + vec2<f32>(17.0, 9.0)) * 0.25;
-    let v = clamp((n - 0.5) * 2.2 + 0.5, 0.0, 1.0);
-    // Зелень: тень — сочная середина — выгоревшая на солнце.
-    let c0 = vec3<f32>(0.13, 0.30, 0.17);
-    let c1 = vec3<f32>(0.24, 0.48, 0.19);
-    let c2 = vec3<f32>(0.39, 0.62, 0.25);
-    let c3 = vec3<f32>(0.60, 0.74, 0.37);
-    var albedo = mix(mix(c0, c1, smoothstep(0.0, 0.38, v)), mix(c2, c3, smoothstep(0.65, 1.0, v)), smoothstep(0.3, 0.7, v));
-    // Сухая трава — к соломе.
-    let dry = mix(vec3<f32>(0.46, 0.44, 0.22), vec3<f32>(0.80, 0.72, 0.42), v);
-    albedo = mix(albedo, dry, in.dry * 0.85);
-    // У каждой травинки своя яркость; у корня темнее — глубина ковра.
-    albedo *= (0.9 + 0.16 * in.rand) * mix(0.72, 1.0, smoothstep(0.0, 0.7, in.t));
-    // Наклонённая порывом — светлее: по полю бегут светлые волны.
-    albedo += vec3<f32>(0.10, 0.11, 0.05) * in.gust * in.gust * in.t;
+    // Осень — одна палитра на всю траву игры (с осеннего концепта): тёмная олива в тени —
+    // олива — охра — солома. Пятна по полю мягкие: крупный шум с мелким поверх.
+    let n = noise(p * 0.09) * 0.7 + noise(p * 0.31 + vec2<f32>(17.0, 9.0)) * 0.3;
+    // «Сухая трава» — не другой цвет, а та же палитра, сдвинутая к соломе.
+    let v = clamp((n - 0.5) * 1.5 + 0.5 + in.dry * 0.22, 0.0, 1.0);
+    let c0 = vec3<f32>(0.29, 0.28, 0.14);
+    let c1 = vec3<f32>(0.44, 0.41, 0.19);
+    let c2 = vec3<f32>(0.58, 0.49, 0.23);
+    let c3 = vec3<f32>(0.70, 0.59, 0.30);
+    var albedo = mix(c0, c1, smoothstep(0.0, 0.35, v));
+    albedo = mix(albedo, c2, smoothstep(0.35, 0.7, v));
+    albedo = mix(albedo, c3, smoothstep(0.7, 1.0, v));
+    // Редкие рыжие стебли, как на концепте.
+    albedo = mix(albedo, vec3<f32>(0.55, 0.33, 0.17), step(0.93, fract(in.rand * 7.31)) * 0.45);
+    // У каждой травинки чуть своя яркость; у корня темнее — глубина ковра.
+    albedo *= (0.93 + 0.1 * in.rand) * mix(0.75, 1.0, smoothstep(0.0, 0.7, in.t));
+    // Наклонённая порывом — чуть светлее: по полю бегут светлые волны.
+    albedo += vec3<f32>(0.07, 0.06, 0.03) * in.gust * in.gust * in.t;
     let size = vec2<f32>(textureDimensions(ground_tex));
     albedo = zones(battle_traces(albedo, p, size), p);
     let n_ground = normalize(in.normal);
