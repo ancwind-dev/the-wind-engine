@@ -34,6 +34,10 @@ pub struct Atmosphere {
     pub occlusion: f32,
     /// Затемнение краёв экрана, 0..1.
     pub vignette: f32,
+    /// Ветер: сила (0 — штиль, 1 — свежий, 2 — буря) и откуда дует (азимут, градусы).
+    /// Его видно по траве.
+    pub wind: f32,
+    pub wind_direction: f32,
 }
 
 impl Default for Atmosphere {
@@ -83,6 +87,8 @@ impl Atmosphere {
             outline: 0.7,
             occlusion: 0.5,
             vignette: 0.35,
+            wind: 0.6,
+            wind_direction: 70.0,
         };
         match p {
             Preset::Day => base,
@@ -141,6 +147,13 @@ impl Atmosphere {
     }
 
     /// Направление НА солнце в 3D (x — восток, y — вверх, z — юг).
+    /// Куда дует ветер: угол на карте (0 — вдоль +x, π/2 — вдоль +y). Азимут — откуда.
+    pub fn wind_angle(&self) -> f32 {
+        let az = self.wind_direction.to_radians();
+        // Откуда: север (−y) — 0°, восток (+x) — 90°; дует в обратную сторону.
+        az.cos().atan2(-az.sin())
+    }
+
     pub fn sun_direction(&self) -> [f32; 3] {
         let (az, el) = (self.sun_azimuth.to_radians(), self.sun_elevation.to_radians());
         // Азимут от севера (−z) по часовой: восток (+x) — 90°.

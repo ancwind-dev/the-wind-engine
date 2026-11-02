@@ -15,6 +15,8 @@ pub struct Settings {
     pub fullscreen: bool,
     /// Размер окна в пикселях — когда игра в окне.
     pub resolution: (u32, u32),
+    /// Рисовать траву (на слабых видеокартах можно выключить).
+    pub grass: bool,
     /// Бой против ИИ: солдат на команду и сторона случайной карты, м.
     pub soldiers_per_team: u32,
     pub map_size: u32,
@@ -34,6 +36,7 @@ impl Default for Settings {
             volume: 0.8,
             fullscreen: true,
             resolution: (1600, 900),
+            grass: true,
             soldiers_per_team: 300,
             map_size: 512,
             map_file: String::new(),
@@ -136,6 +139,7 @@ mod tests {
             volume: 0.35,
             fullscreen: false,
             resolution: (1366, 768),
+            grass: false,
             soldiers_per_team: 120,
             map_size: 256,
             map_file: "пример".into(),

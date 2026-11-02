@@ -152,6 +152,8 @@ pub struct SceneBuilder {
     /// Готовая поза для солдат с явным видом (`Look`) — редактор анимаций в студии
     /// показывает так правленый клип.
     pub pose_override: Option<crate::character::Pose>,
+    /// Рисовать траву (на слабых машинах можно выключить).
+    pub grass: bool,
     /// Модели предметов из папки — перечитываются на лету.
     props: PropLibrary,
     /// Что не прочиталось из моделей предметов — забирает `take_notes`.
@@ -178,6 +180,7 @@ impl Default for SceneBuilder {
             rwr_exact: true,
             crumbled: Vec::new(),
             pose_override: None,
+            grass: true,
             props: PropLibrary::default(),
             notes: Vec::new(),
         }
@@ -480,8 +483,18 @@ impl SceneBuilder {
             }
         }
 
+        // Трава — лоскуты у камеры и в кадре.
+        let globals = self.globals(input);
+        let mut grass = Vec::new();
+        let mut grass_lods = [0; 3];
+        if self.grass {
+            let radius = (cam.distance * 1.9 + 8.0).min(90.0);
+            let lods = crate::grass::patches(input.map, Mat4::from_cols_array_2d(&globals.view_proj), cam.target, radius, &mut grass);
+            grass_lods = lods.map(|n| n as u32);
+        }
+
         FrameData {
-            globals: self.globals(input),
+            globals,
             instances,
             batches,
             prop_batches,
@@ -489,6 +502,8 @@ impl SceneBuilder {
             skins,
             bones,
             particles: self.effects.particles(cam.eye()),
+            grass,
+            grass_lods,
             map: self.pending.clone(),
             visible_chunks,
         }
@@ -661,6 +676,7 @@ impl SceneBuilder {
             post: [atmo.outline, atmo.occlusion, atmo.vignette, cam.far()],
             screen: input.viewport_px,
             skin: [self.joint_blend, self.rwr_exact as u8 as f32, 0.0, 0.0],
+            wind: [atmo.wind, atmo.wind_angle(), input.map.water.unwrap_or(-1.0e4), self.grass as u8 as f32],
             points,
         }
     }

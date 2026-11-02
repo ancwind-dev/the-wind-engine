@@ -2,6 +2,7 @@
 //! и вызывается из paint callback (см. [`WorldPaint`]).
 
 use crate::character::{CharVertex, CharacterSet, LODS, PointVertex};
+use crate::grass::{GrassPatch, GrassVertex};
 use crate::mapmesh::ChunkMeshes;
 use crate::models::{self, MESH_COUNT};
 use crate::voxel::{Mesh, Vertex};
@@ -48,6 +49,9 @@ pub struct Globals {
     pub screen: [f32; 4],
     /// x — ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
     pub skin: [f32; 4],
+    /// x — сила ветра, y — куда дует (рад, по карте), z — уровень воды (нет — очень низко),
+    /// w — 1, если рисуется трава.
+    pub wind: [f32; 4],
     pub points: [GroundPoint; MAX_POINTS],
 }
 
@@ -116,6 +120,10 @@ pub struct FrameData {
     pub bones: Vec<[[f32; 4]; 4]>,
     /// Пыль и дым, от дальних к ближним.
     pub particles: Vec<Particle>,
+    /// Лоскуты травы у камеры (см. `grass`), по дальности подряд.
+    pub grass: Vec<GrassPatch>,
+    /// Сколько лоскутов каждой дальности (`grass::LOD_BLADES`).
+    pub grass_lods: [u32; 3],
     pub map: Arc<Mutex<PendingMap>>,
     /// Чанки, которые стоит рисовать в этом кадре.
     pub visible_chunks: Vec<u32>,
@@ -187,6 +195,12 @@ pub struct WorldRenderer {
     batches: Vec<(usize, u32, u32)>,
     /// Модели предметов по имени (см. `props`).
     props: HashMap<String, GpuMesh>,
+    /// Трава: меш лоскута (вершины `GrassVertex`) и лоскуты кадра.
+    grass: wgpu::RenderPipeline,
+    grass_mesh: GpuMesh,
+    grass_patches: wgpu::Buffer,
+    grass_capacity: usize,
+    grass_lods: [u32; 3],
     prop_batches: Vec<(String, u32, u32)>,
     visible: Vec<u32>,
     /// Свои солдаты и оружие: тени — гранями, картинка — точками, как у RWR.
@@ -364,9 +378,10 @@ impl WorldRenderer {
         let ground_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ground"),
             entries: &[
+                // Покрытие нужно и вершинам травы: расти ли травинке.
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -539,6 +554,43 @@ impl WorldRenderer {
             multiview_mask: None,
             cache: None,
         });
+
+        // Трава: обе стороны лент, без тени; лоскуты — экземплярами.
+        let grass_buffers = [
+            Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<GrassVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3, 2 => Float32, 3 => Float32, 4 => Float32],
+            }),
+            Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<GrassPatch>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![5 => Float32x2, 6 => Float32x4, 7 => Float32, 8 => Float32],
+            }),
+        ];
+        let grass = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("grass"),
+            layout: Some(&terrain_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_grass"),
+                compilation_options: Default::default(),
+                buffers: &grass_buffers,
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(depth(true, Default::default())),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_grass"),
+                compilation_options: Default::default(),
+                targets: &color_target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let (grass_vertices, grass_indices) = crate::grass::patch_mesh(7);
+        let grass_mesh = GpuMesh::raw(device, bytemuck::cast_slice(&grass_vertices), &grass_indices, "grass patch");
 
         // Свои солдаты — точками, как у RWR. Три прохода: силуэт цвета команды там,
         // где солдата закрывает стена (глубина «дальше»), крупные чёрные точки (обводка)
@@ -765,6 +817,11 @@ impl WorldRenderer {
             chunks: HashMap::new(),
             batches: Vec::new(),
             props: HashMap::new(),
+            grass,
+            grass_mesh,
+            grass_patches: grass_buffer(device, 1024),
+            grass_capacity: 1024,
+            grass_lods: [0; 3],
             prop_batches: Vec::new(),
             visible: Vec::new(),
             character_shadow,
@@ -870,6 +927,14 @@ impl WorldRenderer {
             queue.write_buffer(&self.particle_buffer, 0, bytemuck::cast_slice(&frame.particles));
         }
         self.particle_count = frame.particles.len() as u32;
+        if frame.grass.len() > self.grass_capacity {
+            self.grass_capacity = frame.grass.len().next_power_of_two();
+            self.grass_patches = grass_buffer(device, self.grass_capacity);
+        }
+        if !frame.grass.is_empty() {
+            queue.write_buffer(&self.grass_patches, 0, bytemuck::cast_slice(&frame.grass));
+        }
+        self.grass_lods = frame.grass_lods;
         if frame.skins.len() > self.skin_capacity {
             self.skin_capacity = frame.skins.len().next_power_of_two();
             self.skin_instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -984,6 +1049,24 @@ impl WorldRenderer {
             pass.set_bind_group(1, &nd.bind, &[]);
             pass.draw(0..3, 0..1);
         }
+        // Трава — после обводки: ленты не обводим (было бы рябо), а ноги солдат и края
+        // стен в траве она закрывает. Тени не отбрасывает.
+        if self.grass_lods.iter().any(|&n| n > 0) {
+            pass.set_pipeline(&self.grass);
+            pass.set_bind_group(1, &self.ground_bind, &[]);
+            pass.set_vertex_buffer(0, self.grass_mesh.vertices.slice(..));
+            pass.set_index_buffer(self.grass_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(1, self.grass_patches.slice(..));
+            // Дальним лоскутам — начало меша (см. `grass::LOD_BLADES`).
+            let mut first = 0;
+            for (lod, &count) in self.grass_lods.iter().enumerate() {
+                if count > 0 {
+                    let indices = crate::grass::LOD_BLADES[lod] as u32 * crate::grass::BLADE_INDICES;
+                    pass.draw_indexed(0..indices, 0, first..first + count);
+                }
+                first += count;
+            }
+        }
         // Вода — после обводки (контуры под водой — под ней) и до дыма. Глубину под водой
         // берёт из прохода нормалей и глубины.
         if let Some(nd) = &self.nd {
@@ -1038,6 +1121,15 @@ impl WorldRenderer {
             }
         }
     }
+}
+
+fn grass_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("grass patches"),
+        size: (capacity * size_of::<GrassPatch>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn particle_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {

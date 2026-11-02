@@ -35,6 +35,9 @@ struct Globals {
     screen: vec4<f32>,
     // x — ширина плавного сгиба у суставов солдат, воксели (0 — без сгиба).
     skin: vec4<f32>,
+    // x — сила ветра, y — куда дует (рад, по карте), z — уровень воды (нет — очень низко),
+    // w — 1, если рисуется трава (земля под ней темнее).
+    wind: vec4<f32>,
     points: array<Point, 32>,
 };
 
@@ -69,8 +72,24 @@ fn shadow(world: vec3<f32>, n: vec3<f32>) -> f32 {
 }
 
 fn light(albedo_srgb: vec3<f32>, n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    return lit(albedo_srgb, n, shadow(world, n));
+}
+
+// Тень одной выборкой — для травы: на ряби ковра мягкий край не виден, а выборок
+// на её перекрытиях было бы слишком много.
+fn shadow_quick(world: vec3<f32>) -> f32 {
+    let p = g.light_view_proj * vec4<f32>(world, 1.0);
+    let ndc = p.xyz / p.w;
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    return mix(1.0, textureSampleCompareLevel(shadow_map, shadow_sampler, uv, ndc.z - 0.0015), g.sun_color.w);
+}
+
+fn lit(albedo_srgb: vec3<f32>, n: vec3<f32>, sh: f32) -> vec3<f32> {
     let albedo = to_linear(albedo_srgb);
-    let direct = max(dot(n, g.sun_dir.xyz), 0.0) * shadow(world, n);
+    let direct = max(dot(n, g.sun_dir.xyz), 0.0) * sh;
     // Ступени, как в мультфильме: тень — полутень — свет, с узкими мягкими переходами.
     let stepped = smoothstep(0.05, 0.12, direct) * 0.55 + smoothstep(0.42, 0.52, direct) * 0.45;
     let d = mix(direct, stepped, g.grade.w);
@@ -221,6 +240,10 @@ fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
         case 5u: { c = vec3<f32>(0.62, 0.61, 0.58); }  // бетон
         default: { c = vec3<f32>(0.42, 0.48, 0.28); }  // трава
     }
+    // Под травяным ковром земля темнее: просветы между травинками — глубина, а не пятна.
+    if (m <= 1u && g.wind.w > 0.5) {
+        c = select(vec3<f32>(0.16, 0.30, 0.15), vec3<f32>(0.36, 0.34, 0.18), m == 1u);
+    }
     // Лёгкая разница по клеткам (воксельный вид) и мягкие пятна внутри материала.
     return c * (0.95 + 0.05 * hash2(floor(p))) * (0.94 + 0.08 * noise(p / 4.0));
 }
@@ -242,14 +265,20 @@ fn zones(albedo_in: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     return albedo;
 }
 
+// Покрытие в точке: со сдвигом по шуму — границы неровные, «рисованные». По нему же
+// решает травинка, расти ли ей (`vs_grass`), — край луга совпадает с краем земли.
+fn ground_at(p: vec2<f32>) -> u32 {
+    let size = vec2<i32>(textureDimensions(ground_tex));
+    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
+    let cell = clamp(vec2<i32>(floor(p + jitter)), vec2<i32>(0), size - vec2<i32>(1));
+    return textureLoad(ground_tex, cell, 0).r;
+}
+
 @fragment
 fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
     let size = vec2<i32>(textureDimensions(ground_tex));
-    // Берём материал со сдвигом по шуму — границы получаются неровные, «рисованные».
-    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
-    let cell = clamp(vec2<i32>(floor(p + jitter)), vec2<i32>(0), size - vec2<i32>(1));
-    let m = textureLoad(ground_tex, cell, 0).r;
+    let m = ground_at(p);
     let albedo = zones(battle_traces(material(m, p), p, vec2<f32>(size)), p);
     let c = light(albedo, normalize(in.normal), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
@@ -262,6 +291,123 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
     let size = g.params.x;
     let albedo = vec3<f32>(0.42, 0.48, 0.28) * 0.45 * (0.95 + 0.05 * hash2(floor(p)));
     let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
+    return vec4<f32>(fogged(c, in.world), 1.0);
+}
+
+// --- Трава ----------------------------------------------------------------------
+// Ковёр тонких лент в духе Ghibli (см. `grass.rs`): свет — по нормали земли, цвет —
+// пятнами шума по миру, ветер — бегущие волны, травинка гнётся от корня.
+
+struct GrassIn {
+    @location(0) root: vec2<f32>,
+    @location(1) offset: vec3<f32>,
+    @location(2) t: f32,
+    @location(3) rand: f32,
+    @location(4) height: f32,
+    // Лоскут: угол клетки, высоты углов, густота, поворот.
+    @location(5) origin: vec2<f32>,
+    @location(6) heights: vec4<f32>,
+    @location(7) fade: f32,
+    @location(8) variant: f32,
+};
+
+struct GrassOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) t: f32,
+    @location(3) rand: f32,
+    @location(4) dry: f32,
+    @location(5) gust: f32,
+};
+
+// Поворот лоскута (вокруг середины клетки): четыре поворота и зеркало.
+fn grass_turn(q_in: vec2<f32>, v: u32) -> vec2<f32> {
+    var q = q_in;
+    if ((v & 4u) != 0u) {
+        q.x = -q.x;
+    }
+    switch v & 3u {
+        case 1u: { q = vec2<f32>(-q.y, q.x); }
+        case 2u: { q = -q; }
+        case 3u: { q = vec2<f32>(q.y, -q.x); }
+        default: {}
+    }
+    return q;
+}
+
+@vertex
+fn vs_grass(v: GrassIn) -> GrassOut {
+    var out: GrassOut;
+    // Расти ли: густота (вдаль реже), покрытие под корнем, не под водой.
+    if (v.rand > v.fade) {
+        out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+        return out;
+    }
+    let variant = u32(v.variant + 0.5);
+    let local = grass_turn(v.root - vec2<f32>(0.5), variant) + vec2<f32>(0.5);
+    let root = v.origin + local;
+    // Посреди луга покрытие известно заранее; искать край — только у края.
+    var m = select(0u, 1u, (variant & 16u) != 0u);
+    if ((variant & 8u) == 0u) {
+        m = ground_at(root);
+    }
+    let h = mix(mix(v.heights.x, v.heights.y, local.x), mix(v.heights.z, v.heights.w, local.x), local.y);
+    if (m > 1u || h < g.wind.z) {
+        out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+        return out;
+    }
+    // Нормаль земли под лоскутом — по ней и свет.
+    let dx = mix(v.heights.y - v.heights.x, v.heights.w - v.heights.z, local.y);
+    let dz = mix(v.heights.z - v.heights.x, v.heights.w - v.heights.y, local.x);
+    out.normal = normalize(vec3<f32>(-dx, 1.0, -dz));
+
+    // Ветер: крупные порывы бегут по полю, мелкая дрожь — у каждой травинки своя.
+    let time = g.params.y;
+    let dir = vec2<f32>(cos(g.wind.y), sin(g.wind.y));
+    let strength = g.wind.x;
+    let gust = noise(root * 0.09 - dir * time * (0.6 + strength * 0.9));
+    let flutter = sin(time * (2.6 + v.rand * 1.5) + v.rand * 6.283 + dot(root, vec2<f32>(1.3, 0.7)));
+    let bend = strength * (0.15 + gust * gust * 1.3 + flutter * 0.12);
+    let k = v.t * v.t;
+    var off = v.offset;
+    let turned = grass_turn(off.xz, variant);
+    off = vec3<f32>(turned.x, off.y, turned.y);
+    off = vec3<f32>(off.x + dir.x * bend * v.height * k, off.y - v.height * k * bend * bend * 0.4, off.z + dir.y * bend * v.height * k);
+
+    let world = vec3<f32>(root.x, h, root.y) + off;
+    out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.world = world;
+    out.t = v.t;
+    out.rand = v.rand;
+    out.dry = select(0.0, 1.0, m == 1u);
+    out.gust = gust * min(strength, 1.5);
+    return out;
+}
+
+@fragment
+fn fs_grass(in: GrassOut) -> @location(0) vec4<f32> {
+    let p = in.world.xz;
+    // Пятна по полю: крупный шум с мелким поверх, высокий контраст.
+    let n = noise(p * 0.11) * 0.75 + noise(p * 0.37 + vec2<f32>(17.0, 9.0)) * 0.25;
+    let v = clamp((n - 0.5) * 2.2 + 0.5, 0.0, 1.0);
+    // Зелень: тень — сочная середина — выгоревшая на солнце.
+    let c0 = vec3<f32>(0.13, 0.30, 0.17);
+    let c1 = vec3<f32>(0.24, 0.48, 0.19);
+    let c2 = vec3<f32>(0.39, 0.62, 0.25);
+    let c3 = vec3<f32>(0.60, 0.74, 0.37);
+    var albedo = mix(mix(c0, c1, smoothstep(0.0, 0.38, v)), mix(c2, c3, smoothstep(0.65, 1.0, v)), smoothstep(0.3, 0.7, v));
+    // Сухая трава — к соломе.
+    let dry = mix(vec3<f32>(0.46, 0.44, 0.22), vec3<f32>(0.80, 0.72, 0.42), v);
+    albedo = mix(albedo, dry, in.dry * 0.85);
+    // У каждой травинки своя яркость; у корня темнее — глубина ковра.
+    albedo *= (0.9 + 0.16 * in.rand) * mix(0.72, 1.0, smoothstep(0.0, 0.7, in.t));
+    // Наклонённая порывом — светлее: по полю бегут светлые волны.
+    albedo += vec3<f32>(0.10, 0.11, 0.05) * in.gust * in.gust * in.t;
+    let size = vec2<f32>(textureDimensions(ground_tex));
+    albedo = zones(battle_traces(albedo, p, size), p);
+    let n_ground = normalize(in.normal);
+    let c = lit(albedo, n_ground, shadow_quick(in.world + n_ground * 0.05));
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
 
