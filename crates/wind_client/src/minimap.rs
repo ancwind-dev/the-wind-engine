@@ -10,7 +10,7 @@ use wind_sim::map::{EMPTY, INDESTRUCTIBLE, Map};
 const TEAM: [Color32; 2] = [Color32::from_rgb(0x5d, 0xa2, 0xe8), Color32::from_rgb(0xe8, 0x62, 0x58)];
 
 /// Цвета покрытия земли — как в шейдере (`material`), чуть темнее для карты.
-const GROUND: [[u8; 3]; 6] = [[112, 103, 58], [134, 116, 70], [110, 94, 70], [172, 158, 116], [72, 72, 74], [146, 144, 136]];
+const GROUND: [[u8; 3]; 6] = [[196, 156, 70], [196, 156, 70], [110, 94, 70], [172, 158, 116], [72, 72, 74], [146, 144, 136]];
 
 #[derive(Default)]
 pub struct Minimap {

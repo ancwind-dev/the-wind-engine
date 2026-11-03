@@ -130,6 +130,8 @@ pub struct SceneBuilder {
     pending: Arc<Mutex<PendingMap>>,
     /// Для какой карты и версии покрытия земли уже отправлена текстура.
     ground_key: Option<(u64, u64)>,
+    /// Для какой карты отправлены высоты (дальше — по перестроенным чанкам).
+    heights_key: Option<u64>,
     /// Следы боя и для какой карты они.
     decals: Decals,
     /// Обломки, пыль и дым.
@@ -169,6 +171,7 @@ impl Default for SceneBuilder {
             mesher: MapMesher::default(),
             pending: Arc::default(),
             ground_key: None,
+            heights_key: None,
             decals: Decals::default(),
             effects: Effects::default(),
             decals_key: None,
@@ -185,6 +188,18 @@ impl Default for SceneBuilder {
             notes: Vec::new(),
         }
     }
+}
+
+/// Высоты углов клеток в прямоугольнике `rect` (x, y, ширина, высота), м — построчно.
+fn heights(map: &Map, rect: [u32; 4]) -> Vec<f32> {
+    let [x0, y0, w, h] = rect;
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            out.push(map.corner_height(x as i32, y as i32));
+        }
+    }
+    out
 }
 
 /// Пол лодки на воде в точке `p` (лодка чуть качается на волне).
@@ -251,11 +266,25 @@ impl SceneBuilder {
         }
         let ground_key = (input.map_key, input.map.ground_revision);
         let ground_changed = update.reset || self.ground_key != Some(ground_key);
-        if update.reset || !update.chunks.is_empty() || ground_changed {
+        let heights_changed = update.reset || self.heights_key != Some(input.map_key);
+        if update.reset || !update.chunks.is_empty() || ground_changed || heights_changed {
             let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if update.reset {
                 pending.reset = true;
                 pending.chunks.clear();
+            }
+            // Высоты — для травы: целиком при смене карты, иначе — перестроенные чанки.
+            let map = input.map;
+            if heights_changed {
+                self.heights_key = Some(input.map_key);
+                pending.height_rects.clear();
+                pending.heights = Some((map.width + 1, map.height + 1, heights(map, [0, 0, map.width + 1, map.height + 1])));
+            } else {
+                for (chunk, _) in &update.chunks {
+                    let (x0, y0, w, h) = map.chunk_rect(*chunk as usize);
+                    let rect = [x0, y0, w + 1, h + 1];
+                    pending.height_rects.push((rect, heights(map, rect)));
+                }
             }
             pending.chunks.extend(update.chunks);
             if ground_changed {
@@ -486,11 +515,11 @@ impl SceneBuilder {
         // Трава — лоскуты у камеры и в кадре.
         let globals = self.globals(input);
         let mut grass = Vec::new();
-        let mut grass_lods = [0; 3];
+        let mut grass_lods = [[0; 3]; 2];
         if self.grass {
             let radius = (cam.distance * 1.9 + 8.0).min(90.0);
             let lods = crate::grass::patches(input.map, Mat4::from_cols_array_2d(&globals.view_proj), cam.target, radius, &mut grass);
-            grass_lods = lods.map(|n| n as u32);
+            grass_lods = lods.map(|m| m.map(|n| n as u32));
         }
 
         FrameData {

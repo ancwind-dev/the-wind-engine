@@ -242,7 +242,7 @@ fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
     }
     // Под травяным ковром земля темнее: просветы между травинками — глубина, а не пятна.
     if (m <= 1u && g.wind.w > 0.5) {
-        c = select(vec3<f32>(0.26, 0.24, 0.12), vec3<f32>(0.33, 0.29, 0.15), m == 1u);
+        c = to_srgb(grass_base(p) * 0.55);
     }
     // Лёгкая разница по клеткам (воксельный вид) и мягкие пятна внутри материала.
     return c * (0.95 + 0.05 * hash2(floor(p))) * (0.94 + 0.08 * noise(p / 4.0));
@@ -295,122 +295,123 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
 }
 
 // --- Трава ----------------------------------------------------------------------
-// Ковёр тонких лент в духе Ghibli (см. `grass.rs`): свет — по нормали земли, цвет —
-// пятнами шума по миру, ветер — бегущие волны, травинка гнётся от корня.
+// По образцу травы хозяина (`Grass.blend`, материал `M_Grass_Ghibli`, узлы ветра
+// `GN_WindPreview`; см. `grass.rs`): меши лоскутов из Blender с цветами вершин, цвет —
+// мягкие пятна по миру через осенний градиент, свет — две ступени с голубоватой тенью.
 
 struct GrassIn {
-    @location(0) root: vec2<f32>,
-    @location(1) offset: vec3<f32>,
-    @location(2) t: f32,
-    @location(3) rand: f32,
-    @location(4) height: f32,
-    // Лоскут: угол клетки, высоты углов, густота, поворот.
-    @location(5) origin: vec2<f32>,
-    @location(6) heights: vec4<f32>,
-    @location(7) fade: f32,
-    @location(8) variant: f32,
+    @location(0) pos: vec3<f32>,
+    @location(1) root: vec2<f32>,
+    // Гибкость, фаза, жёсткость.
+    @location(2) wind: vec3<f32>,
+    // Яркость, сдвиг оттенка, цветочки.
+    @location(3) shade: vec3<f32>,
+    @location(4) rand: f32,
+    // Лоскут: середина клетки, поворот, размер, густота, признаки.
+    @location(5) center: vec2<f32>,
+    @location(6) angle: f32,
+    @location(7) scale: f32,
+    @location(8) fade: f32,
+    @location(9) flags: f32,
 };
 
 struct GrassOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) t: f32,
-    @location(3) rand: f32,
-    @location(4) dry: f32,
-    @location(5) gust: f32,
+    @location(1) shade: vec3<f32>,
 };
 
-// Поворот лоскута (вокруг середины клетки): четыре поворота и зеркало.
-fn grass_turn(q_in: vec2<f32>, v: u32) -> vec2<f32> {
-    var q = q_in;
-    if ((v & 4u) != 0u) {
-        q.x = -q.x;
-    }
-    switch v & 3u {
-        case 1u: { q = vec2<f32>(-q.y, q.x); }
-        case 2u: { q = -q; }
-        case 3u: { q = vec2<f32>(q.y, -q.x); }
-        default: {}
-    }
-    return q;
+// Высоты углов клеток, м: травинка стоит на земле по своему корню.
+@group(1) @binding(4) var heights_tex: texture_2d<f32>;
+
+fn terrain_height(p: vec2<f32>) -> f32 {
+    let last = vec2<i32>(textureDimensions(heights_tex)) - vec2<i32>(1);
+    let q = clamp(p, vec2<f32>(0.0), vec2<f32>(last));
+    let c = min(vec2<i32>(floor(q)), last - vec2<i32>(1));
+    let f = q - vec2<f32>(c);
+    let h00 = textureLoad(heights_tex, c, 0).r;
+    let h10 = textureLoad(heights_tex, c + vec2<i32>(1, 0), 0).r;
+    let h01 = textureLoad(heights_tex, c + vec2<i32>(0, 1), 0).r;
+    let h11 = textureLoad(heights_tex, c + vec2<i32>(1, 1), 0).r;
+    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
+// Цвет травы (линейный), как в материале: шум по миру (масштаб 0,22, три октавы),
+// контраст 1,42 и осенний градиент от тёмной оливы до светлого золота.
+fn grass_base(p: vec2<f32>) -> vec3<f32> {
+    let q = p * 0.22;
+    let n = noise(q) * 0.5714 + noise(q * 2.0 + vec2<f32>(5.2, 1.3)) * 0.2857 + noise(q * 4.0 + vec2<f32>(1.7, 9.2)) * 0.1429;
+    // Наш шум разбросан шире, чем у Blender (там Perlin держится у середины), — сжимаем.
+    let v = clamp((n - 0.5) * 0.6 * 1.42 + 0.5, 0.0, 1.0);
+    var c = mix(vec3<f32>(0.181, 0.162, 0.042), vec3<f32>(0.366, 0.231, 0.042), clamp(v / 0.3, 0.0, 1.0));
+    c = mix(c, vec3<f32>(0.61, 0.361, 0.065), clamp((v - 0.3) / 0.25, 0.0, 1.0));
+    c = mix(c, vec3<f32>(0.791, 0.565, 0.162), clamp((v - 0.55) / 0.25, 0.0, 1.0));
+    return mix(c, vec3<f32>(0.888, 0.716, 0.314), clamp((v - 0.8) / 0.2, 0.0, 1.0));
 }
 
 @vertex
 fn vs_grass(v: GrassIn) -> GrassOut {
     var out: GrassOut;
-    // Расти ли: густота (вдаль реже), покрытие под корнем, не под водой.
+    // Вдаль реже: травинки с числом больше густоты лоскута не растут.
     if (v.rand > v.fade) {
         out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
         return out;
     }
-    let variant = u32(v.variant + 0.5);
-    let local = grass_turn(v.root - vec2<f32>(0.5), variant) + vec2<f32>(0.5);
-    let root = v.origin + local;
-    // Посреди луга покрытие известно заранее; искать край — только у края.
-    var m = select(0u, 1u, (variant & 16u) != 0u);
-    if ((variant & 8u) == 0u) {
-        m = ground_at(root);
-    }
-    let h = mix(mix(v.heights.x, v.heights.y, local.x), mix(v.heights.z, v.heights.w, local.x), local.y);
-    if (m > 1u || h < g.wind.z) {
+    let cs = vec2<f32>(cos(v.angle), sin(v.angle));
+    let r = v.root * v.scale;
+    let root = v.center + vec2<f32>(r.x * cs.x - r.y * cs.y, r.x * cs.y + r.y * cs.x);
+    // Посреди луга покрытие известно заранее; у края — смотрим под корнем.
+    if ((u32(v.flags) & 8u) == 0u && ground_at(root) > 1u) {
         out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
         return out;
     }
-    // Нормаль земли под лоскутом — по ней и свет.
-    let dx = mix(v.heights.y - v.heights.x, v.heights.w - v.heights.z, local.y);
-    let dz = mix(v.heights.z - v.heights.x, v.heights.w - v.heights.y, local.x);
-    out.normal = normalize(vec3<f32>(-dx, 1.0, -dz));
+    let h = terrain_height(root);
+    if (h < g.wind.z - 0.05) {
+        out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+        return out;
+    }
+    let l = v.pos.xz * v.scale;
+    var world = vec3<f32>(v.center.x + l.x * cs.x - l.y * cs.y, h + v.pos.y * v.scale, v.center.y + l.x * cs.y + l.y * cs.x);
 
-    // Ветер: крупные порывы бегут по полю, мелкая дрожь — у каждой травинки своя.
-    let time = g.params.y;
+    // Ветер — как узлы GN_WindPreview: гибкость² · (1 − 0,6·жёсткость) ·
+    // (0,6 + 0,5·sin(2π(время·0,7 + фаза + 0,08·x))) · сила; вдоль ветра, чуть вбок и вниз.
+    // Сверху — мягкие порывы волнами по полю. Сила 0,6 в атмосфере — 0,12 в файле.
     let dir = vec2<f32>(cos(g.wind.y), sin(g.wind.y));
-    let strength = g.wind.x;
-    let gust = noise(root * 0.09 - dir * time * (0.6 + strength * 0.9));
-    let flutter = sin(time * (2.6 + v.rand * 1.5) + v.rand * 6.283 + dot(root, vec2<f32>(1.3, 0.7)));
-    let bend = strength * (0.15 + gust * gust * 1.3 + flutter * 0.12);
-    let k = v.t * v.t;
-    var off = v.offset;
-    let turned = grass_turn(off.xz, variant);
-    off = vec3<f32>(turned.x, off.y, turned.y);
-    off = vec3<f32>(off.x + dir.x * bend * v.height * k, off.y - v.height * k * bend * bend * 0.4, off.z + dir.y * bend * v.height * k);
+    let time = g.params.y;
+    let gust = 0.7 + 0.6 * noise(world.xz * 0.05 - dir * time * 0.4);
+    let sway = 0.6 + 0.5 * sin(6.2832 * (time * 0.7 + v.wind.y + 0.08 * dot(world.xz, dir)));
+    let w = v.wind.x * v.wind.x * (1.0 - 0.6 * v.wind.z) * sway * g.wind.x * 0.2 * gust * v.scale;
+    let side = vec2<f32>(-dir.y, dir.x);
+    world += vec3<f32>(dir.x * w + side.x * 0.35 * w, -0.35 * w, dir.y * w + side.y * 0.35 * w);
 
-    let world = vec3<f32>(root.x, h, root.y) + off;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);
     out.world = world;
-    out.t = v.t;
-    out.rand = v.rand;
-    out.dry = select(0.0, 1.0, m == 1u);
-    out.gust = gust * min(strength, 1.5);
+    out.shade = v.shade;
     return out;
 }
 
 @fragment
 fn fs_grass(in: GrassOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
-    // Осень — одна палитра на всю траву игры (с осеннего концепта): тёмная олива в тени —
-    // олива — охра — солома. Пятна по полю мягкие: крупный шум с мелким поверх.
-    let n = noise(p * 0.09) * 0.7 + noise(p * 0.31 + vec2<f32>(17.0, 9.0)) * 0.3;
-    // «Сухая трава» — не другой цвет, а та же палитра, сдвинутая к соломе.
-    let v = clamp((n - 0.5) * 1.5 + 0.5 + in.dry * 0.22, 0.0, 1.0);
-    let c0 = vec3<f32>(0.29, 0.28, 0.14);
-    let c1 = vec3<f32>(0.44, 0.41, 0.19);
-    let c2 = vec3<f32>(0.58, 0.49, 0.23);
-    let c3 = vec3<f32>(0.70, 0.59, 0.30);
-    var albedo = mix(c0, c1, smoothstep(0.0, 0.35, v));
-    albedo = mix(albedo, c2, smoothstep(0.35, 0.7, v));
-    albedo = mix(albedo, c3, smoothstep(0.7, 1.0, v));
-    // Редкие рыжие стебли, как на концепте.
-    albedo = mix(albedo, vec3<f32>(0.55, 0.33, 0.17), step(0.93, fract(in.rand * 7.31)) * 0.45);
-    // У каждой травинки чуть своя яркость; у корня темнее — глубина ковра.
-    albedo *= (0.93 + 0.1 * in.rand) * mix(0.75, 1.0, smoothstep(0.0, 0.7, in.t));
-    // Наклонённая порывом — чуть светлее: по полю бегут светлые волны.
-    albedo += vec3<f32>(0.07, 0.06, 0.03) * in.gust * in.gust * in.t;
+    // Яркость травинки (у корня темнее, к кончику светлее) — из GrassShade.
+    var c = grass_base(p) * mix(0.5, 1.22, in.shade.x);
+    // Цветочки — ступенями: кремовые, белые, оранжевые.
+    let b = in.shade.z;
+    if (b >= 0.2) {
+        var flower = vec4<f32>(0.807, 0.687, 0.352, 0.85);
+        if (b >= 0.83) {
+            flower = vec4<f32>(0.888, 0.539, 0.03, 1.0);
+        } else if (b >= 0.5) {
+            flower = vec4<f32>(0.905, 0.88, 0.791, 1.0);
+        }
+        c = mix(c, flower.rgb, flower.a);
+    }
+    // Свет — две ступени: на солнце свой цвет, в тени — голубоватая.
+    let lit = shadow_quick(in.world + vec3<f32>(0.0, 0.05, 0.0));
+    c *= mix(vec3<f32>(0.53, 0.55, 0.65), vec3<f32>(1.0), lit);
     let size = vec2<f32>(textureDimensions(ground_tex));
-    albedo = zones(battle_traces(albedo, p, size), p);
-    let n_ground = normalize(in.normal);
-    let c = lit(albedo, n_ground, shadow_quick(in.world + n_ground * 0.05));
-    return vec4<f32>(fogged(c, in.world), 1.0);
+    let albedo = zones(battle_traces(to_srgb(c), p, size), p);
+    return vec4<f32>(fogged(albedo, in.world), 1.0);
 }
 
 // --- Свои солдаты ------------------------------------------------------------

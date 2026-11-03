@@ -15,6 +15,67 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
     let (doc, bin) = split_glb(bytes)?;
     let json = Json::parse(doc)?;
     let mut mesh = Mesh::default();
+    visit_meshes(&json, &mut |m, transform| add_mesh(&json, bin, m, transform, &mut mesh))?;
+    if mesh.indices.is_empty() {
+        return Err("в файле нет треугольников".into());
+    }
+    Ok(mesh)
+}
+
+/// Меш как есть — для травы: позиции (с учётом узлов), все цвета вершин (`COLOR_0`,
+/// `COLOR_1`, … — линейные, как в файле) и треугольники.
+#[derive(Debug, Default)]
+pub struct Raw {
+    pub positions: Vec<Vec3>,
+    pub colors: Vec<Vec<Vec4>>,
+    pub indices: Vec<u32>,
+}
+
+pub fn load_raw(bytes: &[u8]) -> Result<Raw, String> {
+    let (doc, bin) = split_glb(bytes)?;
+    let json = Json::parse(doc)?;
+    let mut raw = Raw::default();
+    visit_meshes(&json, &mut |index, transform| {
+        let m = json.get("meshes").and_then(|m| m.at(index)).ok_or(format!("нет меша {index}"))?;
+        for p in m.get("primitives").map(Json::items).unwrap_or(&[]) {
+            if p.get("mode").and_then(Json::as_usize).unwrap_or(4) != 4 {
+                continue;
+            }
+            let attrs = p.get("attributes").ok_or("у примитива нет attributes")?;
+            let positions = read(&json, bin, attrs.get("POSITION").and_then(Json::as_usize).ok_or("нет POSITION")?)?;
+            let first = raw.positions.len() as u32;
+            raw.positions.extend(positions.iter().map(|v| transform.transform_point3(v.truncate())));
+            let mut k = 0;
+            while let Some(a) = attrs.get(&format!("COLOR_{k}")).and_then(Json::as_usize) {
+                if raw.colors.len() <= k {
+                    // Цвет, которого не было у прежних примитивов, — белый у них.
+                    raw.colors.push(vec![Vec4::ONE; first as usize]);
+                }
+                raw.colors[k].extend(read(&json, bin, a)?);
+                k += 1;
+            }
+            for c in &mut raw.colors {
+                c.resize(raw.positions.len(), Vec4::ONE);
+            }
+            let indices: Vec<u32> = match p.get("indices").and_then(Json::as_usize) {
+                Some(a) => read(&json, bin, a)?.iter().map(|v| v.x as u32).collect(),
+                None => (0..positions.len() as u32).collect(),
+            };
+            if indices.iter().any(|&i| i as usize >= positions.len()) {
+                return Err("индекс вершины за пределами".into());
+            }
+            raw.indices.extend(indices.iter().map(|i| i + first));
+        }
+        Ok(())
+    })?;
+    if raw.indices.is_empty() {
+        return Err("в файле нет треугольников".into());
+    }
+    Ok(raw)
+}
+
+/// Обойти узлы сцены: для каждого меша — его номер и положение в мире.
+fn visit_meshes(json: &Json, f: &mut dyn FnMut(usize, Mat4) -> Result<(), String>) -> Result<(), String> {
     let scene = json.get("scene").and_then(Json::as_usize).unwrap_or(0);
     let roots: Vec<usize> = match json.get("scenes").and_then(|s| s.at(scene)) {
         Some(s) => s.get("nodes").map(|n| n.items().iter().filter_map(Json::as_usize).collect()).unwrap_or_default(),
@@ -22,12 +83,9 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
         None => (0..json.get("nodes").map_or(0, |n| n.items().len())).collect(),
     };
     for root in roots {
-        add_node(&json, bin, root, Mat4::IDENTITY, &mut mesh, 0)?;
+        add_node(json, root, Mat4::IDENTITY, f, 0)?;
     }
-    if mesh.indices.is_empty() {
-        return Err("в файле нет треугольников".into());
-    }
-    Ok(mesh)
+    Ok(())
 }
 
 /// Куски `.glb`: JSON и двоичный буфер.
@@ -53,7 +111,7 @@ fn split_glb(bytes: &[u8]) -> Result<(&str, &[u8]), String> {
     Ok((json.ok_or("нет JSON в файле")?, bin))
 }
 
-fn add_node(json: &Json, bin: &[u8], index: usize, parent: Mat4, mesh: &mut Mesh, depth: u32) -> Result<(), String> {
+fn add_node(json: &Json, index: usize, parent: Mat4, f: &mut dyn FnMut(usize, Mat4) -> Result<(), String>, depth: u32) -> Result<(), String> {
     if depth > 64 {
         return Err("узлы зациклены".into());
     }
@@ -73,11 +131,11 @@ fn add_node(json: &Json, bin: &[u8], index: usize, parent: Mat4, mesh: &mut Mesh
     };
     let world = parent * local;
     if let Some(m) = node.get("mesh").and_then(Json::as_usize) {
-        add_mesh(json, bin, m, world, mesh)?;
+        f(m, world)?;
     }
     if let Some(children) = node.get("children") {
         for c in children.items().iter().filter_map(Json::as_usize) {
-            add_node(json, bin, c, world, mesh, depth + 1)?;
+            add_node(json, c, world, f, depth + 1)?;
         }
     }
     Ok(())
