@@ -200,7 +200,36 @@ fn vs_ground(@builtin(vertex_index) i: u32) -> GOut {
 }
 
 fn hash2(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+    // Узел сетки — целыми числами (PCG). Через sin() на больших координатах один и тот же
+    // узел, посчитанный из соседних ячеек, давал разные значения — шум рвался по линиям
+    // сетки, и на земле и траве проступали наложенные квадраты.
+    var v = bitcast<vec2<u32>>(vec2<i32>(round(p)));
+    v = v * 1664525u + vec2<u32>(1013904223u);
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return f32(v.x >> 8u) / 16777216.0;
+}
+
+// Градиентный шум (Perlin), около −0,7…0,7: в узлах сетки — случайные направления, пятна
+// получаются плавные и круглые, без граней по сетке.
+fn perlin(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * f * (f * (f * 6.0 - vec2<f32>(15.0)) + vec2<f32>(10.0));
+    let a = dot(gradient(i), f);
+    let b = dot(gradient(i + vec2<f32>(1.0, 0.0)), f - vec2<f32>(1.0, 0.0));
+    let c = dot(gradient(i + vec2<f32>(0.0, 1.0)), f - vec2<f32>(0.0, 1.0));
+    let d = dot(gradient(i + vec2<f32>(1.0, 1.0)), f - vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn gradient(i: vec2<f32>) -> vec2<f32> {
+    let a = hash2(i) * 6.2831853;
+    return vec2<f32>(cos(a), sin(a));
 }
 
 // Плавный шум: значения в узлах сетки, между ними — сглаженная интерполяция.
@@ -240,10 +269,6 @@ fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
         case 5u: { c = vec3<f32>(0.62, 0.61, 0.58); }  // бетон
         default: { c = vec3<f32>(0.47, 0.43, 0.24); }  // трава (осенняя)
     }
-    // Под травяным ковром земля темнее: просветы между травинками — глубина, а не пятна.
-    if (m <= 1u && g.wind.w > 0.5) {
-        c = to_srgb(grass_base(p) * 0.55);
-    }
     // Лёгкая разница по клеткам (воксельный вид) и мягкие пятна внутри материала.
     return c * (0.95 + 0.05 * hash2(floor(p))) * (0.94 + 0.08 * noise(p / 4.0));
 }
@@ -279,6 +304,13 @@ fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
     let size = vec2<i32>(textureDimensions(ground_tex));
     let m = ground_at(p);
+    // Под травяным ковром — ровная подложка тона травы, со светом как у травы: разброс
+    // яркости по клеткам проступал сквозь ковёр клеточкой.
+    if (m <= 1u && g.wind.w > 0.5) {
+        let lit = shadow(in.world, vec3<f32>(0.0, 1.0, 0.0));
+        let under = grass_base(p) * 0.7 * mix(vec3<f32>(0.53, 0.55, 0.65), vec3<f32>(1.0), lit);
+        return vec4<f32>(fogged(zones(battle_traces(to_srgb(under), p, vec2<f32>(size)), p), in.world), 1.0);
+    }
     let albedo = zones(battle_traces(material(m, p), p, vec2<f32>(size)), p);
     let c = light(albedo, normalize(in.normal), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
@@ -339,10 +371,11 @@ fn terrain_height(p: vec2<f32>) -> f32 {
 // Цвет травы (линейный), как в материале: шум по миру (масштаб 0,22, три октавы),
 // контраст 1,42 и осенний градиент от тёмной оливы до светлого золота.
 fn grass_base(p: vec2<f32>) -> vec3<f32> {
+    // Шум — градиентный, как Noise Texture в Blender: у сеточного (`noise`) при таком
+    // контрасте проступали прямые грани по сетке 4,5 м — пятна с прямыми краями.
     let q = p * 0.22;
-    let n = noise(q) * 0.5714 + noise(q * 2.0 + vec2<f32>(5.2, 1.3)) * 0.2857 + noise(q * 4.0 + vec2<f32>(1.7, 9.2)) * 0.1429;
-    // Наш шум разбросан шире, чем у Blender (там Perlin держится у середины), — сжимаем.
-    let v = clamp((n - 0.5) * 0.6 * 1.42 + 0.5, 0.0, 1.0);
+    let n = 0.5 + 0.5 * (perlin(q) * 0.5714 + perlin(q * 2.0 + vec2<f32>(5.2, 1.3)) * 0.2857 + perlin(q * 4.0 + vec2<f32>(1.7, 9.2)) * 0.1429);
+    let v = clamp((n - 0.5) * 1.42 + 0.5, 0.0, 1.0);
     var c = mix(vec3<f32>(0.181, 0.162, 0.042), vec3<f32>(0.366, 0.231, 0.042), clamp(v / 0.3, 0.0, 1.0));
     c = mix(c, vec3<f32>(0.61, 0.361, 0.065), clamp((v - 0.3) / 0.25, 0.0, 1.0));
     c = mix(c, vec3<f32>(0.791, 0.565, 0.162), clamp((v - 0.55) / 0.25, 0.0, 1.0));

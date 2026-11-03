@@ -199,12 +199,9 @@ pub fn patches(map: &Map, view_proj: Mat4, center: Vec2, radius: f32, out: &mut 
                 continue;
             }
             let fade = 1.0 - smoothstep(radius * 0.2, radius, d);
-            // Высокая трава на «траве» (с низкой вперемешку, как в файле), низкая — на
-            // «сухой траве» и по краям.
-            let mesh = match grassy(map, x, y) {
-                Some(0) if hash(x, y, 1) < 0.7 => 0,
-                _ => 1,
-            };
+            // Высокая с низкой вперемешку, как в файле, — везде одинаково: если делить по
+            // покрытию, низкая трава на «сухой» ложится его клетками — пятнами со ступенями.
+            let mesh = if hash(x, y, 1) < 0.7 { 0 } else { 1 };
             let lod = LOD_SHARES.iter().rposition(|&s| s >= fade).unwrap_or(0);
             lists[mesh][lod].push(GrassPatch {
                 center: [p.x, p.y],
