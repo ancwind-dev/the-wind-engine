@@ -83,8 +83,9 @@ pub struct CharModel {
     /// Меш всей модели в `CharacterSet::meshes`.
     pub mesh: usize,
     joints: Option<Joints>,
-    /// Поворот корпуса в позе покоя (см. `body_frame`).
+    /// Поворот корпуса в позе покоя (см. `body_frame`): по бёдрам и по плечам.
     rest_body: Mat3,
+    rest_upper: Mat3,
     /// Тело для физики — когда солдата убьют.
     pub(crate) rig: Rig,
     /// Шаг и бег из записей движений (`None` — процедурные).
@@ -379,15 +380,36 @@ impl CharModel {
     /// Поворот палки = поворот корпуса + наклон палки кратчайшим путём. Поворот вокруг
     /// самой палки берётся от корпуса, а не от мира — иначе при падении или на шаге
     /// части проворачивались вокруг своей оси и тело «разъезжалось».
+    ///
+    /// Корпус — два: ноги и таз поворачиваются по бёдрам, а грудь, голова и руки — по
+    /// плечам. Целясь, солдат разворачивает плечи (`BLADE`); раньше грудь и голова
+    /// поворачивались по бёдрам и оставались прямо, а рукава уходили с плечами — на швах
+    /// у плеч и шеи тело рвалось и вспучивалось.
     pub fn bones(&self, pose: &Pose, out: &mut impl FnMut(Mat4)) {
-        let body = self.body_frame(pose) * self.rest_body.transpose();
+        let lower = self.body_frame(pose) * self.rest_body.transpose();
+        let upper = self.upper_frame(pose) * self.rest_upper.transpose();
         for &(a, b) in &self.sticks {
+            let body = if self.is_upper(b) { upper } else { lower };
             let turned = body * (self.rest[b] - self.rest[a]).normalize_or(Vec3::Y);
             let tilt = Quat::from_rotation_arc(turned, (pose[b] - pose[a]).normalize_or(turned));
             out(Mat4::from_translation(pose[a] * VOXEL)
                 * Mat4::from_mat3(Mat3::from_quat(tilt) * body)
                 * Mat4::from_translation(-self.rest[a] * VOXEL));
         }
+    }
+
+    /// Палка, которая кончается в точке `b`, — верх тела (грудь, голова, руки)?
+    fn is_upper(&self, b: usize) -> bool {
+        self.joints.is_some_and(|j| [j.neck, j.head, j.shoulder[0], j.shoulder[1], j.elbow[0], j.elbow[1], j.hand[0], j.hand[1]].contains(&b))
+    }
+
+    /// Поворот верха тела: «вверх» — от поясницы к шее, «вбок» — от плеча к плечу.
+    fn upper_frame(&self, pose: &Pose) -> Mat3 {
+        let Some(j) = self.joints else { return Mat3::IDENTITY };
+        let up = (pose[j.neck] - pose[j.mid]).normalize_or(Vec3::Y);
+        let across = pose[j.shoulder[1]] - pose[j.shoulder[0]];
+        let side = (across - up * across.dot(up)).normalize_or(Vec3::Z);
+        Mat3::from_cols(up.cross(side), up, side)
     }
 
     /// Поворот корпуса: «вверх» — от поясницы к шее, «вбок» — от бедра к бедру.
@@ -490,8 +512,9 @@ impl Builder {
         let inv_mass: Vec<f32> = m.particles.iter().map(|p| p.inv_mass).collect();
         let torso = joints.map(|j| ([j.neck, j.mid, j.shoulder[0], j.shoulder[1], j.hip[0], j.hip[1]], j.head));
         let rig = Rig::new(&rest, &m.sticks, &inv_mass, torso);
-        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rig, gaits: None, throw: None };
+        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rest_upper: Mat3::IDENTITY, rig, gaits: None, throw: None };
         model.rest_body = model.body_frame(&model.rest);
+        model.rest_upper = model.upper_frame(&model.rest);
         model
     }
 

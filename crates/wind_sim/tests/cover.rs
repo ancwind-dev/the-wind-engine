@@ -58,8 +58,9 @@ fn run(mut w: World, ticks: u32) -> Sample {
                 s.at_wall += w.map.circle_hits_solid(x.pos, 1.0) as u32;
                 s.in_cover += x.cover.is_some() as u32;
             }
+            // Вторая половина перезарядки: за угол идут шагом — к ней уже дошли.
             if let Some(c) = x.cover
-                && x.reload_timer > 0.5
+                && (0.3..1.2).contains(&x.reload_timer)
             {
                 s.reloading_in_cover += 1;
                 s.hiding += (x.pos.distance(c.hide) < x.pos.distance(c.shoot)) as u32;

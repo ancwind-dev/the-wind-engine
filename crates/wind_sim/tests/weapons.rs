@@ -165,3 +165,53 @@ fn player_runs_by_default_and_walks_with_shift() {
     assert!(run > 4.0, "бегом — скорость бега ({run:.2} м/с)");
     assert!((walk / run - wind_sim::world::WALK_SHARE).abs() < 0.08, "шагом — {:.0} % бега", walk / run * 100.0);
 }
+
+#[test]
+fn reloading_soldiers_walk_until_the_magazine_is_in() {
+    let mut world = World::new(config(20), 9);
+    let me = world.take_control(0).unwrap();
+    let run_second = |w: &mut World, claim: bool| {
+        let start = w.soldiers[me as usize].pos;
+        for _ in 0..20 {
+            let pos = w.soldiers[me as usize].pos;
+            // Как клиент: заявка, где солдат по его подсчёту, — на полной скорости бега.
+            let claimed = claim.then(|| pos + Vec2::X * 6.0 / 20.0);
+            w.set_input(me, PlayerInput { move_dir: Vec2::X, aim: pos + Vec2::X, pos: claimed, ..Default::default() });
+            w.step();
+        }
+        w.soldiers[me as usize].pos.distance(start)
+    };
+    let run = run_second(&mut world, false);
+    // Перезаряжается — шагом.
+    world.soldiers[me as usize].reload_timer = 5.0;
+    let walk = run_second(&mut world, false);
+    println!("за секунду: бегом {run:.2} м, с перезарядкой {walk:.2} м");
+    assert!((walk / run - wind_sim::world::WALK_SHARE).abs() < 0.08, "на перезарядке — {:.0} % бега", walk / run * 100.0);
+    // Заявки клиента «бегом» сервер догоняет не быстрее запаса на задержку от шага.
+    let claimed = run_second(&mut world, true);
+    println!("по заявкам бегом — {claimed:.2} м");
+    assert!(claimed <= walk * wind_sim::CLAIM_CATCH_UP + 0.05);
+    // Перезарядился — снова бегом.
+    world.soldiers[me as usize].reload_timer = 0.0;
+    assert!(run_second(&mut world, false) > run * 0.95);
+
+    // Боты тоже: с перезарядкой проходят за секунду меньше.
+    let mut world = World::new(config(30), 3);
+    for _ in 0..40 {
+        world.step();
+    }
+    for s in world.soldiers.iter_mut().step_by(2) {
+        s.reload_timer = 3.0;
+    }
+    let start: Vec<_> = world.soldiers.iter().map(|s| s.pos).collect();
+    for _ in 0..20 {
+        world.step();
+    }
+    let moved = |odd: usize| {
+        let d: Vec<f32> = world.soldiers.iter().enumerate().filter(|(i, s)| i % 2 == odd && s.alive && s.target.is_none()).map(|(i, s)| s.pos.distance(start[i])).collect();
+        d.iter().sum::<f32>() / d.len().max(1) as f32
+    };
+    let (reloading, not) = (moved(0), moved(1));
+    println!("боты за секунду: с перезарядкой {reloading:.2} м, без {not:.2} м");
+    assert!(reloading < not * 0.6);
+}

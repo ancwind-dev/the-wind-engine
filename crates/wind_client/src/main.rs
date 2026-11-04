@@ -234,6 +234,8 @@ struct Session {
     backdrop: bool,
     camera: Camera,
     aim: Vec2,
+    /// Где курсор на экране (−1…1) — от него вынос камеры.
+    cursor_ndc: Vec2,
     /// За кем следит камера в режиме наблюдателя.
     follow: u32,
     /// Свой солдат на клиенте: двигается сразу, без ожидания сервера.
@@ -268,6 +270,7 @@ impl Session {
             backdrop: false,
             camera: Camera::default(),
             aim: Vec2::ZERO,
+            cursor_ndc: Vec2::ZERO,
             follow: 0,
             pilot: Pilot::default(),
             kick: 0.0,
@@ -683,8 +686,12 @@ impl Game {
                 s.camera.distance = (s.camera.distance * (-scroll * 0.0015).exp()).clamp(12.0, 260.0);
             }
         }
-        let mouse_world = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p)).and_then(|p| {
-            let ndc = Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0);
+        let cursor = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+        let cursor_ndc = cursor.map(|p| Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0));
+        if let Some(ndc) = cursor_ndc {
+            s.cursor_ndc = ndc;
+        }
+        let mouse_world = cursor_ndc.and_then(|ndc| {
             match s.source.map() {
                 Some(map) => s.camera.pick(ndc, aspect, map),
                 None => s.camera.ground_point(ndc, aspect, 0.0),
@@ -709,7 +716,8 @@ impl Game {
         // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
         if self.bench.is_none() {
             let (speed, radius) = s.source.soldier_spec();
-            let speed = if input.walk { speed * wind_sim::world::WALK_SHARE } else { speed };
+            // Шагом — с Shift и пока перезаряжается.
+            let speed = if input.walk || s.source.own_reloading() { speed * wind_sim::world::WALK_SHARE } else { speed };
             let server = s.source.own_server_pos();
             if s.source.own_in_boat() {
                 // В лодке солдата везёт лодка: он там, где по серверу.
@@ -743,6 +751,10 @@ impl Game {
             let screen = view.me_pos.filter(|_| view.me.alive).map(|p| (p, s.aim));
             s.fog.update(dt, map, s.source.vision_range(), own_team, center, screen, &view.soldiers);
         }
+        // Шаги слышно и тех, кого не видно (как в RWR — подбирающегося из-за угла), но
+        // только вблизи.
+        let ears_at = view.me_pos.unwrap_or(s.camera.target);
+        let walkers: Vec<_> = view.soldiers.iter().filter(|x| x.pos.distance_squared(ears_at) < sound::STEPS_HEARD * sound::STEPS_HEARD).cloned().collect();
         view.soldiers.retain(|x| s.fog.shows(x, own_team));
         if controls && ctx.input(|i| i.key_pressed(egui::Key::M)) {
             s.minimap.big = !s.minimap.big;
@@ -775,16 +787,13 @@ impl Game {
             Some(x.pos)
         });
         if let Some(me) = focus {
-            // Своего солдата камера чуть выносит к прицелу — видно, куда стреляешь.
-            // Как в RWR: камера выносится к курсору — в сторону прицела видно на ~80 %
-            // дальше (та же формула, по которой сервер решает, кто на экране).
-            let ahead = if view.me_pos.is_some() {
-                wind_sim::sight::view_center(me, s.aim) - me
-            } else {
-                Vec2::ZERO
-            };
-            // Фон меню — медленнее, чтобы не дёргало.
-            let k = 1.0 - (-dt * if s.backdrop { 1.5 } else { 8.0 }).exp();
+            // Своего солдата камера выносит к курсору — как в RWR: в сторону курсора видно
+            // на ~80 % дальше (та же формула, по которой сервер решает, кто на экране).
+            // Вынос — сразу от места курсора на экране: раньше камера догоняла прицел, а
+            // прицел уезжал вместе с ней, и кадр ещё долго плыл, хотя мышь стояла.
+            let ahead = if view.me_pos.is_some() { cursor_lead(&s.camera, me, s.cursor_ndc, aspect) } else { Vec2::ZERO };
+            // Фон меню — медленнее, чтобы не дёргало; за своим солдатом — плотно.
+            let k = 1.0 - (-dt * if s.backdrop { 1.5 } else { 14.0 }).exp();
             s.camera.target += (me + ahead - s.camera.target) * k;
             if let Some(map) = s.source.map() {
                 let h = map.height_at(s.camera.target);
@@ -834,7 +843,7 @@ impl Game {
             };
             let source = &s.source;
             let gun_of = |team: u8, shooter: u32| source.weapon_of(team, shooter).map_or(wind_audio::Gun::Rifle, sound::gun);
-            let plays = s.sound.frame(&ears, &view, &heard, &self.scene.crumbled, gun_of);
+            let plays = s.sound.frame(&ears, &view, &walkers, &heard, &self.scene.crumbled, gun_of);
             sound::play_all(&self.audio, plays);
         }
 
@@ -929,6 +938,24 @@ impl Game {
 
 /// Кольца на земле для отряда игрока: под своими бойцами, у точки, которую отряд
 /// держит, и под бойцом у прицела, которого можно позвать (если есть место).
+/// Куда вынести камеру от солдата в `me`, когда курсор — в `ndc` экрана. Как в RWR:
+/// солдат уходит от центра кадра в сторону, противоположную курсору, на `SCREEN_LEAD`
+/// пути до края экрана — курсор у края, солдат у противоположного края, но в кадре.
+/// Считаем на экране, а не на земле: при наклонной камере верх кадра охватывает больше
+/// земли, и вынос по земле уводил солдата за нижний край.
+fn cursor_lead(camera: &Camera, me: Vec2, ndc: Vec2, aspect: f32) -> Vec2 {
+    let centered = Camera { target: me, ..camera.clone() };
+    let mirrored = -ndc.clamp(Vec2::splat(-1.0), Vec2::splat(1.0)) * SCREEN_LEAD;
+    match centered.ground_point(mirrored, aspect, camera.target_height) {
+        Some(point) => me - point,
+        None => Vec2::ZERO,
+    }
+}
+
+/// Насколько солдат уходит к краю экрана, когда курсор у противоположного края.
+/// В сторону курсора видно на столько же дальше (`sight::VIEW_LEAD` — то же на земле).
+const SCREEN_LEAD: f32 = 0.75;
+
 fn squad_rings(view: &source::View, aim: Vec2) -> Vec<(Vec2, f32, [f32; 3])> {
     let me = &view.me;
     let mut rings = Vec::new();
@@ -960,3 +987,26 @@ const SQUAD_COLOR: [f32; 3] = [0.45, 0.95, 0.45];
 const HOLD_COLOR: [f32; 3] = [1.0, 0.85, 0.3];
 const RECRUIT_RADIUS: f32 = 4.0;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_keeps_the_soldier_on_screen_and_leads_toward_the_cursor() {
+        let me = Vec2::new(100.0, 100.0);
+        let aspect = 16.0 / 9.0;
+        for ndc in [Vec2::new(1.0, 1.0), Vec2::new(-1.0, 1.0), Vec2::new(0.0, 1.0), Vec2::new(0.0, -1.0), Vec2::new(1.0, -1.0), Vec2::new(-0.5, 0.7)] {
+            let lead = cursor_lead(&Camera { target: me, ..Camera::default() }, me, ndc, aspect);
+            let camera = Camera { target: me + lead, ..Camera::default() };
+            // Солдат — на экране, напротив курсора.
+            let p = camera.view_proj(aspect).project_point3(wind_render::camera::to_3d(me, 0.0));
+            assert!(p.x.abs() <= 0.8 && p.y.abs() <= 0.8, "курсор {ndc}: солдат на экране в {p}");
+            assert!((Vec2::new(p.x, p.y) + ndc * SCREEN_LEAD).length() < 0.02, "курсор {ndc}: солдат в {p}");
+            // Сервер видит тот же центр кадра (по прицелу) — с запасом в несколько метров.
+            let aim = camera.ground_point(ndc, aspect, 0.0).unwrap();
+            let center = wind_sim::sight::view_center(me, aim);
+            assert!(center.distance(camera.target) < 8.0, "курсор {ndc}: центр по прицелу {center}, камера {}", camera.target);
+        }
+        assert!(cursor_lead(&Camera::default(), me, Vec2::ZERO, aspect).length() < 0.01);
+    }
+}

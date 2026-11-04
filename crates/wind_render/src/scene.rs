@@ -19,6 +19,7 @@ use wind_sim::mapfile::Prop;
 use crate::props::PropLibrary;
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct SoldierDraw {
     pub id: u32,
     pub pos: Vec2,

@@ -3,10 +3,11 @@
 //! но слышно.
 
 use crate::source::View;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use wind_audio::mixer::spatial;
 use wind_audio::{Audio, Gun, Play, Sfx};
 use wind_net::replication::Heard;
+use wind_render::SoldierDraw;
 use wind_sim::Vec2;
 use wind_sim::arsenal::WeaponSpec;
 use wind_sim::round::Phase;
@@ -16,6 +17,13 @@ use wind_sim::round::Phase;
 const PER_FRAME: usize = 24;
 /// Шаг своего солдата, м.
 const STRIDE: f32 = 1.6;
+/// Шаги других солдат слышно вблизи: вдвое тише на этом расстоянии, м (дальше `× 8`
+/// — не слышно), — как в RWR, подбирающегося врага слышно раньше, чем видно.
+const STEP_RANGE: f32 = 6.0;
+/// Дальше этого чужих шагов не слышно вовсе, м.
+pub const STEPS_HEARD: f32 = STEP_RANGE * 8.0;
+/// Чужие шаги — тише своих.
+const STEP_GAIN: f32 = 0.16;
 /// Пуля «свистит», если проходит ближе этого, м.
 const WHIZ_DISTANCE: f32 = 3.0;
 
@@ -47,6 +55,8 @@ pub struct Sound {
     last_pos: Option<Vec2>,
     /// Пули, что уже просвистели (по скорости — она у каждой своя).
     whizzed: HashSet<(u32, u32)>,
+    /// Другие солдаты: где были в прошлом кадре и сколько прошли с прошлого шага.
+    steps: HashMap<u32, (Vec2, f32)>,
     variant: u32,
 }
 
@@ -56,8 +66,9 @@ impl Sound {
         self.variant
     }
 
-    /// Что сыграть в этом кадре. `gun_of(команда, стрелок)` — звук его оружия.
-    pub fn frame(&mut self, ears: &Ears, view: &View, heard: &[Heard], crumbled: &[Vec2], gun_of: impl Fn(u8, u32) -> Gun) -> Vec<Play> {
+    /// Что сыграть в этом кадре. `walkers` — солдаты, чьи шаги слышно (и невидимые за
+    /// туманом), `gun_of(команда, стрелок)` — звук его оружия.
+    pub fn frame(&mut self, ears: &Ears, view: &View, walkers: &[SoldierDraw], heard: &[Heard], crumbled: &[Vec2], gun_of: impl Fn(u8, u32) -> Gun) -> Vec<Play> {
         let mut plays = Vec::new();
         let at = |s: &mut Self, plays: &mut Vec<Play>, sfx: Sfx, pos: Vec2, range: f32, gain: f32, extra_delay: f32| {
             if let Some((g, pan, delay)) = spatial(ears.pos, ears.right, pos, range) {
@@ -81,6 +92,7 @@ impl Sound {
         }
         self.whiz(ears, view, &mut plays);
         self.own(ears, view, &mut plays);
+        self.others(ears, walkers, &mut plays);
         self.match_events(view, &mut plays);
         plays.sort_by(|a, b| b.gain.total_cmp(&a.gain));
         plays.truncate(PER_FRAME);
@@ -141,6 +153,30 @@ impl Sound {
         self.reloading = reloading;
     }
 
+    /// Шаги других солдат — тех, кто рядом и идёт: кто лежит или в лодке, не топает.
+    fn others(&mut self, ears: &Ears, walkers: &[SoldierDraw], plays: &mut Vec<Play>) {
+        let mut seen = HashMap::with_capacity(self.steps.len());
+        for s in walkers {
+            if Some(s.id) == ears.own_id || s.prone || s.in_boat || s.pos.distance_squared(ears.pos) > STEPS_HEARD * STEPS_HEARD {
+                continue;
+            }
+            // Первый раз — с середины шага, чтобы все не топнули разом.
+            let (last, walked) = self.steps.get(&s.id).copied().unwrap_or((s.pos, s.id as f32 * 0.37 % STRIDE));
+            let d = s.pos.distance(last);
+            // Прыжок — возрождение или поправка, а не шаг.
+            let mut walked = if d < 2.0 { walked + d } else { walked };
+            if walked >= STRIDE {
+                walked -= STRIDE;
+                if let Some((g, pan, delay)) = spatial(ears.pos, ears.right, s.pos, STEP_RANGE) {
+                    let variant = self.next_variant();
+                    plays.push(Play { sfx: Sfx::Step, variant, gain: g * STEP_GAIN, pan, delay });
+                }
+            }
+            seen.insert(s.id, (s.pos, walked));
+        }
+        self.steps = seen;
+    }
+
     /// Точки и раунд — сигналы интерфейса, без места.
     fn match_events(&mut self, view: &View, plays: &mut Vec<Play>) {
         let team = view.round.own_team.filter(|_| view.has_me);
@@ -193,15 +229,15 @@ mod tests {
     fn bullet_passing_close_whizzes_once() {
         let mut sound = Sound::default();
         let view = View { bullets: vec![(Vec2::new(-5.0, 1.0), Vec2::new(90.0, 0.0)), (Vec2::new(-5.0, 9.0), Vec2::new(90.0, 0.0001))], ..Default::default() };
-        let first = sound.frame(&ears(), &view, &[], &[], |_, _| Gun::Rifle);
+        let first = sound.frame(&ears(), &view, &[], &[], &[], |_, _| Gun::Rifle);
         assert_eq!(first.iter().filter(|p| p.sfx == Sfx::Whiz).count(), 1, "далёкая пуля не свистит");
         // Та же пуля в следующем кадре (симуляция ещё не сдвинула её) — не повторяем.
-        let again = sound.frame(&ears(), &view, &[], &[], |_, _| Gun::Rifle);
+        let again = sound.frame(&ears(), &view, &[], &[], &[], |_, _| Gun::Rifle);
         assert!(again.iter().all(|p| p.sfx != Sfx::Whiz));
         // Своя пуля, летящая от нас, — тоже нет.
         let mut sound = Sound::default();
         let own = View { bullets: vec![(Vec2::new(0.5, 0.0), Vec2::new(90.0, 0.0))], ..Default::default() };
-        assert!(sound.frame(&ears(), &own, &[], &[], |_, _| Gun::Rifle).is_empty());
+        assert!(sound.frame(&ears(), &own, &[], &[], &[], |_, _| Gun::Rifle).is_empty());
     }
 
     #[test]
@@ -209,13 +245,13 @@ mod tests {
         let mut sound = Sound::default();
         let mut view = View { owners: vec![None, Some(1)], has_me: true, ..Default::default() };
         view.round.own_team = Some(0);
-        assert!(sound.frame(&ears(), &view, &[], &[], |_, _| Gun::Rifle).is_empty(), "первый кадр — тишина");
+        assert!(sound.frame(&ears(), &view, &[], &[], &[], |_, _| Gun::Rifle).is_empty(), "первый кадр — тишина");
         view.owners = vec![Some(0), None];
-        let plays = sound.frame(&ears(), &view, &[], &[], |_, _| Gun::Rifle);
+        let plays = sound.frame(&ears(), &view, &[], &[], &[], |_, _| Gun::Rifle);
         assert!(plays.iter().any(|p| p.sfx == Sfx::Captured));
         assert!(plays.iter().all(|p| p.sfx != Sfx::Lost), "чужая точка ушла — не наша потеря");
         view.round.round = Round { phase: Phase::Over { winner: Some(1), reason: EndReason::TimeUp }, ..Default::default() };
-        let plays = sound.frame(&ears(), &view, &[], &[], |_, _| Gun::Rifle);
+        let plays = sound.frame(&ears(), &view, &[], &[], &[], |_, _| Gun::Rifle);
         assert!(plays.iter().any(|p| p.sfx == Sfx::Lose));
     }
 
@@ -226,11 +262,50 @@ mod tests {
             Heard::Shot { pos: Vec2::ZERO, shooter: 0, team: 0 },
             Heard::Shot { pos: Vec2::new(60.0, 0.0), shooter: 5, team: 1 },
         ];
-        let plays = sound.frame(&ears(), &View::default(), &heard, &[], |t, _| if t == 1 { Gun::Smg } else { Gun::Rifle });
+        let plays = sound.frame(&ears(), &View::default(), &[], &heard, &[], |t, _| if t == 1 { Gun::Smg } else { Gun::Rifle });
         assert_eq!(plays.len(), 2);
         assert_eq!(plays[0].sfx, Sfx::Shot(Gun::Rifle));
         assert_eq!(plays[0].pan, 0.0);
         assert_eq!(plays[1].sfx, Sfx::Shot(Gun::Smg));
         assert!(plays[1].gain < plays[0].gain * 0.5 && plays[1].pan > 0.5 && plays[1].delay > 0.1);
+    }
+
+    #[test]
+    fn other_soldiers_steps_are_heard_nearby_and_not_from_afar_or_prone() {
+        let soldier = |id: u32, x: f32, prone: bool| SoldierDraw {
+            id,
+            pos: Vec2::new(x, 0.0),
+            facing: 0.0,
+            team: 1,
+            look: None,
+            prone,
+            reloading: false,
+            throwing: false,
+            aiming: false,
+            in_boat: false,
+        };
+        let mut sound = Sound::default();
+        // Свой (0) стоит; рядом идёт 1, лёжа ползёт 2, далеко идёт 3. Двигаются по оси Y.
+        let mut steps = [0u32; 4];
+        for k in 0..60 {
+            let y = k as f32 * 0.2;
+            let mut view = View { has_me: true, ..Default::default() };
+            view.me.alive = true;
+            view.soldiers = vec![soldier(0, 0.0, false), soldier(1, 5.0, false), soldier(2, -5.0, true), soldier(3, 200.0, false)];
+            for s in view.soldiers.iter_mut().skip(1) {
+                s.pos.y = y;
+            }
+            for p in sound.frame(&ears(), &view, &view.soldiers, &[], &[], |_, _| Gun::Rifle) {
+                if p.sfx == Sfx::Step {
+                    // Кто топнул — по панораме: справа 1, слева 2.
+                    steps[if p.pan > 0.0 { 1 } else if p.pan < 0.0 { 2 } else { 0 }] += 1;
+                    assert!(p.gain < 0.2, "чужие шаги тише своих");
+                }
+            }
+        }
+        // 12 м пути — около 7 шагов у идущего рядом; лежащий и далёкий — молчат, свой стоит.
+        assert!((5..=9).contains(&steps[1]), "шагов рядом: {}", steps[1]);
+        assert_eq!(steps[2], 0, "ползущий не топает");
+        assert_eq!(steps[0], 0);
     }
 }

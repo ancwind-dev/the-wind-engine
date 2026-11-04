@@ -601,6 +601,9 @@ impl World {
             }
             let mut desired = Vec2::ZERO;
             let mut speed = spec.speed;
+            // Перезаряжается — идёт шагом (как с Shift), пока не перезарядится.
+            let reloading = if s.reload_timer > 0.0 { WALK_SHARE } else { 1.0 };
+            speed *= reloading;
             let order = orders.get(i).copied().unwrap_or_default();
             // Боец, далеко ушедший от своего места в строю, в бой не ввязывается:
             // догоняет отряд (стреляет он и на ходу).
@@ -643,14 +646,15 @@ impl World {
                     s.facing = look.y.atan2(look.x);
                 }
                 if let Some(claim) = input.pos.filter(|c| c.distance(s.pos) < CLAIM_MAX_GAP) {
-                    // Клиент ведёт своего солдата сам — догоняем его заявку.
-                    let step = (claim - s.pos).clamp_length_max(spec.speed * CLAIM_CATCH_UP * dt);
+                    // Клиент ведёт своего солдата сам — догоняем его заявку (не быстрее,
+                    // чем солдат может: на перезарядке — шагом).
+                    let step = (claim - s.pos).clamp_length_max(spec.speed * reloading * CLAIM_CATCH_UP * dt);
                     s.vel = step / dt;
                     s.pos = walk(map, s.pos, step, radius);
                     return;
                 }
                 desired = input.move_dir.clamp_length_max(1.0);
-                if input.walk {
+                if input.walk && reloading == 1.0 {
                     speed *= WALK_SHARE;
                 }
             } else if let Some(to) = s.retreat {

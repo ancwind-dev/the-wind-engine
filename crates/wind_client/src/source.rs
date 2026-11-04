@@ -269,6 +269,14 @@ impl Source {
         }
     }
 
+    /// Свой солдат перезаряжается — идёт шагом.
+    pub fn own_reloading(&self) -> bool {
+        match self {
+            Source::Local(l) => l.me.is_some_and(|i| l.world.soldiers[i as usize].reload_timer > 0.0),
+            Source::Remote(c) => c.world.as_ref().is_some_and(|w| w.me.reloading),
+        }
+    }
+
     /// Свой солдат в лодке: его везёт лодка, а не клиент.
     pub fn own_in_boat(&self) -> bool {
         match self {
