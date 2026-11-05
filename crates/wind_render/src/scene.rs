@@ -676,7 +676,8 @@ impl SceneBuilder {
             count += 1;
         }
         if let Some(m) = input.marker {
-            points[count] = GroundPoint { center_radius: [m.x, m.y, 0.75, 0.0], color: [1.0, 0.63, 0.16, 0.0] };
+            // Как у RWR: кольцо вокруг ног — снаружи ≈1,1 м в поперечнике, полосой 0,22 м, чёткое.
+            points[count] = GroundPoint { center_radius: [m.x, m.y, 0.46, 0.11], color: [1.0, 0.63, 0.16, 0.0] };
             count += 1;
         }
         for &(c, r, color) in input.rings {

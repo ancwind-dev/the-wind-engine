@@ -4,7 +4,7 @@
 // переводим в sRGB: egui рисует в обычную (не sRGB) поверхность.
 
 struct Point {
-    // xy — центр, z — радиус, w — не используется.
+    // xy — центр, z — радиус, w — полуширина чёткого кольца (0 — мягкое, широкое).
     center_radius: vec4<f32>,
     // rgb — цвет (sRGB), a — сила заливки внутри.
     color: vec4<f32>,
@@ -281,7 +281,12 @@ fn zones(albedo_in: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
         let pt = g.points[k];
         let d = distance(p, pt.center_radius.xy);
         let r = pt.center_radius.z;
-        let ring = 1.0 - smoothstep(0.05, 0.25, abs(d - r));
+        let half = pt.center_radius.w;
+        var ring = 1.0 - smoothstep(0.05, 0.25, abs(d - r));
+        if (half > 0.0) {
+            // Чёткое кольцо (метка своего солдата, как в RWR): ровная полоса с узким краем.
+            ring = 1.0 - smoothstep(half - 0.02, half + 0.02, abs(d - r));
+        }
         if (d < r) {
             albedo = mix(albedo, pt.color.rgb, pt.color.a);
         }
