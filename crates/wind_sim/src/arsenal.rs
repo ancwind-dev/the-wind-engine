@@ -23,6 +23,11 @@ pub struct WeaponSpec {
     /// `cylinder` (барабан), `pump` (трубка и цевьё), `break` (переломить ствол).
     /// Симуляции не нужно.
     pub reload: String,
+    /// Где у модели рукоять — правая ладонь, вокселей от начала модели (x — к прикладу,
+    /// y — вверх, z — вбок). Обычно начало модели и есть рукоять (0, 0, 0); у некоторых
+    /// моделей оно ниже или позади оружия — без поправки оружие висит над руками.
+    /// Симуляции не нужно.
+    pub grip: [f32; 3],
     /// Пауза между выстрелами, с.
     pub retrigger_time: f32,
     pub magazine_size: u32,
@@ -73,6 +78,7 @@ impl Default for WeaponSpec {
             model: String::new(),
             sound: String::new(),
             reload: String::new(),
+            grip: [0.0; 3],
             retrigger_time: 0.15,
             magazine_size: 30,
             reload_time: 2.5,
@@ -207,7 +213,7 @@ impl Arsenal {
     pub fn fingerprint(&self) -> u64 {
         let mut text = String::new();
         for w in &self.weapons {
-            text += &format!("{:?}", WeaponSpec { model: String::new(), sound: String::new(), reload: String::new(), ..w.clone() });
+            text += &format!("{:?}", WeaponSpec { model: String::new(), sound: String::new(), reload: String::new(), grip: [0.0; 3], ..w.clone() });
         }
         for team in &self.teams {
             for k in team {

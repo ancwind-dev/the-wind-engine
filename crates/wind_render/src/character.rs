@@ -147,8 +147,8 @@ impl CharacterSet {
                 let weapon = match set_weapons.iter().find(|(n, _)| n == path) {
                     Some(&(_, i)) => i,
                     None => {
-                        let mesh = builder.prop(&read(path)?);
                         let spec = &arsenal.weapons[kit.weapon];
+                        let mesh = builder.prop(&read(path)?, spec.grip);
                         weapons.push(WeaponModel {
                             name: path.clone(),
                             mesh,
@@ -519,9 +519,14 @@ impl Builder {
     }
 
     /// Предмет без скелета (оружие): одна палка, её матрица — положение предмета.
-    fn prop(&mut self, m: &RwrModel) -> usize {
+    /// `grip` — где у модели рукоять, в осях файла RWR: она встанет в начало координат
+    /// (в правую руку). Воксели уже в наших осях: (x, y, z) RWR — это (z, y, −x).
+    fn prop(&mut self, m: &RwrModel, grip: [f32; 3]) -> usize {
         let mut mesh = CharMesh::default();
-        add_part(&mut mesh, &m.voxels, 0, None, |_| (0, 255));
+        let [x, y, z] = grip.map(|v| v.round() as i32);
+        let shift = -IVec3::new(z, y, -x);
+        let voxels: Vec<_> = m.voxels.iter().map(|&(p, c)| (p + shift, c)).collect();
+        add_part(&mut mesh, &voxels, 0, None, |_| (0, 255));
         self.meshes.push(mesh);
         self.meshes.len() - 1
     }
@@ -695,6 +700,18 @@ mod tests {
         assert!(points(1) * 2 < points(0) && points(2) * 2 < points(1));
         println!("граней у солдата: {quads}, точек: {} / {} / {}", points(0), points(1), points(2));
         assert!(set.pick(0, 5).is_some() && set.pick(1, 5).is_some());
+    }
+
+    /// Правая ладонь (начало модели оружия) лежит на оружии, а не под ним: иначе оружие
+    /// висит над руками (у ПП-2000 и ГМ-94 рукоять — не в начале модели, см. `grip`).
+    #[test]
+    fn every_weapon_is_held_by_its_grip() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for w in &set.weapons {
+            let nearest = set.meshes[w.mesh].lods[0].points.iter().map(|p| (Vec3::from_array(p.pos) / VOXEL).length()).fold(f32::MAX, f32::min);
+            println!("{}: до оружия от ладони {nearest:.1} вокселя", w.name);
+            assert!(nearest < 2.5, "{}: ладонь в {nearest:.1} вокселя от оружия — висит", w.name);
+        }
     }
 
     #[test]
