@@ -29,6 +29,8 @@ pub struct SuppressionSpec {
     pub stand_at: f32,
     /// Лежачий — меньшая мишень: радиус для попаданий, доля обычного.
     pub prone_target: f32,
+    /// Присевший — мишень меньше: столько от радиуса солдата.
+    pub crouch_target: f32,
     /// Скорость ползком, доля обычной.
     pub crawl: f32,
     /// Сколько секунд стрелять туда, где враг был (0 — не стрелять на подавление).
@@ -51,6 +53,7 @@ impl Default for SuppressionSpec {
             prone_at: 0.6,
             stand_at: 0.25,
             prone_target: 0.55,
+            crouch_target: 0.8,
             crawl: 0.25,
             suppress_memory: 3.0,
             retreat_below: 0.65,

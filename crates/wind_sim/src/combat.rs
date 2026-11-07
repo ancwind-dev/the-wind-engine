@@ -4,7 +4,7 @@ use crate::arsenal::{BlastSpec, MAX_HEAT, WeaponSpec};
 use crate::sight::SightSpec;
 use crate::suppression::SuppressionSpec;
 use crate::rng::Rng;
-use crate::world::{BLAST_PUSH, BULLET_PUSH, Controller, Event, Projectile, ProjectileKind, Soldier, World, snapshot};
+use crate::world::{BLAST_PUSH, BULLET_PUSH, Controller, Event, Projectile, ProjectileKind, Soldier, Stance, World, snapshot};
 use glam::Vec2;
 use rayon::prelude::*;
 
@@ -78,7 +78,8 @@ pub(crate) fn fire(world: &mut World) {
             let to = match s.controller {
                 // Игрок стреляет куда целится, видимость не проверяем.
                 Controller::Player(input) => {
-                    if !input.fire || s.cooldown > 0.0 {
+                    // Ложится или встаёт — не стреляет.
+                    if !input.fire || s.cooldown > 0.0 || s.stance_timer > 0.0 {
                         return None;
                     }
                     input.aim - s.pos
@@ -185,7 +186,7 @@ fn shoot(s: &mut Soldier, i: usize, to: Vec2, weapon: &WeaponSpec, weapon_index:
     // Подавленный ИИ мажет; игрок целится сам.
     let shaken = if s.controller == Controller::Ai { 1.0 + s.suppression * sup.spread_penalty } else { 1.0 };
     // На бегу разброс почти втрое больше, чем стоя (как в RWR).
-    let moving = sight.spread_factor(s.vel.length(), s.prone);
+    let moving = sight.spread_factor(s.vel.length(), s.stance);
     let angle = to.y.atan2(to.x) + rng.range(-0.5, 0.5) * weapon.spread(s.heat) * shaken * moving;
     s.shot_ago = 0.0;
     let dir = Vec2::new(angle.cos(), angle.sin());
@@ -246,6 +247,7 @@ pub(crate) fn update_projectiles(world: &mut World) {
     let radius = world.config.soldier.radius;
     let near_miss = world.config.cover.near_miss;
     let prone_target = world.config.suppression.prone_target;
+    let crouch_target = world.config.suppression.crouch_target;
     let World { projectiles, soldiers, grid, map, .. } = world;
     let (soldiers, grid, map) = (&*soldiers, &*grid, &*map);
 
@@ -267,7 +269,11 @@ pub(crate) fn update_projectiles(world: &mut World) {
                     if s.team == p.team || !s.alive {
                         return;
                     }
-                    let body = if s.prone { radius * prone_target } else { radius };
+                    let body = match s.stance {
+                        Stance::Prone => radius * prone_target,
+                        Stance::Crouch => radius * crouch_target,
+                        Stance::Stand => radius,
+                    };
                     if let Some(t) = segment_hits_circle(p.pos, next, s.pos, body)
                         && t <= wall_t
                         && hit.is_none_or(|(best, _)| t < best)

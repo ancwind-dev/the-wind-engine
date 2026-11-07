@@ -1,0 +1,211 @@
+// Клип «reloading, prone» — перезарядка лёжа: оружие к себе, магазин, затвор. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
+(
+    key: "reloading, prone",
+    about: "перезарядка лёжа: оружие к себе, магазин, затвор",
+    source: "свой: процедурная перезарядка (character/actions.rs), переведена в ключи",
+    looped: false,
+    length: 1.0,
+    speed: 1.0,
+    speed_spread: 0.0,
+    stride: 0.0,
+    body: Upper,
+    hands: Clip,
+    keys: [
+        (
+            time: 0.0,
+            points: (head: (7.75, 14.3, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.58, 1.18, 7.65), leftelbow: (7.76, 6.58, -2.1), righthand: (9.25, 5.99, 3.2), lefthand: (13.24, 6.25, 2.36), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (9.253, 5.989, 3.2), aim: (0.976, 0.063, -0.207), roll: 0.0)),
+        ),
+        (
+            time: 0.05,
+            points: (head: (8.19, 14.07, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.4, 0.99, 7.18), leftelbow: (6.54, 4.26, -1.76), righthand: (8.5, 5.99, 2.64), lefthand: (12.48, 5.96, 1.68), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (8.5, 5.989, 2.636), aim: (0.972, -0.007, -0.234), roll: 0.301)),
+        ),
+        (
+            time: 0.083,
+            points: (head: (8.72, 13.74, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.15, 0.81, 6.59), leftelbow: (5.45, 2.82, -1.95), righthand: (7.7, 5.99, 2.03), lefthand: (11.52, 5.19, 0.8), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.699, 5.989, 2.035), aim: (0.933, -0.195, -0.301), roll: 0.622)),
+        ),
+        (
+            time: 0.117,
+            points: (head: (9.18, 13.39, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.24), leftelbow: (4.28, 1.77, -2.31), righthand: (7.26, 5.99, 1.7), lefthand: (10.5, 4.05, 0.15), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.257, 5.989, 1.703), aim: (0.793, -0.475, -0.381), roll: 0.798)),
+        ),
+        (
+            time: 0.14,
+            points: (head: (9.35, 13.24, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (4.26, 1.75, -2.32), righthand: (7.25, 5.99, 1.7), lefthand: (10.48, 4.03, 0.14), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+            events: [WeakHand(false)],
+        ),
+        (
+            time: 0.167,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (3.81, 1.42, -2.52), righthand: (7.25, 5.99, 1.7), lefthand: (10.18, 3.52, -0.27), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.217,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (2.08, 0.67, -3.13), righthand: (7.25, 5.99, 1.7), lefthand: (8.99, 1.54, -1.89), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.267,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (0.84, 0.67, -3.22), righthand: (7.25, 5.99, 1.7), lefthand: (7.9, 0.5, -2.91), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.3,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (0.01, 1.52, -2.26), righthand: (7.25, 5.99, 1.7), lefthand: (6.36, 0.36, -5.16), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.34,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (1.2, 1.39, -2.15), righthand: (7.25, 5.99, 1.7), lefthand: (5.0, 0.11, -7.97), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+            events: [Magazine(false)],
+        ),
+        (
+            time: 0.367,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (1.21, 2.08, -1.43), righthand: (7.25, 5.99, 1.7), lefthand: (3.33, 0.01, -7.86), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.383,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (2.08, 2.81, -0.82), righthand: (7.25, 5.99, 1.7), lefthand: (1.25, 0.17, -7.33), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.4,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (3.61, 2.48, -1.35), righthand: (7.25, 5.99, 1.7), lefthand: (-0.54, 0.5, -6.72), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.417,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (2.84, 1.0, -2.75), righthand: (7.25, 5.99, 1.7), lefthand: (-2.64, 2.51, -6.96), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.433,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-0.13, 0.62, -3.65), righthand: (7.25, 5.99, 1.7), lefthand: (-4.79, 4.58, -7.2), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.45,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-2.77, 1.67, -4.19), righthand: (7.25, 5.99, 1.7), lefthand: (-6.79, 6.5, -7.43), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.483,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-5.24, 4.32, -5.04), righthand: (7.25, 5.99, 1.7), lefthand: (-9.58, 9.2, -7.75), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.583,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-5.48, 4.78, -5.21), righthand: (7.25, 5.99, 1.7), lefthand: (-9.97, 9.58, -7.8), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.6,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-4.99, 3.95, -4.86), righthand: (7.25, 5.99, 1.7), lefthand: (-9.16, 8.93, -7.66), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.617,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-3.65, 2.43, -4.28), righthand: (7.25, 5.99, 1.7), lefthand: (-7.44, 7.54, -7.36), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.633,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-1.02, 0.92, -3.67), righthand: (7.25, 5.99, 1.7), lefthand: (-5.1, 5.66, -6.96), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.65,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (3.03, 0.94, -2.89), righthand: (7.25, 5.99, 1.7), lefthand: (-2.46, 3.54, -6.51), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.667,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (4.45, 3.59, -0.85), righthand: (7.25, 5.99, 1.7), lefthand: (0.18, 1.42, -6.05), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.683,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (0.6, 3.76, -0.32), righthand: (7.25, 5.99, 1.7), lefthand: (2.67, 0.24, -6.09), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.7,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-0.04, 2.26, -1.52), righthand: (7.25, 5.99, 1.7), lefthand: (4.99, 0.19, -6.03), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.717,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (0.28, 1.64, -2.04), righthand: (7.25, 5.99, 1.7), lefthand: (6.05, 0.26, -5.89), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.75,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (-0.07, 1.15, -2.78), righthand: (7.25, 5.99, 1.7), lefthand: (6.84, 0.47, -4.09), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.78,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (1.53, 0.62, -3.21), righthand: (7.25, 5.99, 1.7), lefthand: (8.55, 0.94, -2.38), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+            events: [Magazine(true)],
+        ),
+        (
+            time: 0.8,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (2.05, 0.67, -3.13), righthand: (7.25, 5.99, 1.7), lefthand: (8.95, 1.53, -1.9), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.817,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (3.49, 1.24, -2.62), righthand: (7.25, 5.99, 1.7), lefthand: (9.88, 3.33, -0.43), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.833,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (5.13, 2.77, -1.79), righthand: (7.25, 5.99, 1.7), lefthand: (10.95, 5.4, 1.25), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.85,
+            points: (head: (9.36, 13.23, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.23), leftelbow: (5.86, 3.88, -1.46), righthand: (7.25, 5.99, 1.7), lefthand: (11.46, 6.39, 2.06), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.253, 5.989, 1.7), aim: (0.79, -0.479, -0.382), roll: 0.8)),
+        ),
+        (
+            time: 0.883,
+            points: (head: (9.18, 13.39, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.98, 0.71, 6.24), leftelbow: (4.76, 3.93, -0.8), righthand: (7.26, 5.99, 1.7), lefthand: (9.11, 7.81, 3.2), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.257, 5.989, 1.703), aim: (0.793, -0.475, -0.381), roll: 0.798)),
+        ),
+        (
+            time: 0.9,
+            points: (head: (8.97, 13.55, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.04, 0.74, 6.35), leftelbow: (4.34, 4.14, -0.51), righthand: (7.4, 5.99, 1.81), lefthand: (8.03, 8.41, 3.74), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.401, 5.989, 1.811), aim: (0.866, -0.358, -0.35), roll: 0.741)),
+            events: [Cycle],
+        ),
+        (
+            time: 0.917,
+            points: (head: (8.72, 13.74, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.15, 0.81, 6.59), leftelbow: (4.31, 4.01, -0.56), righthand: (7.7, 5.99, 2.03), lefthand: (8.03, 8.33, 3.63), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (7.699, 5.989, 2.035), aim: (0.933, -0.195, -0.301), roll: 0.622)),
+        ),
+        (
+            time: 0.95,
+            points: (head: (8.19, 14.07, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.4, 0.99, 7.18), leftelbow: (5.22, 3.93, -1.03), righthand: (8.5, 5.99, 2.64), lefthand: (10.12, 7.41, 2.7), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (8.5, 5.989, 2.636), aim: (0.972, -0.007, -0.234), roll: 0.301)),
+        ),
+        (
+            time: 0.983,
+            points: (head: (7.81, 14.27, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.56, 1.16, 7.59), leftelbow: (7.06, 5.38, -1.69), righthand: (9.15, 5.99, 3.12), lefthand: (12.76, 6.42, 2.36), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (9.148, 5.989, 3.121), aim: (0.976, 0.056, -0.209), roll: 0.042)),
+        ),
+        (
+            time: 1.0,
+            points: (head: (7.75, 14.3, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.58, 1.18, 7.65), leftelbow: (7.76, 6.58, -2.1), righthand: (9.25, 5.99, 3.2), lefthand: (13.24, 6.25, 2.36), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            weapon: Some((grip: (9.253, 5.989, 3.2), aim: (0.976, 0.063, -0.207), roll: 0.0)),
+            events: [WeakHand(true)],
+        ),
+    ],
+)

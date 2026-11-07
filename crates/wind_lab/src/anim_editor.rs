@@ -1,17 +1,20 @@
-//! Редактор анимаций в студии персонажей: клипы из `data/animations` (шаг, бег, бросок
-//! из записей движений и свои). Точки скелета тянутся мышью прямо во вьюпорте, время —
-//! на ленте, клип сохраняется в тот же файл.
+//! Редактор анимаций в студии персонажей: клипы стандарта анимаций из `data/animations`
+//! (см. `wind_render::anim`). Точки скелета тянутся мышью прямо во вьюпорте, время — на
+//! ленте, клип сохраняется в тот же файл.
 //!
-//! У клипа из записи кадр — каждые 1/40 клипа: правка мягко расходится на соседние кадры
-//! («Мягкость»). Свой клип — ключевые кадры: потянул точку в новом месте ленты — там
-//! появился ключ; между ключами — плавно.
+//! Внутри правим ключи как кадры «таз + направления отрезков» (`mocap::Clip`): так
+//! длины рук и ног не меняются, пока тянешь. При открытии клип переводится в них, при
+//! сохранении — обратно в точки; метки, оружие и настройки клипа сохраняются как были.
+//! Потянул точку в новом месте ленты — там появился ключ; между ключами — плавно.
 
 use crate::i18n::{f, t};
 use crate::icons::{self, Icon};
 use crate::theme;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 use std::path::PathBuf;
-use wind_render::character::{CharModel, Motion, Skeleton};
+use std::sync::Arc;
+use wind_render::anim::{AnimClip, Body, Hands, Key, Points};
+use wind_render::character::{CharModel, CharacterSet, Motion, Skeleton};
 use wind_render::glam::{Mat4, Vec3, Vec4Swizzles};
 use wind_render::mocap::{Clip, EDGES};
 use wind_render::rwr::VOXEL;
@@ -29,8 +32,13 @@ pub struct AnimEditor {
     /// Редактор включён: студия показывает клип, а не движение.
     pub on: bool,
     dir: PathBuf,
+    /// Ключи клипов в папке.
     names: Vec<String>,
     name: String,
+    /// Клип как в файле: метки, оружие, настройки — их редактор не трогает.
+    meta: Option<AnimClip>,
+    /// Модели — чтобы переводить точки клипа в кадры и обратно (скелет у всех один).
+    set: Option<Arc<CharacterSet>>,
     clip: Option<Clip>,
     /// Клип как в файле — «вернуть» и признак несохранённых правок.
     saved: Option<Clip>,
@@ -50,12 +58,14 @@ pub struct AnimEditor {
 }
 
 impl AnimEditor {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: PathBuf, set: Option<Arc<CharacterSet>>) -> Self {
         let mut e = AnimEditor {
             on: false,
             dir,
             names: Vec::new(),
             name: String::new(),
+            meta: None,
+            set,
             clip: None,
             saved: None,
             time: 0.0,
@@ -76,25 +86,27 @@ impl AnimEditor {
         e
     }
 
+    /// Модели перечитали (сохранили клип) — переводить через новые.
+    pub fn set_models(&mut self, set: Option<Arc<CharacterSet>>) {
+        self.set = set;
+    }
+
     fn rescan(&mut self) {
-        self.names = std::fs::read_dir(&self.dir)
-            .map(|d| {
-                let mut v: Vec<String> = d
-                    .filter_map(|e| e.ok())
-                    .filter_map(|e| e.file_name().to_str()?.strip_suffix(".ron").map(str::to_owned))
-                    .collect();
-                v.sort();
-                v
-            })
-            .unwrap_or_default();
+        self.names = wind_render::anim::load_dir(&self.dir).0.into_keys().collect();
     }
 
     fn open(&mut self, name: &str) {
-        match Clip::load(&self.dir.join(format!("{name}.ron"))) {
-            Ok(c) => {
+        let path = self.dir.join(AnimClip::file_name(name));
+        let result = AnimClip::load(&path).and_then(|a| {
+            let m = self.set.as_ref().and_then(|s| s.models.first()).ok_or("нет моделей солдат")?;
+            Ok((to_edit(&a, m).ok_or("у модели нет скелета")?, a))
+        });
+        match result {
+            Ok((c, a)) => {
                 self.name = name.to_owned();
                 self.saved = Some(c.clone());
                 self.clip = Some(c);
+                self.meta = Some(a);
                 self.undo.clear();
                 self.selected = None;
                 self.message = None;
@@ -110,15 +122,12 @@ impl AnimEditor {
     /// Сохранить клип. `true` — сохранён: студии пора перечитать модели.
     fn save(&mut self) -> bool {
         let Some(clip) = &self.clip else { return false };
-        let path = self.dir.join(format!("{}.ron", self.name));
-        // Заголовок файла клипа — всегда по-русски, как все наши файлы данных.
-        let header = format!(
-            "// Клип «{}». Источник: {}.\n// Правится в студии персонажей (лаборатория → «Редактор анимаций»); оси: x — вперёд, y — вверх, z — вправо.\n",
-            self.name, clip.source
-        );
-        let result = clip.to_ron().and_then(|body| std::fs::write(&path, header + &body).map_err(|e| format!("{}: {e}", path.display())));
+        let Some(m) = self.set.as_ref().and_then(|s| s.models.first()) else { return false };
+        let anim = from_edit(clip, m, self.meta.as_ref(), &self.name);
+        let result = anim.check().and_then(|()| anim.save(&self.dir));
         match result {
-            Ok(()) => {
+            Ok(path) => {
+                self.meta = Some(anim);
                 self.saved = self.clip.clone();
                 self.message = Some((f("Сохранено: {}", &[&path.display()]), false));
                 self.rescan();
@@ -260,6 +269,7 @@ impl AnimEditor {
             {
                 let frame = sk.frame_of(&m.pose(Motion::default()));
                 self.name = self.new_name.trim().to_owned();
+                self.meta = None;
                 self.clip = Some(Clip::keyed("свой клип, сделан в студии персонажей", frame, 1.0, self.new_cycle));
                 self.saved = None;
                 self.undo.clear();
@@ -321,6 +331,67 @@ impl AnimEditor {
     }
 }
 
+/// Клип стандарта — в кадры для правки (таз + направления), время ключей — доли клипа.
+fn to_edit(a: &AnimClip, m: &CharModel) -> Option<Clip> {
+    let sk = m.skeleton()?;
+    let frames = a.keys.iter().map(|k| m.pose_from_points(&k.points.to_array()).map(|p| sk.frame_of(&p))).collect::<Option<Vec<_>>>()?;
+    let length = a.length.max(1e-4);
+    let mut times: Vec<f32> = a.keys.iter().map(|k| k.time / length).collect();
+    // Правка ждёт ключи в начале и в конце (у круга — в начале).
+    let mut frames = frames;
+    if times.first().is_some_and(|&t| t > 1e-4) {
+        times.insert(0, 0.0);
+        frames.insert(0, frames[0].clone());
+    }
+    if !a.looped && times.last().is_some_and(|&t| t < 1.0 - 1e-4) {
+        times.push(1.0);
+        frames.push(frames[frames.len() - 1].clone());
+    }
+    Some(Clip { source: a.source.clone(), cycle: a.looped, duration: a.seconds(), stride: a.stride, peak: 0.0, times, frames })
+}
+
+/// Кадры правки — обратно в клип стандарта. Метки и оружие берутся у ключей с тем же
+/// временем из `meta` (у новых ключей оружие — между соседними ключами).
+fn from_edit(c: &Clip, m: &CharModel, meta: Option<&AnimClip>, key: &str) -> AnimClip {
+    let mut out = meta.cloned().unwrap_or_else(|| AnimClip {
+        key: key.to_owned(),
+        about: String::new(),
+        source: c.source.clone(),
+        looped: c.cycle,
+        length: c.duration,
+        speed: 1.0,
+        speed_spread: 0.0,
+        stride: 0.0,
+        body: Body::Full,
+        hands: Hands::Clip,
+        repeat: None,
+        keys: Vec::new(),
+    });
+    let sk = m.skeleton().expect("скелет");
+    out.looped = c.cycle;
+    out.length = c.duration * out.speed;
+    let old = meta.map(|a| a.keys.clone()).unwrap_or_default();
+    let old_len = meta.map_or(out.length, |a| a.length.max(1e-4));
+    out.keys = c
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(k, f)| {
+            let u = c.time_of(k);
+            let time = (u * out.length * 1000.0).round() / 1000.0;
+            let points = m.points_of(&sk.pose(f)).expect("скелет");
+            let same = old.iter().find(|o| (o.time / old_len - u).abs() < 1e-3);
+            let weapon = same.and_then(|o| o.weapon).or_else(|| {
+                // Новый ключ: оружие — как между соседними старыми ключами.
+                let before = old.iter().rev().find(|o| o.time / old_len <= u)?;
+                before.weapon
+            });
+            Key { time, points: Points::from_array(points), weapon, events: same.map(|o| o.events.clone()).unwrap_or_default() }
+        })
+        .collect();
+    out
+}
+
 /// Точка экрана `p` — в мире: луч из камеры через неё до плоскости, обращённой к камере
 /// и проходящей через `anchor` (тянем точку «по экрану», не меняя глубины).
 fn screen_to_plane(view_proj: Mat4, rect: Rect, p: Pos2, anchor: Vec3, eye: Vec3) -> Option<Vec3> {
@@ -364,6 +435,34 @@ mod tests {
     use wind_render::Camera;
     use wind_render::glam::Vec2;
 
+    /// Открыли клип и сохранили без правок — метки, оружие и настройки те же; точки —
+    /// те же с точностью до длин отрезков модели (при открытии они выравниваются), а
+    /// второй круг «открыл — сохранил» уже ничего не меняет.
+    #[test]
+    fn clip_survives_open_and_save_unchanged() {
+        let data = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let set = CharacterSet::load(&data).unwrap();
+        let m = &set.models[0];
+        let worst = |a: &AnimClip, b: &AnimClip| {
+            a.keys.iter().zip(&b.keys).map(|(x, y)| x.points.to_array().iter().zip(&y.points.to_array()).map(|(p, q)| p.distance(*q)).fold(0.0, f32::max)).fold(0.0, f32::max)
+        };
+        for key in ["reloading", "crouching forwards", "going prone"] {
+            let a = AnimClip::load(&data.join("animations").join(AnimClip::file_name(key))).unwrap();
+            let once = from_edit(&to_edit(&a, m).unwrap(), m, Some(&a), key);
+            let twice = from_edit(&to_edit(&once, m).unwrap(), m, Some(&once), key);
+            assert_eq!(once.keys.len(), a.keys.len(), "{key}: ключей");
+            assert!(worst(&a, &once) < 0.8, "{key}: точка ушла на {:.2} вокселя", worst(&a, &once));
+            assert!(worst(&once, &twice) < 0.05, "{key}: второй круг сдвинул точку на {:.2}", worst(&once, &twice));
+            for (k0, k1) in a.keys.iter().zip(&once.keys) {
+                assert!((k0.time - k1.time).abs() < 2e-3, "{key}: время {} → {}", k0.time, k1.time);
+                assert_eq!(k0.events, k1.events, "{key}: метки");
+                assert_eq!(k0.weapon, k1.weapon, "{key}: оружие");
+            }
+            assert_eq!((once.looped, once.body, once.hands, once.repeat), (a.looped, a.body, a.hands, a.repeat));
+            assert!((once.length - a.length).abs() < 1e-4);
+        }
+    }
+
     #[test]
     fn screen_point_maps_back_to_the_world() {
         let mut cam = Camera { target: Vec2::new(32.0, 32.0), distance: 3.5, pitch: 0.35, ..Default::default() };
@@ -393,7 +492,7 @@ mod tests {
         let set = wind_render::character::CharacterSet::load(&data).unwrap();
         let m = &set.models[0];
         let sk = m.skeleton().unwrap();
-        let clip = Clip::load(&data.join("animations/run.ron")).unwrap();
+        let clip = to_edit(&AnimClip::load(&data.join("animations/running.ron")).unwrap(), m).unwrap();
         // Солдат стоит в (32, 32) и смотрит под углом 1 рад — как в студии.
         let root = Mat4::from_translation(Vec3::new(32.0, 0.0, 32.0)) * Mat4::from_rotation_y(-1.0);
         let frame = clip.sample(0.3);

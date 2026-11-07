@@ -1,6 +1,7 @@
 //! 3D-отрисовка мира на wgpu внутри кадра eframe.
 //! Как устроено — заметка «Отрисовка — wgpu внутри eframe».
 
+pub mod anim;
 pub mod app_icon;
 pub mod camera;
 pub mod character;
@@ -15,6 +16,7 @@ pub mod props;
 pub mod ragdoll;
 pub mod renderer;
 pub mod rwr;
+pub mod rwr_anim;
 pub mod scene;
 pub mod voxel;
 

@@ -157,7 +157,7 @@ impl Sound {
     fn others(&mut self, ears: &Ears, walkers: &[SoldierDraw], plays: &mut Vec<Play>) {
         let mut seen = HashMap::with_capacity(self.steps.len());
         for s in walkers {
-            if Some(s.id) == ears.own_id || s.prone || s.in_boat || s.pos.distance_squared(ears.pos) > STEPS_HEARD * STEPS_HEARD {
+            if Some(s.id) == ears.own_id || s.stance == wind_sim::Stance::Prone || s.in_boat || s.pos.distance_squared(ears.pos) > STEPS_HEARD * STEPS_HEARD {
                 continue;
             }
             // Первый раз — с середины шага, чтобы все не топнули разом.
@@ -278,7 +278,7 @@ mod tests {
             facing: 0.0,
             team: 1,
             look: None,
-            prone,
+            stance: if prone { wind_sim::Stance::Prone } else { wind_sim::Stance::Stand },
             reloading: false,
             throwing: false,
             aiming: false,

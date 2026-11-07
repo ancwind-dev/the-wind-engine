@@ -253,6 +253,12 @@ struct Session {
     rank_seen: Option<usize>,
     /// Сколько ещё секунд держать «сесть/выйти» (V) — как перезарядку.
     boat_hold: f32,
+    /// Стойка своего солдата: левый Ctrl — присесть / встать, Z — лечь / встать.
+    stance: wind_sim::Stance,
+    /// Ложится или встаёт ещё столько секунд — пилот не двигает (как сервер).
+    stance_timer: f32,
+    /// Ctrl был нажат в прошлом кадре — присед переключается по нажатию, а не пока держат.
+    ctrl_was: bool,
     /// С какой скоростью свой солдат идёт, м/с: от неё разброс прицела.
     move_speed: f32,
     fog: fog::Fog,
@@ -278,6 +284,9 @@ impl Session {
             command: (Command::None, 0.0),
             rank_seen: None,
             boat_hold: 0.0,
+            stance: wind_sim::Stance::Stand,
+            stance_timer: 0.0,
+            ctrl_was: false,
             move_speed: 0.0,
             fog: fog::Fog::default(),
             minimap: minimap::Minimap::default(),
@@ -335,6 +344,21 @@ impl Session {
         let command = if self.command.1 > 0.0 { self.command.0 } else { Command::None };
         // V — сесть в лодку рядом или выйти.
         self.boat_hold = if ctx.input(|i| i.key_pressed(egui::Key::V)) { 0.25 } else { (self.boat_hold - dt).max(0.0) };
+        // Стойка, как в RWR: левый Ctrl — присесть или встать, Z — лечь или встать (лёжа
+        // Ctrl — в присед). Переключается по нажатию.
+        let (ctrl, z) = ctx.input(|i| (i.modifiers.ctrl, i.key_pressed(egui::Key::Z)));
+        let before = self.stance;
+        if ctrl && !self.ctrl_was {
+            self.stance = if self.stance == wind_sim::Stance::Crouch { wind_sim::Stance::Stand } else { wind_sim::Stance::Crouch };
+        }
+        self.ctrl_was = ctrl;
+        if z {
+            self.stance = if self.stance == wind_sim::Stance::Prone { wind_sim::Stance::Stand } else { wind_sim::Stance::Prone };
+        }
+        if (before == wind_sim::Stance::Prone) != (self.stance == wind_sim::Stance::Prone) {
+            self.stance_timer = wind_sim::world::GOING_PRONE;
+        }
+        self.stance_timer = (self.stance_timer - dt).max(0.0);
         // Где появиться: 1 — база, 2…6 — точки A…E.
         let keys = [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5, egui::Key::Num6];
         if let Some(k) = ctx.input(|i| keys.iter().position(|&k| i.key_pressed(k))) {
@@ -365,6 +389,7 @@ impl Session {
                 walk: i.modifiers.shift,
                 command,
                 use_boat: self.boat_hold > 0.0,
+                stance: self.stance,
                 spawn: self.spawn,
                 // Заполняет пилот своего солдата.
                 pos: None,
@@ -378,7 +403,7 @@ impl Session {
         let (Some(weapon), Some(me), Some(map)) = (self.source.own_weapon(), view.me_pos, self.source.map()) else { return 4.0 };
         let to = self.aim - me;
         // На бегу разброс почти втрое больше, чем стоя (как в RWR), — прицел это показывает.
-        let moving = self.source.sight().spread_factor(self.move_speed, false);
+        let moving = self.source.sight().spread_factor(self.move_speed, self.stance);
         let half = to.length() * (weapon.spread(self.heat) * moving * 0.5).tan();
         let side = to.normalize_or_zero().perp() * half;
         let vp = self.camera.view_proj(aspect);
@@ -718,9 +743,19 @@ impl Game {
         // Свой солдат двигается сразу, а серверу уходит, где он (см. Pilot).
         if self.bench.is_none() {
             let (speed, radius) = s.source.soldier_spec();
-            // Шагом — с Shift и пока перезаряжается.
-            let speed = if input.walk || s.source.own_reloading() { speed * wind_sim::world::WALK_SHARE } else { speed };
             let server = s.source.own_server_pos();
+            // Убит — встаёт: возрождается стоя.
+            if server.is_none() {
+                s.stance = wind_sim::Stance::Stand;
+                s.stance_timer = 0.0;
+                input.stance = wind_sim::Stance::Stand;
+            }
+            // В воде не ложатся и не садятся — как на сервере.
+            let wet = s.source.map().zip(server).is_some_and(|(m, p)| m.water_depth(p) > wind_sim::map::WADE_DEPTH);
+            let stance = if wet { wind_sim::Stance::Stand } else { input.stance };
+            // Скорость по стойке, шагом (Shift) и на перезарядке; ложится или встаёт — стоит.
+            let share = wind_sim::move_share(stance, input.walk, s.source.own_reloading());
+            let speed = if s.stance_timer > 0.0 && !wet { 0.0 } else { speed * share };
             if s.source.own_in_boat() {
                 // В лодке солдата везёт лодка: он там, где по серверу.
                 s.pilot.follow(s.source.own_drawn_pos());

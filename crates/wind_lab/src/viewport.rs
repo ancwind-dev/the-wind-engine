@@ -23,8 +23,8 @@ pub struct SceneSoldier {
     pub player: bool,
     /// Явный вид в 3D — для студии персонажей.
     pub look: Option<wind_render::Look>,
-    /// Залёг под огнём.
-    pub prone: bool,
+    /// Стойка: стоит, присел, лежит.
+    pub stance: wind_sim::Stance,
     /// Перезаряжается, только что бросил гранату, целится — для анимации.
     pub reloading: bool,
     pub throwing: bool,
@@ -228,9 +228,9 @@ impl Viewport {
         self.scene_3d.rwr_exact = on;
     }
 
-    /// Готовая поза для солдата студии (`None` — по движению, как в игре).
-    pub fn set_pose_override(&mut self, pose: Option<Vec<wind_render::glam::Vec3>>) {
-        self.scene_3d.pose_override = pose;
+    /// Готовые позы для солдат студии: (номер солдата, поза); остальные — по движению.
+    pub fn set_pose_overrides(&mut self, poses: Vec<(u32, Vec<wind_render::glam::Vec3>)>) {
+        self.scene_3d.pose_overrides = poses;
     }
 
     /// Точки скелета тела убитого солдата `id` (мир, м).
@@ -328,7 +328,7 @@ impl Viewport {
                 facing: s.facing,
                 team: s.team,
                 look: s.look,
-                prone: s.prone,
+                stance: s.stance,
                 reloading: s.reloading,
                 throwing: s.throwing,
                 aiming: s.aiming,

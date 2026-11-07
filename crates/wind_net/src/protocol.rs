@@ -25,7 +25,7 @@ pub const MAGIC: [u8; 2] = *b"WN";
 /// Больше званий в приветствии не передаём.
 pub const MAX_RANKS: usize = 32;
 
-pub const VERSION: u8 = 18;
+pub const VERSION: u8 = 19;
 pub const DEFAULT_PORT: u16 = 7777;
 pub const MAX_NAME: usize = 24;
 /// Пароль сервера и имя сервера — не длиннее, байт.
@@ -272,6 +272,7 @@ impl InputPacket {
         w.write_bool(self.input.walk);
         w.write_bits(self.input.command.to_u8() as u32, 3);
         w.write_bool(self.input.use_boat);
+        w.write_bits(self.input.stance.to_u8() as u32, 2);
         w.write_bits(self.input.spawn as u32, 5);
         w.write_bool(self.input.pos.is_some());
         if let Some(p) = self.input.pos {
@@ -294,13 +295,14 @@ impl InputPacket {
         let walk = r.read_bool()?;
         let command = Command::from_u8(r.read_bits(3)? as u8);
         let use_boat = r.read_bool()?;
+        let stance = wind_sim::Stance::from_u8(r.read_bits(2)? as u8);
         let spawn = r.read_bits(5)? as u8;
         let pos = if r.read_bool()? { Some(read_pos(&mut r)?) } else { None };
         Ok(InputPacket {
             seq,
             ack_tick,
             time_ms,
-            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, reload, walk, command, use_boat, spawn, pos },
+            input: PlayerInput { move_dir: Vec2::new(mx, my).clamp_length_max(1.0), aim, fire, grenade, reload, walk, command, use_boat, stance, spawn, pos },
         })
     }
 }
@@ -459,6 +461,7 @@ mod tests {
                 walk: true,
                 command: Command::Hold,
                 use_boat: true,
+                stance: wind_sim::Stance::Crouch,
                 spawn: 3,
                 pos: Some(Vec2::new(12.0, 34.5)),
             },
@@ -473,6 +476,7 @@ mod tests {
         assert!(back.input.fire && !back.input.grenade && back.input.reload && back.input.walk);
         assert_eq!(back.input.command, Command::Hold);
         assert!(back.input.use_boat);
+        assert_eq!(back.input.stance, wind_sim::Stance::Crouch);
         assert!((back.input.move_dir.x - 1.0).abs() < 0.01);
         assert_eq!(back.input.pos, Some(Vec2::new(12.0, 34.5)));
         assert_eq!(back.input.spawn, 3);

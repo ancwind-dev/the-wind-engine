@@ -198,6 +198,22 @@ impl Lab {
                 }
                 "--editor" => self.set_workspace(Workspace::Map),
                 "--studio" => self.set_workspace(Workspace::Studio),
+                // wind_lab --studio --stance crouch 1.85 — стойка и скорость солдата студии.
+                "--stance" => {
+                    let stance = match args.next().as_deref() {
+                        Some("crouch") => wind_sim::Stance::Crouch,
+                        Some("prone") => wind_sim::Stance::Prone,
+                        _ => wind_sim::Stance::Stand,
+                    };
+                    let speed = args.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    self.studio.set_stance(stance, speed);
+                }
+                // wind_lab --studio --rwr "crouch still" — ВРЕМЕННО: солдат RWR рядом.
+                "--rwr" => {
+                    if let Some(name) = args.next() {
+                        self.studio.show_rwr(&name);
+                    }
+                }
                 // wind_lab --3d --follow 5 — выделить солдата №5 и следовать за ним вблизи.
                 "--follow" => {
                     if let Some(n) = args.next().and_then(|v| v.parse().ok()) {
@@ -954,7 +970,7 @@ impl Lab {
             ui.label(format!(
                 "{:.0}%{}",
                 s.suppression * 100.0,
-                if s.prone {
+                if s.prone() {
                     t(" · залёг")
                 } else if s.pinned {
                     t(" · прижат, за углом")

@@ -1,59 +1,21 @@
-//! Шаг и бег из записей движений (`data/animations/walk.ron`, `run.ron`, см.
-//! `crate::mocap`): клип собирается на модели с её длинами, а поза берётся из круга
-//! шага по фазе. Шаг и бег смешиваются по скорости; ноги идут по ходу движения,
-//! назад — круг крутится в обратную сторону. Руки с оружием ставит `pose` поверх.
+//! Движение по кругу шага: шаг и бег (клипы «walking», «running»), приседом
+//! («crouching forwards»), ползком («prone, moving forwards»). Поза берётся из круга по
+//! фазе; шаг и бег смешиваются по скорости, на месте — клип стойки. Ноги идут по ходу
+//! движения, назад — круг крутится в обратную сторону (у RWR для этого отдельные клипы,
+//! но в них те же кадры задом наперёд). Руки с оружием ставит `pose` поверх.
 
 use super::{CharModel, Joints, Pose, two_bone};
-use crate::mocap::{Clip, ClipFrame, EDGES};
-use crate::rwr::VOXEL;
+use crate::mocap::{ClipFrame, EDGES};
 use glam::{Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
-use std::path::Path;
 
 /// Во сколько раз шаг бега длиннее, чем в записи: бег в игре (6 м/с) быстрее записи
 /// (≈ 3 м/с) — иначе ноги семенили бы.
 pub const RUN_STRIDE: f32 = 1.3;
 
-/// Клип, собранный на модели: позы по кадрам (воксели, как у `pose`). Круг шага
-/// или действие (бросок).
-#[derive(Clone, Debug, Default)]
-pub struct Gait {
-    frames: Vec<Pose>,
-    /// Путь за круг (два шага), м; у действия — 0.
-    pub stride: f32,
-    /// У действия: доля клипа, когда граната уходит из руки (см. `Clip::peak`).
-    pub peak: f32,
-}
-
-/// Шаг и бег модели.
-#[derive(Clone, Debug, Default)]
-pub struct Gaits {
-    pub walk: Gait,
-    pub run: Gait,
-}
-
-/// Клипы шага и бега из `data/animations`. Нет файлов — `None`: шаг процедурный.
-pub fn load_clips(data_dir: &Path) -> Result<Option<(Clip, Clip)>, String> {
-    let dir = data_dir.join("animations");
-    let (walk, run) = (dir.join("walk.ron"), dir.join("run.ron"));
-    if !walk.exists() || !run.exists() {
-        return Ok(None);
-    }
-    Ok(Some((Clip::load(&walk)?, Clip::load(&run)?)))
-}
-
-/// Клип действия `data/animations/<name>.ron`, если есть.
-pub fn load_action(data_dir: &Path, name: &str) -> Result<Option<Clip>, String> {
-    let path = data_dir.join("animations").join(format!("{name}.ron"));
-    if !path.exists() {
-        return Ok(None);
-    }
-    Clip::load(&path).map(Some)
-}
-
 impl Joints {
     /// Номер точки по имени, как в `mocap::EDGES`.
-    fn named(&self, name: &str) -> Option<usize> {
+    pub(super) fn named(&self, name: &str) -> Option<usize> {
         Some(match name {
             "head" => self.head,
             "neck" => self.neck,
@@ -82,14 +44,6 @@ impl CharModel {
         (0..2).map(|s| r[j.hip[s]].distance(r[j.knee[s]]) + r[j.knee[s]].distance(r[j.foot[s]])).sum::<f32>() / 2.0
     }
 
-    /// Клип — на этой модели (клип с ключами — сначала в равномерные кадры).
-    pub(crate) fn gait(&self, clip: &Clip) -> Option<Gait> {
-        let sk = self.skeleton()?;
-        let clip = clip.uniform();
-        let frames = clip.frames.iter().map(|f| sk.pose(f)).collect();
-        Some(Gait { frames, stride: clip.stride * sk.leg * VOXEL, peak: clip.peak })
-    }
-
     /// Скелет модели для клипов: длины её отрезков, где таз и стопы.
     pub fn skeleton(&self) -> Option<Skeleton> {
         let j = self.joints?;
@@ -108,31 +62,36 @@ impl CharModel {
         })
     }
 
-    /// Ноги и корпус из кругов шага и бега: `None`, если клипов нет. Руки — как в клипе
-    /// (их потом ставит `pose`).
-    pub(crate) fn gait_pose(&self, speed: f32, phase: f32, dir: Vec2) -> Option<Pose> {
-        let g = self.gaits.as_ref()?;
-        let j = self.joints?;
-        // Назад — круг в обратную сторону, ноги разворачиваем не больше чем на 90°.
+    /// Направление круга: доля круга `u` (назад — в обратную сторону) и на сколько
+    /// повернуть ноги (не больше чем на 90°).
+    fn cycle_dir(phase: f32, dir: Vec2) -> (f32, f32) {
         let a = dir.y.atan2(dir.x);
-        let (u, turn) = if a.abs() > FRAC_PI_2 + 0.2 {
+        if a.abs() > FRAC_PI_2 + 0.2 {
             (1.0 - (phase / TAU).rem_euclid(1.0), a - PI * a.signum())
         } else {
             ((phase / TAU).rem_euclid(1.0), a.clamp(-FRAC_PI_2, FRAC_PI_2))
-        };
-        let run = super::run_share(speed);
+        }
+    }
+
+    /// Стоя: шаг и бег, смешанные по скорости, на месте — стойка. `None` — клипов нет.
+    pub(crate) fn gait_pose(&self, speed: f32, phase: f32, dir: Vec2, clock: f32) -> Option<Pose> {
+        let (walk, run) = (self.clips.get("walking")?, self.clips.get("running")?);
+        let j = self.joints?;
+        let (u, turn) = Self::cycle_dir(phase, dir);
+        let share = super::run_share(speed);
         let moving = (speed / 0.8).clamp(0.0, 1.0);
+        let still = self.on_spot("still", clock);
         // Шаг и бег на этой доле круга, смешанные по скорости, — сразу в позу, без
         // промежуточных списков: позу считаем каждому солдату в каждом кадре.
-        let ((wa, wb, wt), (ra, rb, rt)) = (g.walk.around(u), g.run.around(u));
-        let mut p = self.rest.clone();
+        let ((wa, wb, wt), (ra, rb, rt)) = (walk.around(u), run.around(u));
+        let mut p = still;
         for (i, v) in p.iter_mut().enumerate() {
             let w = wa[i].lerp(wb[i], wt);
             let r = ra[i].lerp(rb[i], rt);
-            *v = v.lerp(w.lerp(r, run), moving);
+            *v = v.lerp(w.lerp(r, share), moving);
         }
         // Бегом шаг длиннее записи: стопы дальше от таза по ходу, колени — заново.
-        let long = 1.0 + (RUN_STRIDE - 1.0) * run * moving;
+        let long = 1.0 + (RUN_STRIDE - 1.0) * share * moving;
         if long > 1.001 {
             let r = &self.rest;
             for side in 0..2 {
@@ -146,21 +105,50 @@ impl CharModel {
                 p[j.knee[side]] = two_bone(hip, foot, thigh, shin, bend);
             }
         }
-        // Ноги — по ходу движения: стопы поворачиваем вокруг таза, а колени ставим
-        // заново, сгибом вперёд — иначе вбок колено гнулось бы в сторону.
-        if turn.abs() > 1e-3 {
-            let center = (p[j.hip[0]] + p[j.hip[1]]) * 0.5;
-            let q = Quat::from_rotation_y(-turn);
-            let r = &self.rest;
-            for side in 0..2 {
-                let foot = center + q * (p[j.foot[side]] - center);
-                let thigh = r[j.hip[side]].distance(r[j.knee[side]]);
-                let shin = r[j.knee[side]].distance(r[j.foot[side]]);
-                p[j.foot[side]] = foot;
-                p[j.knee[side]] = two_bone(p[j.hip[side]], foot, thigh, shin, Vec3::X);
-            }
-        }
+        self.turn_legs(&mut p, j, turn);
         Some(p)
+    }
+
+    /// Круг движения `moving` поверх клипа на месте `still`: на месте — стойка, в движении
+    /// (от `full` м/с) — круг. Приседом и ползком.
+    pub(crate) fn cycle_pose(&self, (still, moving): (&str, &str), full: f32, m: &super::Motion, dir: Vec2) -> Option<Pose> {
+        let j = self.joints?;
+        let clip = self.clips.get(moving)?;
+        let mut p = self.on_spot(still, m.clock);
+        let (u, turn) = Self::cycle_dir(m.phase, dir);
+        let k = (m.speed / full.max(0.01)).clamp(0.0, 1.0);
+        let (a, b, t) = clip.around(u);
+        for (i, v) in p.iter_mut().enumerate() {
+            *v = v.lerp(a[i].lerp(b[i], t), k);
+        }
+        self.turn_legs(&mut p, j, turn);
+        Some(p)
+    }
+
+    /// Клип на месте (стойка, присед, лёжа) по часам; нет клипа — поза покоя.
+    pub(crate) fn on_spot(&self, key: &str, clock: f32) -> Pose {
+        match self.clips.get(key) {
+            Some(c) => c.at(clock / c.seconds.max(0.01)),
+            None => self.rest.clone(),
+        }
+    }
+
+    /// Ноги — по ходу движения: стопы поворачиваем вокруг таза, а колени ставим заново,
+    /// сгибом вперёд — иначе вбок колено гнулось бы в сторону.
+    fn turn_legs(&self, p: &mut Pose, j: Joints, turn: f32) {
+        if turn.abs() <= 1e-3 {
+            return;
+        }
+        let center = (p[j.hip[0]] + p[j.hip[1]]) * 0.5;
+        let q = Quat::from_rotation_y(-turn);
+        let r = &self.rest;
+        for side in 0..2 {
+            let foot = center + q * (p[j.foot[side]] - center);
+            let thigh = r[j.hip[side]].distance(r[j.knee[side]]);
+            let shin = r[j.knee[side]].distance(r[j.foot[side]]);
+            p[j.foot[side]] = foot;
+            p[j.knee[side]] = two_bone(p[j.hip[side]], foot, thigh, shin, Vec3::X);
+        }
     }
 }
 
@@ -248,25 +236,6 @@ impl Skeleton {
     }
 }
 
-impl Gait {
-    /// Поза действия на доле `u` (0..1, без повтора).
-    pub(crate) fn at_clamped(&self, u: f32) -> Pose {
-        let n = self.frames.len();
-        let x = u.clamp(0.0, 1.0) * (n - 1) as f32;
-        let k = (x.floor() as usize).min(n - 2);
-        let t = x - k as f32;
-        self.frames[k].iter().zip(&self.frames[k + 1]).map(|(&a, &b)| a.lerp(b, t)).collect()
-    }
-
-    /// Соседние кадры круга на доле `u` (0..1) и доля между ними.
-    fn around(&self, u: f32) -> (&Pose, &Pose, f32) {
-        let n = self.frames.len();
-        let x = u.rem_euclid(1.0) * n as f32;
-        let k = x.floor() as usize % n;
-        (&self.frames[k], &self.frames[(k + 1) % n], x.fract())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::character::{CharacterSet, Motion};
@@ -285,7 +254,7 @@ mod tests {
         let sk = m.skeleton().unwrap();
         let j = m.joints.unwrap();
         // Поза → кадр → поза: те же точки.
-        let pose = m.pose(Motion { speed: 6.0, phase: 1.0, dir: Vec2::X, carry: 0.0 });
+        let pose = m.pose(Motion { speed: 6.0, phase: 1.0, dir: Vec2::X, carry: 0.0, ..Default::default() });
         let back = sk.pose(&sk.frame_of(&pose));
         for i in [j.hand[0], j.foot[1], j.head, j.knee[0]] {
             assert!(back[i].distance(pose[i]) < 0.05, "точка {i}: {:?} → {:?}", pose[i], back[i]);
@@ -306,10 +275,13 @@ mod tests {
     fn recorded_cycles_loop_without_a_jump() {
         let set = set();
         for m in &set.models {
-            assert!(m.gaits.is_some() && m.throw.is_some(), "{}: нет клипов из data/animations", m.name);
-            for speed in [2.2, 6.0] {
+            for key in ["still", "walking", "running", "crouch still", "crouching forwards", "prone", "prone, moving forwards", "going prone", "leaving prone", "throwing", "reloading", "reloading, prone"] {
+                assert!(m.clips.contains_key(key), "{}: нет клипа «{key}» в data/animations", m.name);
+            }
+            // Стоя шагом и бегом, приседом, ползком.
+            for (speed, crouch, prone) in [(2.2, 0.0, 0.0), (6.0, 0.0, 0.0), (1.85, 1.0, 0.0), (0.75, 0.0, 1.0)] {
                 // Соседние фазы — близкие позы, и на шве круга (2π → 0) тоже.
-                let pose = |ph: f32| m.pose(Motion { speed, phase: ph, dir: Vec2::X, carry: 0.0 });
+                let pose = |ph: f32| m.pose(Motion { speed, phase: ph, dir: Vec2::X, carry: 0.0, crouch, prone, ..Default::default() });
                 let step = TAU / 200.0;
                 let worst = (0..200)
                     .map(|k| {
@@ -329,7 +301,7 @@ mod tests {
         let j = m.joints.unwrap();
         let (mut low, mut high) = (f32::MAX, f32::MIN);
         for k in 0..64 {
-            let p = m.pose(Motion { speed: 6.0, phase: k as f32 * TAU / 64.0, dir: Vec2::X, carry: 0.0 });
+            let p = m.pose(Motion { speed: 6.0, phase: k as f32 * TAU / 64.0, dir: Vec2::X, carry: 0.0, ..Default::default() });
             for s in 0..2 {
                 low = low.min(p[j.foot[s]].y);
                 high = high.max(p[j.foot[s]].y);

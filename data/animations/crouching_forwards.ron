@@ -1,0 +1,50 @@
+// Клип «crouching forwards» — идёт приседом, корпус к оружию. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
+(
+    key: "crouching forwards",
+    about: "идёт приседом, корпус к оружию",
+    source: "свой: позы задаёт генератор wind_lab --make-clips (character/make.rs)",
+    looped: true,
+    length: 0.8,
+    speed: 1.2,
+    speed_spread: 0.0,
+    stride: 1.4095237,
+    body: Full,
+    hands: Weapon,
+    keys: [
+        (
+            time: 0.0,
+            points: (head: (18.18, 41.57, -0.3), neck: (15.91, 34.94, -0.3), rightshoulder: (13.6, 33.03, 6.7), leftshoulder: (13.6, 33.03, -7.3), rightelbow: (9.17, 26.65, 4.79), leftelbow: (19.43, 27.65, -6.26), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.9, 26.66, -0.3), righthip: (0.5, 22.2, 4.7), lefthip: (0.5, 22.2, -5.3), rightknee: (11.08, 11.72, 6.49), leftknee: (8.96, 9.89, -6.69), rightfoot: (0.0, 5.0, 5.5), leftfoot: (-0.0, 0.5, -6.0)),
+        ),
+        (
+            time: 0.1,
+            points: (head: (18.17, 40.87, -1.05), neck: (15.9, 34.24, -0.95), rightshoulder: (13.89, 32.33, 6.14), leftshoulder: (13.29, 32.33, -7.85), rightelbow: (7.94, 27.28, 4.38), leftelbow: (19.57, 27.65, -6.19), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.89, 25.96, -0.53), righthip: (0.56, 21.5, 4.7), lefthip: (0.44, 21.5, -5.3), rightknee: (13.86, 14.7, 6.12), leftknee: (4.2, 7.07, -6.95), rightfoot: (6.98, 3.68, 5.5), leftfoot: (-6.98, 0.5, -6.0)),
+        ),
+        (
+            time: 0.2,
+            points: (head: (18.15, 40.17, -1.36), neck: (15.89, 33.54, -1.22), rightshoulder: (14.0, 31.63, 5.9), leftshoulder: (13.16, 31.63, -8.07), rightelbow: (6.99, 28.09, 4.38), leftelbow: (19.83, 27.68, -6.1), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.89, 25.26, -0.62), righthip: (0.59, 20.8, 4.7), lefthip: (0.41, 20.8, -5.3), rightknee: (13.36, 13.02, 5.91), leftknee: (1.87, 5.98, -7.09), rightfoot: (9.87, 0.5, 5.5), leftfoot: (-9.87, 0.5, -6.0)),
+            events: [Step(Right)],
+        ),
+        (
+            time: 0.3,
+            points: (head: (18.17, 40.87, -1.05), neck: (15.9, 34.24, -0.95), rightshoulder: (13.89, 32.33, 6.14), leftshoulder: (13.29, 32.33, -7.85), rightelbow: (7.94, 27.28, 4.38), leftelbow: (19.57, 27.65, -6.19), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.89, 25.96, -0.53), righthip: (0.56, 21.5, 4.7), lefthip: (0.44, 21.5, -5.3), rightknee: (12.36, 12.32, 5.97), leftknee: (5.38, 7.49, -7.35), rightfoot: (6.98, 0.5, 5.5), leftfoot: (-6.98, 3.68, -6.0)),
+        ),
+        (
+            time: 0.4,
+            points: (head: (18.18, 41.57, -0.3), neck: (15.91, 34.94, -0.3), rightshoulder: (13.6, 33.03, 6.7), leftshoulder: (13.6, 33.03, -7.3), rightelbow: (9.17, 26.65, 4.79), leftelbow: (19.43, 27.65, -6.26), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.9, 26.66, -0.3), righthip: (0.5, 22.2, 4.7), lefthip: (0.5, 22.2, -5.3), rightknee: (8.96, 9.9, 6.17), leftknee: (11.09, 11.71, -7.01), rightfoot: (-0.0, 0.5, 5.5), leftfoot: (0.0, 5.0, -6.0)),
+        ),
+        (
+            time: 0.5,
+            points: (head: (18.17, 40.87, 0.45), neck: (15.9, 34.24, 0.35), rightshoulder: (13.29, 32.33, 7.25), leftshoulder: (13.89, 32.33, -6.74), rightelbow: (8.9, 26.65, 3.73), leftelbow: (20.43, 27.81, -5.89), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.89, 25.96, -0.07), righthip: (0.44, 21.5, 4.7), lefthip: (0.56, 21.5, -5.3), rightknee: (4.19, 7.08, 6.44), leftknee: (13.86, 14.69, -6.66), rightfoot: (-6.98, 0.5, 5.5), leftfoot: (6.98, 3.68, -6.0)),
+        ),
+        (
+            time: 0.6,
+            points: (head: (18.15, 40.17, 0.76), neck: (15.89, 33.54, 0.62), rightshoulder: (13.16, 31.63, 7.47), leftshoulder: (14.0, 31.63, -6.5), rightelbow: (8.51, 26.87, 3.03), leftelbow: (21.14, 28.1, -5.8), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.89, 25.26, 0.02), righthip: (0.41, 20.8, 4.7), lefthip: (0.59, 20.8, -5.3), rightknee: (1.87, 5.99, 6.58), leftknee: (13.36, 13.01, -6.45), rightfoot: (-9.87, 0.5, 5.5), leftfoot: (9.87, 0.5, -6.0)),
+            events: [Step(Left)],
+        ),
+        (
+            time: 0.7,
+            points: (head: (18.17, 40.87, 0.45), neck: (15.9, 34.24, 0.35), rightshoulder: (13.29, 32.33, 7.25), leftshoulder: (13.89, 32.33, -6.74), rightelbow: (8.9, 26.65, 3.73), leftelbow: (20.43, 27.81, -5.89), righthand: (12.0, 33.0, 3.5), lefthand: (18.0, 34.0, -3.5), midspine: (5.89, 25.96, -0.07), righthip: (0.44, 21.5, 4.7), lefthip: (0.56, 21.5, -5.3), rightknee: (5.38, 7.5, 6.85), leftknee: (12.36, 12.32, -6.51), rightfoot: (-6.98, 3.68, 5.5), leftfoot: (6.98, 0.5, -6.0)),
+        ),
+    ],
+)

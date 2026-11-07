@@ -10,7 +10,7 @@
 //!   с паузами;
 //! - точность зависит от движения: на бегу разброс почти втрое больше, чем стоя.
 
-use crate::world::Soldier;
+use crate::world::{Soldier, Stance};
 use glam::Vec2;
 use serde::Deserialize;
 
@@ -43,6 +43,9 @@ pub struct SightSpec {
     pub detect_walking: f32,
     pub detect_still: f32,
     pub detect_prone: f32,
+    /// Присел — на месте и в движении (у RWR 0,72 и 0,8).
+    pub detect_crouching: f32,
+    pub detect_crouch_moving: f32,
     /// Стрелявшего в последние `muzzle_time` с видно в `muzzle_factor` раз дальше,
     /// но не дальше `muzzle_range` м.
     pub muzzle_factor: f32,
@@ -62,6 +65,9 @@ pub struct SightSpec {
     pub accuracy_walking: f32,
     pub accuracy_standing: f32,
     pub accuracy_prone: f32,
+    /// Присел: точнее, чем стоя, но не как лёжа (у RWR «присед успокаивает прицел,
+    /// лёжа — ещё больше»).
+    pub accuracy_crouching: f32,
 }
 
 impl Default for SightSpec {
@@ -71,6 +77,8 @@ impl Default for SightSpec {
             detect_walking: 0.95,
             detect_still: 0.88,
             detect_prone: 0.6,
+            detect_crouching: 0.72,
+            detect_crouch_moving: 0.8,
             muzzle_factor: 1.7,
             muzzle_range: 40.0,
             muzzle_time: 1.0,
@@ -84,6 +92,7 @@ impl Default for SightSpec {
             accuracy_walking: 0.675,
             accuracy_standing: 0.85,
             accuracy_prone: 0.95,
+            accuracy_crouching: 0.9,
         }
     }
 }
@@ -94,17 +103,19 @@ const RUN: f32 = 6.0;
 
 impl SightSpec {
     /// Во сколько раз от дальности обзора видна цель, которая движется со скоростью
-    /// `speed` (лежит — `prone`).
-    pub fn detectability(&self, speed: f32, prone: bool) -> f32 {
-        if prone {
-            return self.detect_prone;
+    /// `speed` в стойке `stance`.
+    pub fn detectability(&self, speed: f32, stance: Stance) -> f32 {
+        match stance {
+            Stance::Prone => self.detect_prone,
+            Stance::Crouch if speed > 0.3 => self.detect_crouch_moving,
+            Stance::Crouch => self.detect_crouching,
+            Stance::Stand => by_speed(speed, self.detect_still, self.detect_walking, self.detect_running),
         }
-        by_speed(speed, self.detect_still, self.detect_walking, self.detect_running)
     }
 
     /// С какого расстояния ИИ с обзором `vision` замечает солдата `s`.
     pub fn sight_range(&self, vision: f32, s: &Soldier) -> f32 {
-        let range = vision * self.detectability(s.vel.length(), s.prone);
+        let range = vision * self.detectability(s.vel.length(), s.stance);
         if s.shot_ago < self.muzzle_time {
             range.max((vision * self.muzzle_factor).min(self.muzzle_range))
         } else {
@@ -113,8 +124,13 @@ impl SightSpec {
     }
 
     /// Во сколько раз разброс больше, чем стоя: на бегу — почти втрое.
-    pub fn spread_factor(&self, speed: f32, prone: bool) -> f32 {
-        let accuracy = if prone { self.accuracy_prone } else { by_speed(speed, self.accuracy_standing, self.accuracy_walking, self.accuracy_running) };
+    pub fn spread_factor(&self, speed: f32, stance: Stance) -> f32 {
+        let accuracy = match stance {
+            Stance::Prone => self.accuracy_prone,
+            // Приседом в движении — как шагом, на месте — точнее, чем стоя.
+            Stance::Crouch => by_speed(speed, self.accuracy_crouching, self.accuracy_walking, self.accuracy_running),
+            Stance::Stand => by_speed(speed, self.accuracy_standing, self.accuracy_walking, self.accuracy_running),
+        };
         self.accuracy_standing / accuracy.max(0.05)
     }
 }
@@ -135,12 +151,14 @@ mod tests {
     #[test]
     fn running_is_seen_farther_and_shoots_wider() {
         let s = SightSpec::default();
-        assert!(s.detectability(6.0, false) > s.detectability(2.0, false));
-        assert!(s.detectability(2.0, false) > s.detectability(0.0, false));
-        assert!(s.detectability(0.0, true) < s.detectability(0.0, false));
-        assert_eq!(s.spread_factor(0.0, false), 1.0);
-        assert!((s.spread_factor(6.0, false) - 0.85 / 0.3).abs() < 1e-4, "на бегу — почти втрое");
-        assert!(s.spread_factor(0.0, true) < 1.0, "лёжа точнее");
+        assert!(s.detectability(6.0, Stance::Stand) > s.detectability(2.0, Stance::Stand));
+        assert!(s.detectability(2.0, Stance::Stand) > s.detectability(0.0, Stance::Stand));
+        assert!(s.detectability(0.0, Stance::Prone) < s.detectability(0.0, Stance::Stand));
+        assert_eq!(s.spread_factor(0.0, Stance::Stand), 1.0);
+        assert!((s.spread_factor(6.0, Stance::Stand) - 0.85 / 0.3).abs() < 1e-4, "на бегу — почти втрое");
+        assert!(s.spread_factor(0.0, Stance::Prone) < s.spread_factor(0.0, Stance::Crouch), "лёжа точнее, чем присев");
+        assert!(s.spread_factor(0.0, Stance::Crouch) < 1.0, "присев точнее, чем стоя");
+        assert!(s.detectability(0.0, Stance::Prone) < s.detectability(0.0, Stance::Crouch) && s.detectability(0.0, Stance::Crouch) < s.detectability(0.0, Stance::Stand));
     }
 
     #[test]

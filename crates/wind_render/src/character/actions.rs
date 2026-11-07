@@ -128,8 +128,72 @@ fn shells(t: f32, a: f32, b: f32, rounds: u32, pouch: Vec3, load: Vec3, push: Ve
 }
 
 impl CharModel {
-    /// Поза `pose` (из `pose`) с действием руками.
-    pub fn act(&self, pose: &Pose, action: Action) -> Acted {
+    /// Поза `pose` (из `pose`) с действием руками — по клипу стандарта анимаций
+    /// («reloading…», «throwing»; лёжа — «reloading, prone»). Клип — только на верх тела:
+    /// голова, плечи и руки берутся из клипа от его шеи к шее позы, ноги идут своим шагом.
+    /// Правая кисть — на рукояти, левая — на цевье, пока метки не скажут, что рука ушла.
+    /// Нет клипа — процедурное действие (лёжа — без действия).
+    pub fn act(&self, pose: &Pose, action: Action, lying: bool) -> Acted {
+        let Some(j) = self.joints else {
+            return Acted { pose: pose.clone(), weapon: self.weapon_frame(pose), grenade: None };
+        };
+        let key = match action {
+            Action::Reload { .. } if lying => "reloading, prone",
+            Action::Reload { kind: ReloadKind::Magazine, .. } => "reloading",
+            Action::Reload { kind: ReloadKind::Cylinder, .. } => "reloading, cylinder",
+            Action::Reload { kind: ReloadKind::Pump, .. } => "reloading, pump",
+            Action::Reload { kind: ReloadKind::Break, .. } => "reloading, break",
+            Action::Throw { .. } if lying => "",
+            Action::Throw { .. } => "throwing",
+        };
+        let Some(clip) = self.clips.get(key) else {
+            if lying {
+                return Acted { pose: pose.clone(), weapon: self.weapon_frame(pose), grenade: None };
+            }
+            return self.act_procedural(pose, action);
+        };
+        let u = match action {
+            Action::Reload { t, rounds, .. } => clip.repeated(t, rounds),
+            Action::Throw { t } => t / clip.seconds.max(0.01),
+        };
+        let c = clip.at(u);
+        let mut p = pose.clone();
+        // Как держалось оружие до действия — к этому всё возвращается.
+        let (rh, lh) = (p[j.hand[0]], p[j.hand[1]]);
+        let rest = Hold { grip: rh, aim: lh - rh, roll: 0.0 };
+        let fore_len = lh.distance(rh);
+        // Вход и выход — плавно (≈0,1 с): солдат мог бежать с оружием поперёк груди.
+        let edge = match action {
+            Action::Reload { .. } => 0.07,
+            Action::Throw { .. } => (0.1 / clip.seconds.max(0.1)).min(0.3),
+        };
+        let w = smooth(u / edge) * smooth((1.0 - u) / edge);
+        let shift = p[j.neck] - c[j.neck];
+        for i in [j.head, j.shoulder[0], j.shoulder[1], j.elbow[0], j.elbow[1], j.hand[0], j.hand[1]] {
+            p[i] = p[i].lerp(c[i] + shift, w);
+        }
+        let hold = match clip.weapon_at(u) {
+            Some(wa) => rest.lerp(Hold { grip: wa.grip + shift, aim: wa.aim, roll: wa.roll }, w),
+            None => rest,
+        };
+        let (strong, weak) = clip.hands_at(u);
+        let right = if strong { hold.grip } else { p[j.hand[0]] };
+        let left = if weak { hold.at(fore_len, 0.0) } else { p[j.hand[1]] };
+        for (side, hand) in [(0, right), (1, left)] {
+            let bend = (p[j.elbow[side]] - (p[j.shoulder[side]] + hand) * 0.5).normalize_or(Vec3::NEG_Y);
+            self.reach(&mut p, j, side, hand, Some(bend));
+        }
+        let hand = p[j.hand[0]];
+        let grenade = match action {
+            Action::Throw { .. } => (!strong && clip.release().is_some_and(|r| u < r)).then_some(hand),
+            _ => None,
+        };
+        Acted { pose: p, weapon: Some(hold.frame()), grenade }
+    }
+
+    /// Процедурное действие — «автор» клипов перезарядки и броска (см. `make.rs`): во
+    /// времени заданы кисти и как держится оружие, локти ставит обратная кинематика.
+    pub(crate) fn act_procedural(&self, pose: &Pose, action: Action) -> Acted {
         let Some(j) = self.joints else {
             return Acted { pose: pose.clone(), weapon: self.weapon_frame(pose), grenade: None };
         };
@@ -172,10 +236,6 @@ impl CharModel {
     /// замахивается из-за плеча и бросает через верх, потом всё возвращается.
     fn throw(&self, mut p: Pose, j: Joints, t: f32, rest: Hold, fore_len: f32) -> Acted {
         let t = t.clamp(0.0, THROW_TIME);
-        // Бросок из записи движений, если есть (см. `throw_recorded`).
-        if let Some(acted) = self.throw_recorded(&mut p, j, t, rest, fore_len) {
-            return acted;
-        }
         // Поворот плеч вокруг поясницы: минус — правое плечо назад.
         let twist = if t < 0.12 {
             -0.5 * ramp(t, 0.0, 0.12)
@@ -218,19 +278,24 @@ impl CharModel {
         // Граната в руке — когда рука ушла с оружия и до броска.
         Acted { pose: p, weapon: Some(hold.frame()), grenade: (t > 0.04 && t < THROW_RELEASE).then_some(hand) }
     }
+}
 
-    /// Бросок из записи движений (`data/animations/throw.ron`): корпус, плечи и правая
-    /// рука — из записи, приставленные к нашему тазу; ноги — как шли; винтовка — в левой
-    /// руке, как у процедурного броска. Время записи подогнано: замах — до выпуска на
-    /// `THROW_RELEASE`, доводка — до конца броска.
-    fn throw_recorded(&self, p: &mut Pose, j: Joints, t: f32, rest: Hold, fore_len: f32) -> Option<Acted> {
-        let clip = self.throw.as_ref()?;
-        let u = if t < THROW_RELEASE {
-            clip.peak * t / THROW_RELEASE
-        } else {
-            clip.peak + (1.0 - clip.peak) * (t - THROW_RELEASE) / (THROW_TIME - THROW_RELEASE)
-        };
-        let c = clip.at_clamped(u);
+impl CharModel {
+    /// Бросок поверх записи движений — «автор» клипа «throwing» (см. `make.rs`): корпус,
+    /// плечи и правая рука — из записи (кадры `rec` на этой модели, приставленные к нашему
+    /// тазу), винтовка — в левой руке, как у процедурного броска. Время записи подогнано:
+    /// замах — до выпуска на `THROW_RELEASE` (доля записи `peak`), доводка — до конца.
+    pub(crate) fn throw_over_record(&self, pose: &Pose, rec: &[Pose], peak: f32, t: f32) -> Acted {
+        let Some(j) = self.joints else { return self.act_procedural(pose, Action::Throw { t }) };
+        let mut p = pose.clone();
+        let (rh, lh) = (p[j.hand[0]], p[j.hand[1]]);
+        let rest = Hold { grip: rh, aim: lh - rh, roll: 0.0 };
+        let fore_len = lh.distance(rh);
+        let t = t.clamp(0.0, THROW_TIME);
+        let u = if t < THROW_RELEASE { peak * t / THROW_RELEASE } else { peak + (1.0 - peak) * (t - THROW_RELEASE) / (THROW_TIME - THROW_RELEASE) };
+        let x = u.clamp(0.0, 1.0) * (rec.len() - 1) as f32;
+        let k = (x.floor() as usize).min(rec.len().saturating_sub(2));
+        let c: Pose = rec[k].iter().zip(&rec[(k + 1).min(rec.len() - 1)]).map(|(&a, &b)| a.lerp(b, x - k as f32)).collect();
         // Из записи — плавно в начале и в конце, чтобы войти из бега и вернуться к оружию.
         let w = ramp(t, 0.0, 0.06) * (1.0 - ramp(t, THROW_TIME - 0.22, THROW_TIME));
         let ours = (p[j.hip[0]] + p[j.hip[1]]) * 0.5;
@@ -243,15 +308,15 @@ impl CharModel {
         let lowered_aim = Vec3::new(0.7, -0.65, -0.25);
         let lowered = Hold { grip: lowered_left - lowered_aim.normalize() * fore_len, aim: lowered_aim, roll: 0.3 };
         let hold = rest.lerp(lowered, w);
-        self.reach(p, j, 1, hold.at(fore_len, 0.0), None);
+        self.reach(&mut p, j, 1, hold.at(fore_len, 0.0), None);
         // Правая рука: в записи — бросок; в начале и в конце — к рукояти.
         if w < 1.0 {
             let hand = p[j.hand[0]].lerp(hold.grip, 1.0 - w);
             let bend = (p[j.elbow[0]] - (p[j.shoulder[0]] + hand) * 0.5).normalize_or(Vec3::new(0.0, -1.0, 0.6));
-            self.reach(p, j, 0, hand, Some(bend));
+            self.reach(&mut p, j, 0, hand, Some(bend));
         }
         let hand = p[j.hand[0]];
-        Some(Acted { pose: p.clone(), weapon: Some(hold.frame()), grenade: (t > 0.04 && t < THROW_RELEASE).then_some(hand) })
+        Acted { pose: p, weapon: Some(hold.frame()), grenade: (t > 0.04 && t < THROW_RELEASE).then_some(hand) }
     }
 }
 
@@ -369,12 +434,12 @@ mod tests {
             let aim = m.weapon_frame(&pose).unwrap();
             for kind in KINDS {
                 for t in [0.0, 1.0] {
-                    let a = m.act(&pose, Action::Reload { kind, t, rounds: 4 });
+                    let a = m.act(&pose, Action::Reload { kind, t, rounds: 4 }, false);
                     let diff = (a.weapon.unwrap() - aim).abs().to_cols_array().iter().copied().fold(0.0, f32::max);
                     assert!(diff < 0.02, "{}, {kind:?} при t={t}: оружие не в обычной позе ({diff})", m.name);
                 }
                 for i in 0..=40 {
-                    let a = m.act(&pose, Action::Reload { kind, t: i as f32 / 40.0, rounds: 4 });
+                    let a = m.act(&pose, Action::Reload { kind, t: i as f32 / 40.0, rounds: 4 }, false);
                     arms_intact(m, &a.pose, &format!("{kind:?} {i}/40"));
                 }
             }
@@ -388,7 +453,7 @@ mod tests {
         let j = m.joints.unwrap();
         let pose = m.pose(Motion::default());
         let pouch = pose[j.hip[1]] + Vec3::new(5.0, 5.0, -2.5);
-        let at = |t: f32| m.act(&pose, Action::Reload { kind: ReloadKind::Magazine, t, rounds: 30 });
+        let at = |t: f32| m.act(&pose, Action::Reload { kind: ReloadKind::Magazine, t, rounds: 30 }, false);
         // Левая рука у подсумка (на поясе слева).
         assert!(at(0.54).pose[j.hand[1]].distance(pouch) < 3.0, "левая рука не дошла до подсумка");
         // Оружие наклонено: ствол ниже, чем в обычной позе.
@@ -408,7 +473,7 @@ mod tests {
             let mut visits = 0;
             let mut near = false;
             for i in 0..=600 {
-                let a = m.act(&pose, Action::Reload { kind: ReloadKind::Cylinder, t: i as f32 / 600.0, rounds });
+                let a = m.act(&pose, Action::Reload { kind: ReloadKind::Cylinder, t: i as f32 / 600.0, rounds }, false);
                 let now = a.pose[j.hand[1]].distance(pouch) < 3.0;
                 visits += (now && !near) as u32;
                 near = now;
@@ -424,7 +489,7 @@ mod tests {
             let j = m.joints.unwrap();
             let pose = m.pose(Motion::default());
             let aim = m.weapon_frame(&pose).unwrap();
-            let at = |t: f32| m.act(&pose, Action::Throw { t });
+            let at = |t: f32| m.act(&pose, Action::Throw { t }, false);
             // Замах: кисть позади и выше плеча; граната в руке.
             let back = at(0.11);
             let (hand, shoulder) = (back.pose[j.hand[0]], back.pose[j.shoulder[0]]);

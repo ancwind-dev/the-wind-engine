@@ -22,7 +22,7 @@ fn pinned_in_the_open_goes_prone_in_cover_hides() {
     let mut w = duo();
     w.soldiers[1].suppression = 0.9;
     w.step();
-    assert!(w.soldiers[1].pinned && w.soldiers[1].prone, "в чистом поле прижатый залегает");
+    assert!(w.soldiers[1].pinned && w.soldiers[1].prone(), "в чистом поле прижатый залегает");
     // Залёгший почти не двигается.
     let before = w.soldiers[1].pos;
     for _ in 0..10 {
@@ -34,7 +34,7 @@ fn pinned_in_the_open_goes_prone_in_cover_hides() {
     for _ in 0..80 {
         w.step();
     }
-    assert!(!w.soldiers[1].pinned && !w.soldiers[1].prone);
+    assert!(!w.soldiers[1].pinned && !w.soldiers[1].prone());
 
     // В укрытии прижатый не ложится, а уходит за угол.
     let p = w.soldiers[1].pos;
@@ -46,7 +46,7 @@ fn pinned_in_the_open_goes_prone_in_cover_hides() {
         w.step();
     }
     let s = &w.soldiers[1];
-    assert!(s.pinned && !s.prone);
+    assert!(s.pinned && !s.prone());
     assert!(s.pos.distance(cover.hide) < 0.5, "прячется за угол: {:?}", s.pos);
 }
 
@@ -63,7 +63,7 @@ fn prone_soldier_is_harder_to_hit() {
             hold_still(&mut w, 1);
         }
         w.step();
-        assert_eq!(w.soldiers[1].prone, prone);
+        assert_eq!(w.soldiers[1].prone(), prone);
         let start = Vec2::new(target.x - 6.0, w.soldiers[1].pos.y + 0.27);
         w.projectiles.push(Projectile { pos: start, vel: Vec2::new(90.0, 0.0), ttl: 1.0, team: 0, shooter: 0, weapon: 0, kind: ProjectileKind::Bullet });
         w.step();
@@ -165,7 +165,7 @@ fn battle(on: bool) -> (u32, f32, u32) {
             for s in w.soldiers.iter().filter(|s| s.alive && s.controller == Controller::Ai) {
                 if s.target.is_some() || s.under_fire > 0.0 {
                     fighting += 1;
-                    prone += s.prone as u32;
+                    prone += s.prone() as u32;
                 }
                 retreating += s.retreat.is_some() as u32;
             }

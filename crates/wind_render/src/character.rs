@@ -9,10 +9,14 @@
 //! по форме, остались только для теней.
 
 mod actions;
+mod clips;
 mod gait;
+mod make;
 
 pub use actions::{Acted, Action, ReloadKind, THROW_RELEASE, THROW_TIME};
-pub use gait::{Gait, Gaits, Skeleton};
+pub use clips::{Built, WeaponAt};
+pub use gait::Skeleton;
+pub use make::{CROUCH_SPEED, PRONE_SPEED};
 use crate::ragdoll::Rig;
 use crate::rwr::{self, RwrModel, VOXEL};
 use wind_sim::arsenal::Arsenal;
@@ -88,10 +92,9 @@ pub struct CharModel {
     rest_upper: Mat3,
     /// Тело для физики — когда солдата убьют.
     pub(crate) rig: Rig,
-    /// Шаг и бег из записей движений (`None` — процедурные).
-    pub gaits: Option<Gaits>,
-    /// Бросок гранаты из записи движений (`None` — процедурный).
-    pub throw: Option<Gait>,
+    /// Клипы стандарта анимаций, собранные на этой модели: ключ → клип
+    /// (`data/animations`, см. `crate::anim`). Нет клипа — движение процедурное.
+    pub clips: HashMap<String, Built>,
 }
 
 pub struct WeaponModel {
@@ -163,30 +166,35 @@ impl CharacterSet {
                 teams[team].push((model, weapon));
             }
         }
-        // Шаг и бег из записей движений — на каждой модели с её длинами.
-        if let Some((walk, run)) = gait::load_clips(data_dir)? {
-            for m in &mut models {
-                m.gaits = m.gait(&walk).zip(m.gait(&run)).map(|(walk, run)| Gaits { walk, run });
-            }
-        }
-        if let Some(throw) = gait::load_action(data_dir, "throw")? {
-            for m in &mut models {
-                m.throw = m.gait(&throw);
-            }
+        // Клипы стандарта анимаций — на каждой модели с её длинами.
+        let (clips, _old) = crate::anim::load_dir(&data_dir.join("animations"));
+        for m in &mut models {
+            m.clips = clips.values().filter_map(|c| Some((c.key.clone(), m.build_clip(c)?))).collect();
         }
         Ok(CharacterSet { meshes: builder.meshes, models, weapons, teams, team_names: arsenal.team_names.clone(), arsenal })
     }
 
     /// Радиан фазы шага на метр пути при скорости `speed`: по длине круга шага и бега
-    /// из записей движений (у всех моделей скелет один), а без них — `stride_rate`.
+    /// (у всех моделей скелет один), а без клипов — `stride_rate`.
     pub fn stride_rate(&self, speed: f32) -> f32 {
-        match self.models.first().and_then(|m| m.gaits.as_ref()) {
-            Some(g) => {
-                let stride = g.walk.stride + (g.run.stride * gait::RUN_STRIDE - g.walk.stride) * run_share(speed);
-                std::f32::consts::TAU / stride.max(0.1)
-            }
-            None => stride_rate(speed),
-        }
+        self.stride_rate_in(speed, 0.0, false)
+    }
+
+    /// То же для стойки: присед (`crouch` 0..1) и лёжа — по длине своих кругов.
+    pub fn stride_rate_in(&self, speed: f32, crouch: f32, prone: bool) -> f32 {
+        let Some(m) = self.models.first() else { return stride_rate(speed) };
+        let stride = |k: &str| m.clips.get(k).map(|c| c.stride).filter(|&s| s > 0.01);
+        let standing = match (stride("walking"), stride("running")) {
+            (Some(w), Some(r)) => w + (r * gait::RUN_STRIDE - w) * run_share(speed),
+            _ => return stride_rate(speed),
+        };
+        let stride = if prone {
+            stride("prone, moving forwards").unwrap_or(standing)
+        } else {
+            let low = stride("crouching forwards").unwrap_or(standing);
+            standing + (low - standing) * crouch.clamp(0.0, 1.0)
+        };
+        std::f32::consts::TAU / stride.max(0.1)
     }
 
     /// Какая модель и оружие у солдата — тот же набор, что выбрала симуляция.
@@ -210,10 +218,21 @@ pub struct Motion {
     /// Как держит оружие: 0 — целится (ствол по взгляду), 1 — несёт на бегу поперёк
     /// груди, как в RWR.
     pub carry: f32,
+    /// Насколько присел: 0 — стоит, 1 — присел (плавно, пока садится и встаёт).
+    pub crouch: f32,
+    /// Насколько лёг: 0 — не лежит, 1 — лежит; между ними — ложится или встаёт
+    /// (клипы «going prone» / «leaving prone» на этой доле).
+    pub prone: f32,
+    /// Встаёт из положения лёжа (а не ложится).
+    pub rising: bool,
+    /// Часы, с — для клипов на месте (дыхание): у каждого солдата свой сдвиг.
+    pub clock: f32,
 }
 
 /// На сколько корпус развёрнут левым плечом вперёд, когда солдат целится, рад.
 const BLADE: f32 = 0.6;
+/// Лёжа рукоять — перед правым плечом, чуть ниже: оружие вдоль земли, на уровне головы.
+const PRONE_GRIP: Vec3 = Vec3::new(7.5, -1.5, -3.5);
 
 /// Насколько солдат бежит, а не идёт: 0 — шагом (до 2,6 м/с), 1 — бегом (от 4,5 м/с).
 pub fn run_share(speed: f32) -> f32 {
@@ -228,23 +247,69 @@ pub fn stride_rate(speed: f32) -> f32 {
 }
 
 impl CharModel {
-    /// Живой солдат: ноги шагают или бегут, руки держат оружие стволом вперёд.
+    /// Живой солдат: стоит, идёт или бежит, присел или лежит (клипы стандарта анимаций),
+    /// руки держат оружие стволом вперёд. Ложится и встаёт — клипы «going prone» и
+    /// «leaving prone»: они начинаются и кончаются приседом, из стойки в них — плавно.
     pub fn pose(&self, m: Motion) -> Pose {
         let Some(j) = self.joints else { return self.rest.clone() };
-        // Насколько солдат движется (0 — стоит) и насколько бежит.
-        let moving = (m.speed / 1.2).clamp(0.0, 1.0);
-        let run = run_share(m.speed);
         let dir = m.dir.normalize_or(Vec2::X);
-        let ph = m.phase;
-
-        // Ноги и корпус — из записей движений (см. `gait`); без них — процедурно.
-        let (mut p, twist) = match self.gait_pose(m.speed, ph, dir) {
-            Some(p) => (p, 0.0),
-            None => (self.legs_procedural(m, j), 0.12 * run * moving * ph.sin()),
-        };
-
-        self.hold_weapon(&mut p, j, m, twist);
+        if m.prone >= 1.0 {
+            return self.prone_pose(m, j, dir);
+        }
+        let (mut p, twist) = self.upright(m, j, dir);
+        self.hold_weapon(&mut p, j, Motion { prone: 0.0, ..m }, twist);
+        if m.prone > 0.0 {
+            let (key, u) = if m.rising { ("leaving prone", 1.0 - m.prone) } else { ("going prone", m.prone) };
+            if let Some(clip) = self.clips.get(key) {
+                // Ложась — из стойки в клип за первую четверть; вставая — в стойку за последнюю.
+                let edge = |x: f32| {
+                    let x = (x / 0.25).clamp(0.0, 1.0);
+                    x * x * (3.0 - 2.0 * x)
+                };
+                let w = if m.rising { edge(1.0 - u) } else { edge(u) };
+                let c = clip.at(u);
+                for (v, c) in p.iter_mut().zip(c) {
+                    *v = v.lerp(c, w);
+                }
+            }
+        }
         p
+    }
+
+    /// Стоя или присев (по `crouch`): ноги и корпус из клипов, без них — процедурно.
+    fn upright(&self, m: Motion, j: Joints, dir: Vec2) -> (Pose, f32) {
+        let (moving, run) = ((m.speed / 1.2).clamp(0.0, 1.0), run_share(m.speed));
+        let (stand, twist) = if m.crouch < 1.0 {
+            match self.gait_pose(m.speed, m.phase, dir, m.clock) {
+                Some(p) => (p, 0.0),
+                None => (self.legs_procedural(m, j), 0.12 * run * moving * m.phase.sin()),
+            }
+        } else {
+            (Vec::new(), 0.0)
+        };
+        if m.crouch <= 0.0 {
+            return (stand, twist);
+        }
+        let Some(low) = self.cycle_pose(("crouch still", "crouching forwards"), CROUCH_SPEED * 0.6, &m, dir) else {
+            return if stand.is_empty() { (self.legs_procedural(m, j), twist) } else { (stand, twist) };
+        };
+        if m.crouch >= 1.0 || stand.is_empty() {
+            return (low, 0.0);
+        }
+        let k = m.crouch * m.crouch * (3.0 - 2.0 * m.crouch);
+        (stand.iter().zip(&low).map(|(a, b)| a.lerp(*b, k)).collect(), twist * (1.0 - k))
+    }
+
+    /// Лёжа: на месте — оружие в руках, ползком — руки из клипа (на локтях).
+    fn prone_pose(&self, m: Motion, j: Joints, dir: Vec2) -> Pose {
+        let full = PRONE_SPEED * 0.6;
+        let Some(crawl) = self.cycle_pose(("prone", "prone, moving forwards"), full, &m, dir) else {
+            return self.rest.clone();
+        };
+        let mut held = crawl.clone();
+        self.hold_weapon(&mut held, j, m, 0.0);
+        let k = (m.speed / full).clamp(0.0, 1.0);
+        held.iter().zip(&crawl).map(|(a, b)| a.lerp(*b, k)).collect()
     }
 
     /// Руки держат оружие поверх позы `p` (стоит, как в игре: стволом по взгляду) —
@@ -260,10 +325,13 @@ impl CharModel {
     /// солдат. Бегом оружие чуть ниже, стволом немного вниз, и покачивается с плечами.
     fn hold_weapon(&self, p: &mut Pose, j: Joints, m: Motion, twist: f32) {
         let r = &self.rest;
-        let (run, moving, ph, carry) = (run_share(m.speed), (m.speed / 1.2).clamp(0.0, 1.0), m.phase, m.carry);
+        let (run, moving, ph) = (run_share(m.speed), (m.speed / 1.2).clamp(0.0, 1.0), m.phase);
+        // Лёжа оружие не несут поперёк груди, и плечи не разворачивают: корпус лежит.
+        let lying = m.prone.clamp(0.0, 1.0);
+        let carry = m.carry * (1.0 - lying);
         // Целясь, корпус развёрнут левым плечом вперёд: приклад — у правого плеча, а левая
         // рука дотягивается до цевья. Неся оружие на бегу — прямо.
-        let turn = Quat::from_rotation_y(-BLADE * (1.0 - carry) + twist);
+        let turn = Quat::from_rotation_y((-BLADE * (1.0 - carry) + twist) * (1.0 - lying));
         let pivot = p[j.mid];
         for i in [j.shoulder[0], j.shoulder[1], j.neck] {
             p[i] = pivot + turn * (p[i] - pivot);
@@ -272,8 +340,8 @@ impl CharModel {
         let sway = Vec3::Y * (2.0 * ph).cos() * 0.6 * run * moving;
         // Целится: рукоять — перед правой стороной груди (снаружи тела), ствол — по взгляду,
         // бегом чуть ниже.
-        let aim_grip = rs + Vec3::new(10.8, -5.5, -4.1) + sway;
-        let aim_dir = Vec3::new(1.0, -0.08 * run, 0.0).normalize();
+        let aim_grip = rs + Vec3::new(10.8, -5.5, -4.1).lerp(PRONE_GRIP, lying) + sway;
+        let aim_dir = Vec3::new(1.0, -0.08 * run * (1.0 - lying) + 0.03 * lying, 0.0).normalize();
         // Несёт на бегу (как в RWR): рукоять — у правого бока груди, ствол — поперёк груди
         // влево, почти горизонтально: с камеры сверху оружие лежит поперёк хода, а не
         // торчит вверх по экрану.
@@ -340,39 +408,6 @@ impl CharModel {
             p[j.knee[side]] = two_bone(hip, foot, thigh, shin, Vec3::X);
         }
         p
-    }
-
-    /// Лёжа: поза `pose`, опрокинутая лицом вниз на долю `t` (0 — стоит, 1 — лежит),
-    /// голова — туда, куда смотрит солдат. Ноги вытягиваются, а руки уходят «вверх» —
-    /// после поворота это вперёд, перед головой: оружие лежит вдоль земли и смотрит
-    /// на врага. Так залёгший не похож на убитого.
-    pub fn lie(&self, pose: &Pose, t: f32) -> Pose {
-        let t = t.clamp(0.0, 1.0);
-        let t = t * t * (3.0 - 2.0 * t);
-        let mut p = pose.clone();
-        if let Some(j) = self.joints {
-            let r = &self.rest;
-            for i in [j.knee[0], j.knee[1], j.foot[0], j.foot[1]] {
-                p[i] = p[i].lerp(r[i], t);
-            }
-            let shoulder_y = (p[j.shoulder[0]].y + p[j.shoulder[1]].y) * 0.5;
-            let chest_x = (p[j.shoulder[0]].x + p[j.shoulder[1]].x) * 0.5;
-            let right_hand = Vec3::new(chest_x + 1.0, shoulder_y + 4.0, 2.5);
-            let left_hand = right_hand + Vec3::new(0.0, 12.0, -1.5);
-            for (side, hand, out) in [(0, right_hand, 1.0), (1, left_hand, -1.0)] {
-                let shoulder = p[j.shoulder[side]];
-                let hand = p[j.hand[side]].lerp(hand, t);
-                let upper = r[j.shoulder[side]].distance(r[j.elbow[side]]);
-                let fore = r[j.elbow[side]].distance(r[j.hand[side]]);
-                // Локти — к груди: после поворота это вниз, на землю.
-                let bend = Vec3::new(1.0, 0.0, 0.6 * out * side_sign(r[j.shoulder[side]].z));
-                p[j.elbow[side]] = two_bone(shoulder, hand, upper, fore, bend);
-                p[j.hand[side]] = shoulder + (hand - shoulder).clamp_length_max(upper + fore - 0.01);
-            }
-        }
-        let rot = Mat3::from_rotation_z(-std::f32::consts::FRAC_PI_2 * t);
-        let lift = 3.0 * t;
-        p.iter().map(|&v| rot * v + Vec3::Y * lift).collect()
     }
 
     /// Матрицы палок, по одной на палку: из позы покоя в позу `pose` (метры, +X вперёд).
@@ -512,7 +547,7 @@ impl Builder {
         let inv_mass: Vec<f32> = m.particles.iter().map(|p| p.inv_mass).collect();
         let torso = joints.map(|j| ([j.neck, j.mid, j.shoulder[0], j.shoulder[1], j.hip[0], j.hip[1]], j.head));
         let rig = Rig::new(&rest, &m.sticks, &inv_mass, torso);
-        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rest_upper: Mat3::IDENTITY, rig, gaits: None, throw: None };
+        let mut model = CharModel { name: name.to_owned(), rest, sticks: m.sticks.clone(), mesh, joints, rest_body: Mat3::IDENTITY, rest_upper: Mat3::IDENTITY, rig, clips: HashMap::new() };
         model.rest_body = model.body_frame(&model.rest);
         model.rest_upper = model.upper_frame(&model.rest);
         model
@@ -734,22 +769,36 @@ mod tests {
     }
 
     #[test]
-    fn prone_soldier_lies_low_and_keeps_weapon() {
+    fn stances_crouch_and_lie_low_and_keep_weapon() {
         let set = CharacterSet::load(&data()).unwrap();
         for m in &set.models {
+            let j = m.joints.unwrap();
             let standing = m.pose(Motion::default());
-            let lying = m.lie(&standing, 1.0);
+            let crouched = m.pose(Motion { crouch: 1.0, ..Default::default() });
+            let lying = m.pose(Motion { prone: 1.0, ..Default::default() });
             let top = |p: &Pose| p.iter().map(|v| v.y).fold(f32::MIN, f32::max);
+            // Присел — голова на ~1,25 м против ~1,75 стоя (у RWR — 1,15), лёжа — низко.
+            assert!(top(&crouched) < top(&standing) * 0.8 && top(&crouched) > top(&standing) * 0.55, "{}: присел ({} против {})", m.name, top(&crouched), top(&standing));
             assert!(top(&lying) < top(&standing) * 0.4, "{}: лежит низко ({} против {})", m.name, top(&lying), top(&standing));
-            // Оружие в руках, вдоль земли и вперёд.
-            let grip = m.weapon_frame(&lying).expect("оружие в руках");
-            let aim = grip.z_axis.truncate();
-            assert!(aim.x > 0.9 && aim.y.abs() < 0.3, "{}: ствол вперёд вдоль земли ({aim:?})", m.name);
-            // Голова — вперёд, туда, куда смотрит солдат (ось x модели).
-            let head = lying.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
-            assert!(head.x > 10.0, "{}: голова впереди ({head:?})", m.name);
-            // Наполовину — как раз посередине между «стоит» и «лежит», без рывков.
-            assert!(top(&m.lie(&standing, 0.5)) < top(&standing) && top(&m.lie(&standing, 0.5)) > top(&lying));
+            // Присел на правое колено: оно у земли, левая стопа впереди.
+            assert!(crouched[j.knee[0]].y < 4.0 && crouched[j.foot[1]].x > crouched[j.knee[0]].x + 5.0, "{}: колено {:?}", m.name, crouched[j.knee[0]]);
+            // Оружие в руках и смотрит вперёд; лёжа — вдоль земли.
+            for (p, what) in [(&crouched, "присел"), (&lying, "лежит")] {
+                let aim = m.weapon_frame(p).expect("оружие в руках").z_axis.truncate();
+                assert!(aim.x > 0.9 && aim.y.abs() < 0.3, "{}, {what}: ствол вперёд ({aim:?})", m.name);
+            }
+            // Лёжа, как у RWR: голова впереди, тело — назад от груди.
+            assert!(lying[j.head].x > 3.0 && lying[j.foot[0]].x < -25.0, "{}: голова {:?}, стопа {:?}", m.name, lying[j.head], lying[j.foot[0]]);
+            // Ложится: посередине — между приседом и «лежит», без рывков по ходу клипа.
+            let mid = m.pose(Motion { prone: 0.5, ..Default::default() });
+            assert!(top(&mid) < top(&standing) && top(&mid) > top(&lying));
+            let mut last = m.pose(Motion { prone: 0.0001, ..Default::default() });
+            for k in 1..=50 {
+                let now = m.pose(Motion { prone: k as f32 / 50.0, ..Default::default() });
+                let jump = now.iter().zip(&last).map(|(a, b)| a.distance(*b)).fold(0.0, f32::max);
+                assert!(jump < 4.0, "{}: рывок {jump:.1} вокселя на {k}/50, пока ложится", m.name);
+                last = now;
+            }
         }
     }
 
@@ -834,7 +883,7 @@ mod tests {
         let spread = |speed: f32, dir: Vec2| {
             (0..32)
                 .map(|i| {
-                    let pose = m.pose(Motion { speed, phase: i as f32 * std::f32::consts::TAU / 32.0, dir, carry: 0.0 });
+                    let pose = m.pose(Motion { speed, phase: i as f32 * std::f32::consts::TAU / 32.0, dir, carry: 0.0, ..Default::default() });
                     let f = pose[j.foot[0]] - m.rest[j.foot[0]];
                     Vec2::new(f.x, f.z)
                 })
@@ -847,7 +896,7 @@ mod tests {
         let side = spread(2.2, Vec2::Y);
         let (along_x, along_z) = side.iter().fold((0.0f32, 0.0f32), |(x, z), f| (x.max(f.x.abs()), z.max(f.y.abs())));
         assert!(along_z > 8.0 && along_z > along_x * 2.5, "вбок: размах вбок {along_z:.1}, вперёд {along_x:.1}");
-        // Из записей движений: у моделей есть шаг и бег.
-        assert!(set.models.iter().all(|m| m.gaits.is_some()), "клипы data/animations не подхватились");
+        // Клипы стандарта анимаций: у моделей есть шаг и бег.
+        assert!(set.models.iter().all(|m| m.clips.contains_key("walking") && m.clips.contains_key("running")), "клипы data/animations не подхватились");
     }
 }

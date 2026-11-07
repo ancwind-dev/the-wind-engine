@@ -28,8 +28,8 @@ pub struct SoldierDraw {
     /// Явный вид — для студии. Без него модель выбирается по номеру солдата,
     /// а шаг — по тому, как он перемещается.
     pub look: Option<Look>,
-    /// Залёг под огнём.
-    pub prone: bool,
+    /// Стойка: стоит, присел, лежит (залёг под огнём или лёг сам).
+    pub stance: wind_sim::Stance,
     /// Перезаряжается — анимация идёт, пока признак держится.
     pub reloading: bool,
     /// Только что бросил гранату — с этого признака начинается анимация броска.
@@ -114,8 +114,13 @@ struct Anim {
     dir: Vec2,
     last: Vec2,
     seen: bool,
-    /// 0 — стоит, 1 — лежит; плавно, чтобы солдат ложился и вставал, а не прыгал.
+    /// 0 — не лежит, 1 — лежит; между ними — ложится или встаёт (клипы «going prone»,
+    /// «leaving prone» за `GOING_PRONE` с).
     prone: f32,
+    /// Встаёт (а не ложится).
+    rising: bool,
+    /// 0 — стоит, 1 — присел; плавно.
+    crouch: f32,
     /// Сколько секунд идёт перезарядка и бросок (`None` — не идёт).
     reload: Option<f32>,
     throw: Option<f32>,
@@ -123,6 +128,15 @@ struct Anim {
     was_throwing: bool,
     /// Как держит оружие (`Motion::carry`), плавно.
     carry: f32,
+}
+
+/// Цель анимации стойки: (присел, лёг).
+fn goals(stance: wind_sim::Stance) -> (f32, f32) {
+    match stance {
+        wind_sim::Stance::Stand => (0.0, 0.0),
+        wind_sim::Stance::Crouch => (1.0, 0.0),
+        wind_sim::Stance::Prone => (0.0, 1.0),
+    }
 }
 
 pub struct SceneBuilder {
@@ -154,7 +168,8 @@ pub struct SceneBuilder {
     pub crumbled: Vec<Vec2>,
     /// Готовая поза для солдат с явным видом (`Look`) — редактор анимаций в студии
     /// показывает так правленый клип.
-    pub pose_override: Option<crate::character::Pose>,
+    /// Готовые позы для солдат студии: (номер солдата, поза). Для солдат с явным видом.
+    pub pose_overrides: Vec<(u32, crate::character::Pose)>,
     /// Рисовать траву (на слабых машинах можно выключить).
     pub grass: bool,
     /// Модели предметов из папки — перечитываются на лету.
@@ -183,7 +198,7 @@ impl Default for SceneBuilder {
             joint_blend: JOINT_BLEND,
             rwr_exact: true,
             crumbled: Vec::new(),
-            pose_override: None,
+            pose_overrides: Vec::new(),
             grass: true,
             props: PropLibrary::default(),
             notes: Vec::new(),
@@ -351,24 +366,25 @@ impl SceneBuilder {
                     (None, Some(t)) => Some(Action::Reload { kind: w.reload, t: t / w.reload_time.max(0.1), rounds: w.rounds }),
                     _ => None,
                 };
-                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry }, action })
+                let clock = input.time + s.id as f32 * 0.37;
+                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock }, action })
             });
             if let Some(set) = &characters
                 && let Some(look) = look
             {
                 let model = &set.models[look.model];
-                let pose = match (&self.pose_override, s.look.is_some()) {
-                    (Some(p), true) => p.clone(),
-                    _ => model.pose(look.motion),
+                let pose = match self.pose_overrides.iter().find(|(id, _)| *id == s.id).filter(|_| s.look.is_some()) {
+                    Some((_, p)) => p.clone(),
+                    None => model.pose(look.motion),
                 };
-                // Лёжа руки заняты позой лёжа — действия пока не показываем.
+                // Пока ложится или встаёт, руки заняты — действия не показываем.
+                let (lying, getting) = (look.motion.prone >= 1.0, look.motion.prone > 0.0 && look.motion.prone < 1.0);
                 let (pose, grip, grenade) = match look.action {
-                    Some(action) if a.prone <= 0.0 => {
-                        let acted = model.act(&pose, action);
+                    Some(action) if !getting => {
+                        let acted = model.act(&pose, action, lying);
                         (acted.pose, acted.weapon, acted.grenade)
                     }
                     _ => {
-                        let pose = if a.prone > 0.0 { model.lie(&pose, a.prone) } else { pose };
                         let grip = model.weapon_frame(&pose);
                         (pose, grip, None)
                     }
@@ -586,8 +602,7 @@ impl SceneBuilder {
             if fresh {
                 // Последняя поза живого солдата: шаг, залёг ли.
                 let a = self.anim.get(c.id as usize).copied().unwrap_or_default();
-                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir, carry: a.carry });
-                let pose = if a.prone > 0.0 { m.lie(&pose, a.prone) } else { pose };
+                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock: input.time });
                 let at = to_3d(c.pos, input.map.height_at(c.pos));
                 let push = if c.push == Vec2::ZERO { -Vec2::from_angle(c.facing) * 2.0 } else { c.push };
                 let seed = c.id ^ ((input.time * 1000.0) as u32).wrapping_mul(0x9E37_79B9);
@@ -616,7 +631,8 @@ impl SceneBuilder {
         let moved = s.pos.distance(a.last);
         if !a.seen || moved > 3.0 {
             // Первый кадр или телепорт (возрождение).
-            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone: s.prone as u8 as f32, ..Default::default() };
+            let (crouch, prone) = goals(s.stance);
+            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone, crouch, ..Default::default() };
             return 0.0;
         }
         a.reload = s.reloading.then(|| a.reload.unwrap_or(0.0) + dt);
@@ -629,12 +645,21 @@ impl SceneBuilder {
         // На бегу, не целясь, оружие — поперёк груди; вскидывает быстро, опускает медленнее.
         let carry = if s.aiming { 0.0 } else { crate::character::run_share(a.speed) };
         a.carry += (carry - a.carry).clamp(-dt * 6.0, dt * 2.5);
-        let goal = if s.prone { 1.0 } else { 0.0 };
-        a.prone += (goal - a.prone).clamp(-dt * 3.0, dt * 3.0);
+        // Присесть и встать — за ≈0,2 с; лечь и встать — за время клипа, как в симуляции.
+        let (crouch, prone) = goals(s.stance);
+        a.crouch += (crouch - a.crouch).clamp(-dt * 5.0, dt * 5.0);
+        let step = dt / wind_sim::world::GOING_PRONE;
+        if prone > a.prone {
+            a.prone = (a.prone + step).min(1.0);
+            a.rising = false;
+        } else if prone < a.prone {
+            a.prone = (a.prone - step).max(0.0);
+            a.rising = true;
+        }
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };
         a.speed += (speed - a.speed) * 0.25;
         // Круг шага — по записям движений, если они есть.
-        a.phase += moved * self.characters.as_ref().map_or_else(|| stride_rate(a.speed), |c| c.stride_rate(a.speed));
+        a.phase += moved * self.characters.as_ref().map_or_else(|| stride_rate(a.speed), |c| c.stride_rate_in(a.speed, a.crouch, a.prone >= 1.0));
         // Направление шага — в осях солдата: вперёд по взгляду и вправо от него.
         if moved > 0.001 {
             let step = (s.pos - a.last) / moved;

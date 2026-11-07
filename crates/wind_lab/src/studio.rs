@@ -1,6 +1,7 @@
-//! Студия персонажей: один солдат вблизи. Модель, оружие, шаг и бег, падение,
-//! скелет поверх модели и ширина плавного сгиба у суставов — чтобы подбирать вид
-//! солдата, не запуская бой. Здесь же — редактор анимаций (см. `anim_editor`).
+//! Студия персонажей: один солдат вблизи. Модель, оружие, стойка (стоит, присел, лежит),
+//! шаг и бег, падение, скелет поверх модели и ширина плавного сгиба у суставов — чтобы
+//! подбирать вид солдата, не запуская бой. Здесь же — редактор анимаций (см.
+//! `anim_editor`) и, ВРЕМЕННО, справка RWR: их анимации на соседнем солдате для сверки.
 
 use crate::i18n::{f, t};
 use crate::anim_editor::AnimEditor;
@@ -13,7 +14,8 @@ use std::time::Instant;
 use wind_render::character::CharacterSet;
 use wind_render::glam::{Mat4, Vec3, Vec4Swizzles};
 use wind_render::{Action, JOINT_BLEND, Look, Motion, THROW_TIME};
-use wind_sim::Vec2;
+use wind_render::rwr_anim::RwrAnim;
+use wind_sim::{Stance, Vec2};
 use wind_sim::atmosphere::Atmosphere;
 use wind_sim::map::Map;
 
@@ -57,6 +59,20 @@ pub struct Studio {
     reloaded: Option<Arc<CharacterSet>>,
     /// Папка данных проекта: модели и клипы.
     data: std::path::PathBuf,
+    /// Стойка, к которой идёт солдат, и как далеко он присел / лёг (как в игре).
+    stance: Stance,
+    crouch: f32,
+    prone: f32,
+    rising: bool,
+    /// Часы студии (для клипов на месте — дыхание).
+    clock: f32,
+    /// ВРЕМЕННО: справка RWR — анимации из установленной игры, рядом с нашим солдатом.
+    rwr: Option<Result<Vec<RwrAnim>, String>>,
+    rwr_on: bool,
+    rwr_filter: String,
+    rwr_pick: usize,
+    rwr_time: f32,
+    rwr_playing: bool,
 }
 
 impl Studio {
@@ -64,13 +80,19 @@ impl Studio {
         let mut view = Viewport::new(&data);
         view.has_3d = has_3d;
         view.set_characters(characters.clone());
+        let view_characters = characters.clone();
         let center = Vec2::splat(GROUND as f32 * 0.5);
         view.aim_height = 0.9;
         view.look_at_3d(center, 3.5, CAMERA_PITCH);
         Studio {
             view,
             characters,
-            map: Map::new(GROUND, GROUND),
+            map: {
+                // Площадка — утоптанная земля без травы: трава закрывала бы стопы и колени.
+                let mut map = Map::new(GROUND, GROUND);
+                map.ground.fill(2);
+                map
+            },
             atmosphere: Atmosphere::default(),
             model: 0,
             weapon: Some(0),
@@ -89,9 +111,20 @@ impl Studio {
             blend: JOINT_BLEND,
             skeleton: false,
             last: Instant::now(),
-            editor: AnimEditor::new(data.join("animations")),
+            editor: AnimEditor::new(data.join("animations"), view_characters),
             data,
             reloaded: None,
+            stance: Stance::Stand,
+            crouch: 0.0,
+            prone: 0.0,
+            rising: false,
+            clock: 0.0,
+            rwr: None,
+            rwr_on: false,
+            rwr_filter: String::new(),
+            rwr_pick: 0,
+            rwr_time: 0.0,
+            rwr_playing: true,
         }
     }
 
@@ -107,6 +140,7 @@ impl Studio {
                 let set = Arc::new(set);
                 self.characters = Some(set.clone());
                 self.view.set_characters(Some(set.clone()));
+                self.editor.set_models(Some(set.clone()));
                 self.reloaded = Some(set);
             }
             Err(e) => eprintln!("модели не перечитались: {e}"),
@@ -154,8 +188,23 @@ impl Studio {
     /// Справа — анимация, сгиб, вид.
     pub fn properties(&mut self, ui: &mut egui::Ui) {
         theme::panel(ui, Icon::Run, t("Анимация"), true, |ui| {
+            // Стойка, как в игре: присесть и встать — плавно, лечь и встать — клипом.
             ui.horizontal(|ui| {
-                for (name, speed) in [(t("Стоит"), 0.0), (t("Шаг"), 2.2), (t("Бег"), 6.0)] {
+                for (name, stance) in [(t("Стоит"), Stance::Stand), (t("Присел"), Stance::Crouch), (t("Лежит"), Stance::Prone)] {
+                    if ui.selectable_label(self.stance == stance, name).clicked() {
+                        self.stance = stance;
+                        // Скорость — под стойку: приседом и ползком медленнее.
+                        self.speed = match stance {
+                            Stance::Stand => self.speed.min(6.0),
+                            Stance::Crouch => self.speed.min(wind_render::character::CROUCH_SPEED),
+                            Stance::Prone => self.speed.min(wind_render::character::PRONE_SPEED),
+                        };
+                        self.dead = None;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                for (name, speed) in [(t("На месте"), 0.0), (t("Шаг"), 2.2), (t("Бег"), 6.0)] {
                     if ui.selectable_label(self.dead.is_none() && self.speed == speed, name).clicked() {
                         self.speed = speed;
                         self.dead = None;
@@ -214,6 +263,7 @@ impl Studio {
         if saved {
             self.reload_characters();
         }
+        theme::panel(ui, Icon::Info, t("Справка RWR (временно)"), false, |ui| self.rwr_panel(ui));
         theme::panel(ui, Icon::Skeleton, t("Сгиб у суставов"), true, |ui| {
             theme::props(ui, "studio_blend", |ui| {
                 theme::label(ui, t("Ширина"));
@@ -274,6 +324,94 @@ impl Studio {
         }
     }
 
+    /// Стойка студии сразу (ключ `--stance`): без перехода.
+    pub fn set_stance(&mut self, stance: Stance, speed: f32) {
+        self.stance = stance;
+        self.crouch = if stance == Stance::Crouch { 1.0 } else { 0.0 };
+        self.prone = if stance == Stance::Prone { 1.0 } else { 0.0 };
+        self.speed = speed;
+    }
+
+    /// Солдат RWR рядом с анимацией `name` (ключ `--rwr`, для снимков).
+    pub fn show_rwr(&mut self, name: &str) {
+        self.rwr_on = true;
+        self.frame_both();
+        let all = self.rwr.get_or_insert_with(wind_render::rwr_anim::load_install);
+        if let Ok(list) = all
+            && let Some(a) = list.iter().find(|a| a.name == name)
+        {
+            self.rwr_pick = a.index;
+        }
+    }
+
+    /// Где стоит солдат RWR — справа от нашего.
+    fn rwr_spot(&self) -> Vec2 {
+        self.center() + Vec2::from_angle(self.facing + std::f32::consts::FRAC_PI_2) * 1.3
+    }
+
+    /// Камера — на обоих солдат.
+    fn frame_both(&mut self) {
+        let mid = (self.center() + self.rwr_spot()) * 0.5;
+        self.view.look_at_3d(mid, 4.6, CAMERA_PITCH);
+    }
+
+    /// Выбранная анимация RWR.
+    fn rwr_selected(&self) -> Option<&RwrAnim> {
+        self.rwr.as_ref()?.as_ref().ok()?.get(self.rwr_pick)
+    }
+
+    /// ВРЕМЕННО: анимации RWR из установленной игры — для сверки, в проект не попадают.
+    fn rwr_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new(t("Анимации из установленной RWR — только посмотреть и сравнить: в проект они не копируются.")).small().color(theme::TEXT_DIM));
+        if ui.checkbox(&mut self.rwr_on, t("Солдат RWR рядом")).changed() {
+            if self.rwr_on {
+                self.frame_both();
+            } else {
+                self.view.look_at_3d(self.center(), 3.5, CAMERA_PITCH);
+            }
+        }
+        if !self.rwr_on {
+            return;
+        }
+        let all = self.rwr.get_or_insert_with(wind_render::rwr_anim::load_install);
+        let list = match all {
+            Ok(list) => list.clone(),
+            Err(e) => {
+                ui.label(RichText::new(e.as_str()).color(theme::ERROR));
+                return;
+            }
+        };
+        ui.add(egui::TextEdit::singleline(&mut self.rwr_filter).hint_text(t("Поиск: running, crouch, prone…")));
+        let filter = self.rwr_filter.to_lowercase();
+        egui::ScrollArea::vertical().id_salt("rwr_list").max_height(160.0).show(ui, |ui| {
+            for a in list.iter().filter(|a| filter.is_empty() || a.name.to_lowercase().contains(&filter)) {
+                let label = format!("#{} {}", a.index, a.name);
+                if ui.selectable_label(self.rwr_pick == a.index, label).clicked() {
+                    self.rwr_pick = a.index;
+                    self.rwr_time = 0.0;
+                }
+            }
+        });
+        if let Some(a) = list.get(self.rwr_pick) {
+            let end = a.end.max(a.frames.last().map_or(0.0, |f| f.time)).max(1e-3);
+            if !a.looped && self.rwr_time > end + 0.4 {
+                self.rwr_time = 0.0;
+            }
+            ui.horizontal(|ui| {
+                let (icon, play) = if self.rwr_playing { (Icon::Pause, t("Пауза")) } else { (Icon::Play, t("Играть")) };
+                if icons::button(ui, icon, play).clicked() {
+                    self.rwr_playing = !self.rwr_playing;
+                }
+                let mut shown = if a.looped { self.rwr_time.rem_euclid(end) } else { self.rwr_time.min(end) };
+                if ui.add(egui::Slider::new(&mut shown, 0.0..=end).max_decimals(2)).changed() {
+                    self.rwr_time = shown;
+                    self.rwr_playing = false;
+                }
+            });
+            ui.label(RichText::new(a.report()).small().monospace().color(theme::TEXT_DIM));
+        }
+    }
+
     /// Действие руками сейчас: повторяется с паузой между повторами. Перезарядка —
     /// по выбранному оружию (как и сколько секунд).
     fn action(&self) -> Option<Action> {
@@ -300,19 +438,48 @@ impl Studio {
             *age += dt;
         }
         self.act_time += dt;
+        self.clock += dt;
         self.editor.advance(dt);
+        // Стойка — как в игре (см. `SceneBuilder::animate`).
+        let (crouch_goal, prone_goal) = match self.stance {
+            Stance::Stand => (0.0, 0.0),
+            Stance::Crouch => (1.0, 0.0),
+            Stance::Prone => (0.0, 1.0),
+        };
+        self.crouch += (crouch_goal - self.crouch).clamp(-dt * 5.0, dt * 5.0);
+        let step = dt / wind_sim::world::GOING_PRONE;
+        if prone_goal > self.prone {
+            self.prone = (self.prone + step).min(1.0);
+            self.rising = false;
+        } else if prone_goal < self.prone {
+            self.prone = (self.prone - step).max(0.0);
+            self.rising = true;
+        }
+        if self.rwr_playing {
+            let speed = self.rwr_selected().map_or(1.0, |a| a.speed);
+            self.rwr_time += dt * speed;
+        }
         self.view.set_joint_blend(self.blend);
 
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
         let carry = if self.aiming { 0.0 } else { wind_render::character::run_share(self.speed) };
-        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()), carry };
+        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()), carry, crouch: self.crouch, prone: self.prone, rising: self.rising, clock: self.clock };
         let action = self.action();
         // Редактор анимаций: солдат в позе клипа, без действий и падения.
         let editing = self.editor.on && self.dead.is_none();
         let edited = editing.then(|| self.characters.as_ref().and_then(|c| self.editor.pose(&c.models[model]))).flatten();
         let (action, weapon) = if editing { (None, self.weapon.filter(|_| self.editor.weapon)) } else { (action, self.weapon) };
-        self.view.set_pose_override(edited);
+        // Справка RWR: их анимация на соседнем солдате (номер 1), справа от нашего.
+        let rwr_pose = self.rwr_on.then(|| self.rwr_selected().zip(self.characters.as_ref()).and_then(|(a, c)| c.models.get(model)?.pose_from_points(&a.sample(self.rwr_time)))).flatten();
+        let mut overrides: Vec<(u32, Vec<Vec3>)> = Vec::new();
+        if let Some(p) = edited {
+            overrides.push((0, p));
+        }
+        if let Some(p) = rwr_pose.clone() {
+            overrides.push((1, p));
+        }
+        self.view.set_pose_overrides(overrides);
         let id = 0;
         // Стреляют спереди: тело отлетает назад.
         let push = -Vec2::from_angle(self.facing) * if self.blast { wind_sim::world::BLAST_PUSH } else { wind_sim::world::BULLET_PUSH };
@@ -327,12 +494,27 @@ impl Studio {
                 team: self.team,
                 player: false,
                 look: Some(Look { model, weapon, motion, action }),
-                prone: false,
+                stance: wind_sim::Stance::Stand,
                 reloading: false,
                 throwing: false,
                 aiming: self.aiming,
                 in_boat: false,
             }),
+        }
+        if rwr_pose.is_some() {
+            soldiers.push(SceneSoldier {
+                id: 1,
+                pos: self.rwr_spot(),
+                facing: self.facing,
+                team: 1 - self.team,
+                player: false,
+                look: Some(Look { model, weapon, motion: Motion::default(), action: None }),
+                stance: wind_sim::Stance::Stand,
+                reloading: false,
+                throwing: false,
+                aiming: true,
+                in_boat: false,
+            });
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());
         let scene = Scene {
@@ -376,7 +558,7 @@ impl Studio {
                 Some(_) => self.view.corpse_points(id).map(<[Vec3]>::to_vec).unwrap_or_default(),
                 None => {
                     let pose = m.pose(motion);
-                    let pose = action.map_or(pose.clone(), |a| m.act(&pose, a).pose);
+                    let pose = action.map_or(pose.clone(), |a| m.act(&pose, a, motion.prone >= 1.0).pose);
                     pose.iter().map(|&p| root.transform_point3(p * wind_render::rwr::VOXEL)).collect()
                 }
             };

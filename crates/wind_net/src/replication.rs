@@ -30,6 +30,7 @@ const FLAG_PRONE: u8 = 8;
 const FLAG_THROWING: u8 = 16;
 const FLAG_AIMING: u8 = 32;
 const FLAG_BOAT: u8 = 64;
+const FLAG_CROUCH: u8 = 128;
 
 /// Солдат в том виде, в каком он уходит по сети.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,8 +54,10 @@ impl NetSoldier {
         if s.reload_timer > 0.0 {
             flags |= FLAG_RELOADING;
         }
-        if s.prone {
-            flags |= FLAG_PRONE;
+        match s.stance {
+            wind_sim::Stance::Prone => flags |= FLAG_PRONE,
+            wind_sim::Stance::Crouch => flags |= FLAG_CROUCH,
+            wind_sim::Stance::Stand => {}
         }
         if s.throw_timer > 0.0 {
             flags |= FLAG_THROWING;
@@ -84,9 +87,20 @@ impl NetSoldier {
         self.flags & FLAG_PLAYER != 0
     }
 
-    /// Залёг под огнём.
+    /// Лежит (залёг под огнём или лёг сам).
     pub fn is_prone(&self) -> bool {
         self.flags & FLAG_PRONE != 0
+    }
+
+    /// Стойка: стоит, присел, лежит.
+    pub fn stance(&self) -> wind_sim::Stance {
+        if self.flags & FLAG_PRONE != 0 {
+            wind_sim::Stance::Prone
+        } else if self.flags & FLAG_CROUCH != 0 {
+            wind_sim::Stance::Crouch
+        } else {
+            wind_sim::Stance::Stand
+        }
     }
 
     pub fn is_reloading(&self) -> bool {

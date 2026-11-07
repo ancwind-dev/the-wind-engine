@@ -8,11 +8,16 @@
 //!     без --project — последний открытый проект или наша игра
 //! cargo run --release -p wind_lab -- --lang en  — язык на этот запуск (en / ru)
 //! cargo run --release -p wind_lab -- --settings  — сразу открыть настройки движка
-//! cargo run --release -p wind_lab -- --import-mocap запись.bvh run "источник"
-//!     — круг шага из записи движений в data/animations/run.ron (с кадрами
-//!       `from to` после источника — действие целиком, не круг)
+//! cargo run --release -p wind_lab -- --rwr-report [часть имени]  — ВРЕМЕННО: сводка анимаций RWR
+//! cargo run --release -p wind_lab -- --rwr-sheet "имя или #номер" лист.png [поз]  — лист кадров RWR
+//! cargo run --release -p wind_lab -- --anim-sheet ключ лист.png [поз]  — лист кадров нашего клипа
+//! cargo run --release -p wind_lab -- --make-clips [--force ключ|all]  — наши клипы в стандарте анимаций
+//! cargo run --release -p wind_lab -- --import-mocap запись.bvh running "источник"
+//!     — круг шага из записи движений в клип стандарта data/animations/running.ron
+//!       (с кадрами `from to` после источника — действие целиком, не круг)
 
 mod anim_editor;
+mod anim_sheet;
 mod editor;
 mod editor_ui;
 mod hub;
@@ -48,6 +53,16 @@ fn main() -> eframe::Result {
         args.drain(i..(i + 2).min(args.len()));
         if value.eq_ignore_ascii_case("en") { Lang::En } else { Lang::Ru }
     });
+    if let Some(result) = analysis_tool(&args) {
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "--import-mocap") {
         let data = project::sample().map_or_else(|| PathBuf::from("data"), |p| p.data_dir());
         match import_mocap(&args[1..], &data) {
@@ -364,11 +379,67 @@ fn import_mocap(args: &[String], data: &Path) -> Result<String, String> {
         [] => wind_render::mocap::Clip::cycle_from(&bvh, source)?,
         _ => return Err("кадры — два числа: from to".into()),
     };
-    let dir = data.join("animations");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let path = dir.join(format!("{name}.ron"));
-    let body = clip.to_ron()?;
-    let header = format!("// Клип «{name}» из записи движений. Источник: {source}.\n// Сделан командой wind_lab --import-mocap; оси наши: x — вперёд, y — вверх, z — вправо.\n");
-    std::fs::write(&path, header + &body).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(format!("{}: {} кадров, {:.2} с записи, путь за круг {:.2} длины ноги, пик на {:.0} %", path.display(), clip.frames.len(), clip.duration, clip.stride, clip.peak * 100.0))
+    // Запись — в клип стандарта анимаций: на скелете наших моделей, редкими ключами.
+    let set = wind_render::character::CharacterSet::load(data)?;
+    let model = set.models.first().ok_or("нет моделей солдат")?;
+    let about = if clip.cycle { "круг из записи движений" } else { "действие из записи движений" };
+    let anim = model.clip_from_record(&clip, name, about)?;
+    let path = anim.save(&data.join("animations"))?;
+    Ok(format!("{}: {} кадров записи → {} ключей, {:.2} с, путь за круг {:.2} длины ноги", path.display(), clip.frames.len(), anim.keys.len(), anim.seconds(), anim.stride))
+}
+
+/// Инструменты разбора анимаций из командной строки (без окна). `None` — это не они.
+fn analysis_tool(args: &[String]) -> Option<Result<String, String>> {
+    let flag = args.first()?.as_str();
+    let rwr = || wind_render::rwr_anim::load_install();
+    Some(match flag {
+        // Сводка анимаций RWR: длина, кадры, метки, высота таза и размах стоп.
+        "--rwr-report" => rwr().map(|all| {
+            let filter = args.get(1).map(|s| s.to_lowercase()).unwrap_or_default();
+            all.iter().filter(|a| a.name.to_lowercase().contains(&filter)).map(|a| a.report()).collect::<Vec<_>>().join("\n")
+        }),
+        // Лист кадров анимации RWR: равномерно по времени, `поз` штук (по умолчанию 8).
+        "--rwr-sheet" => (|| {
+            let all = rwr()?;
+            let (Some(which), Some(out)) = (args.get(1), args.get(2)) else {
+                return Err("нужно: --rwr-sheet \"имя или #номер\" лист.png [поз]".to_owned());
+            };
+            let anim = match which.strip_prefix('#') {
+                Some(n) => n.parse::<usize>().ok().and_then(|n| all.get(n)),
+                None => all.iter().find(|a| a.name == *which),
+            }
+            .ok_or_else(|| format!("нет анимации «{which}»"))?;
+            let n = args.get(3).and_then(|v| v.parse::<usize>().ok()).unwrap_or(8).clamp(1, 24);
+            let end = anim.end.max(anim.frames.last().map_or(0.0, |f| f.time));
+            let span = if anim.looped { end } else { end.max(1e-3) };
+            let poses: Vec<_> = (0..n).map(|k| anim.sample(if anim.looped { span * k as f32 / n as f32 } else { span * k as f32 / (n - 1).max(1) as f32 })).collect();
+            anim_sheet::save(&poses, Path::new(out))?;
+            Ok(format!("{}\n{out}: {n} поз через {:.3} единиц времени", anim.report(), span / n as f32))
+        })(),
+        // Лист кадров нашего клипа из data/animations (по ключу).
+        "--anim-sheet" => (|| {
+            let project = project::sample().ok_or("не найдена наша игра (wind.project)")?;
+            let (clips, _) = wind_render::anim::load_dir(&project.data_dir().join("animations"));
+            let (Some(which), Some(out)) = (args.get(1), args.get(2)) else {
+                return Err("нужно: --anim-sheet ключ лист.png [поз]".to_owned());
+            };
+            let clip = clips.get(which.as_str()).ok_or_else(|| format!("нет клипа «{which}»; есть: {}", clips.keys().cloned().collect::<Vec<_>>().join(", ")))?;
+            let n = args.get(3).and_then(|v| v.parse::<usize>().ok()).unwrap_or(8).clamp(1, 24);
+            let span = clip.length.max(1e-3);
+            let poses: Vec<_> = (0..n).map(|k| clip.sample(if clip.looped { span * k as f32 / n as f32 } else { span * k as f32 / (n - 1).max(1) as f32 })).collect();
+            anim_sheet::save(&poses, Path::new(out))?;
+            Ok(format!("«{}»: {} ключей, {:.2} с, {}; {out}", clip.key, clip.keys.len(), clip.seconds(), if clip.looped { "круг" } else { "раз" }))
+        })(),
+        // Наши клипы в стандарте анимаций: каких нет в data/animations — сделать
+        // (`--force ключ` или `--force all` — переделать).
+        "--make-clips" => (|| {
+            let project = project::sample().ok_or("не найдена наша игра (wind.project)")?;
+            let set = wind_render::character::CharacterSet::load(&project.data_dir())?;
+            let model = set.models.first().ok_or("нет моделей солдат")?;
+            let force: Vec<String> = args.iter().skip_while(|a| *a != "--force").skip(1).cloned().collect();
+            let made = model.make_clips(&project.data_dir().join("animations"), &force)?;
+            Ok(if made.is_empty() { "все клипы уже есть (--force ключ — переделать)".to_owned() } else { made.join("\n") })
+        })(),
+        _ => return None,
+    })
 }

@@ -269,7 +269,7 @@ fn prone_soldier_is_prone_on_client() {
         link.world.soldiers[near].suppression = 1.0;
         link.tick(0.0);
     }
-    assert!(link.world.soldiers[near].prone);
+    assert!(link.world.soldiers[near].prone());
     let seen = link.client.soldiers[near].as_ref().expect("клиент видит соседа");
     assert!(seen.net.is_prone(), "клиент знает, что он лежит");
 }

@@ -40,6 +40,48 @@ pub const THROW_SHOWN: f32 = 0.4;
 /// Скорость шага — доля скорости бега. Как в RWR, солдат по умолчанию бежит, а шагом
 /// идёт, если зажать клавишу (6 м/с → 2,2 м/с).
 pub const WALK_SHARE: f32 = 0.37;
+/// Приседом — такая доля скорости бега: 1,85 м/с при беге 6 м/с (у RWR приседом
+/// чуть медленнее шага). По ней же круг клипа «crouching forwards».
+pub const CROUCH_SHARE: f32 = 0.31;
+/// Ползком (игрок) — 0,75 м/с при беге 6 м/с, как круг клипа «prone, moving forwards».
+pub const PRONE_SHARE: f32 = 0.125;
+/// Сколько секунд солдат ложится или встаёт (клипы «going prone», «leaving prone»):
+/// в это время не ходит и не стреляет.
+pub const GOING_PRONE: f32 = 0.55;
+
+/// Стойка: стоит, присел (левый Ctrl), лежит (Z).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stance {
+    #[default]
+    Stand,
+    Crouch,
+    Prone,
+}
+
+impl Stance {
+    pub fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_u8(v: u8) -> Stance {
+        match v {
+            1 => Stance::Crouch,
+            2 => Stance::Prone,
+            _ => Stance::Stand,
+        }
+    }
+}
+
+/// Доля скорости бега игрока: по стойке, шагом (Shift) и на перезарядке (шагом).
+/// Одна и та же на сервере и у клиента, который ведёт своего солдата сам.
+pub fn move_share(stance: Stance, walk: bool, reloading: bool) -> f32 {
+    match stance {
+        Stance::Prone => PRONE_SHARE,
+        Stance::Crouch => CROUCH_SHARE,
+        Stance::Stand if walk || reloading => WALK_SHARE,
+        Stance::Stand => 1.0,
+    }
+}
 
 /// Размер клетки пространственной сетки, м.
 const GRID_CELL: f32 = 8.0;
@@ -61,6 +103,8 @@ pub struct PlayerInput {
     pub command: Command,
     /// Сесть в лодку рядом или выйти из неё (V; см. `boat`).
     pub use_boat: bool,
+    /// Стойка, которую выбрал игрок (левый Ctrl — присесть, Z — лечь).
+    pub stance: Stance,
     /// Где появиться после смерти: 0 — на базе, 1 + i — на точке i, если она наша
     /// (иначе на базе).
     pub spawn: u8,
@@ -151,7 +195,9 @@ pub struct Soldier {
     pub pinned: bool,
     /// Залёг: прижат огнём в чистом поле — почти не двигается, попасть труднее.
     /// В укрытии прижатый не ложится, а уходит за угол.
-    pub prone: bool,
+    pub stance: Stance,
+    /// Ложится или встаёт ещё столько секунд (не ходит и не стреляет).
+    pub stance_timer: f32,
     /// Где последний раз видел врага и сколько ещё туда стрелять на подавление, с.
     pub last_seen: Option<Vec2>,
     pub last_seen_timer: f32,
@@ -197,6 +243,11 @@ pub fn wading(depth: f32) -> f32 {
 }
 
 impl Soldier {
+    /// Лежит (залёг под огнём или лёг сам).
+    pub fn prone(&self) -> bool {
+        self.stance == Stance::Prone
+    }
+
     /// Плывёт: глубоко и не в лодке — не стреляет и не бросает гранаты.
     pub fn swimming(&self, map: &Map) -> bool {
         self.boat == NO_BOAT && map.water_depth(self.pos) > SWIM_DEPTH
@@ -619,10 +670,13 @@ impl World {
             let ai = s.controller == Controller::Ai;
             s.suppression = (s.suppression - sup.decay * dt).max(0.0);
             s.pinned = ai && if s.pinned { s.suppression > sup.stand_at } else { s.suppression >= sup.prone_at };
-            s.prone = s.pinned && (s.cover.is_none() || !fight);
-            if s.prone {
-                speed *= sup.crawl;
+            if ai {
+                s.stance = if s.pinned && (s.cover.is_none() || !fight) { Stance::Prone } else { Stance::Stand };
+                if s.stance == Stance::Prone {
+                    speed *= sup.crawl;
+                }
             }
+            s.stance_timer = (s.stance_timer - dt).max(0.0);
             // Вода: по колено и глубже идут медленнее, глубоко — плывут.
             speed *= wading(map.water_depth(s.pos));
             s.last_seen_timer -= dt;
@@ -645,18 +699,27 @@ impl World {
                 if look != Vec2::ZERO {
                     s.facing = look.y.atan2(look.x);
                 }
+                // Стойка игрока: лечь и встать — не сразу (`GOING_PRONE`), присесть — сразу.
+                // В воде не ложатся и не садятся.
+                let want = if map.water_depth(s.pos) > WADE_DEPTH { Stance::Stand } else { input.stance };
+                if want != s.stance {
+                    if (want == Stance::Prone) != (s.stance == Stance::Prone) {
+                        s.stance_timer = GOING_PRONE;
+                    }
+                    s.stance = want;
+                }
+                let share = move_share(s.stance, input.walk, s.reload_timer > 0.0) * if s.stance_timer > 0.0 { 0.0 } else { 1.0 };
                 if let Some(claim) = input.pos.filter(|c| c.distance(s.pos) < CLAIM_MAX_GAP) {
                     // Клиент ведёт своего солдата сам — догоняем его заявку (не быстрее,
                     // чем солдат может: на перезарядке — шагом).
-                    let step = (claim - s.pos).clamp_length_max(spec.speed * reloading * CLAIM_CATCH_UP * dt);
+                    let step = (claim - s.pos).clamp_length_max(spec.speed * share * CLAIM_CATCH_UP * dt);
                     s.vel = step / dt;
                     s.pos = walk(map, s.pos, step, radius);
                     return;
                 }
                 desired = input.move_dir.clamp_length_max(1.0);
-                if input.walk && reloading == 1.0 {
-                    speed *= WALK_SHARE;
-                }
+                // Вода уже учтена в `speed`; перезарядку и стойку даёт `share`.
+                speed = speed / reloading * share;
             } else if let Some(to) = s.retreat {
                 // Раненый отходит по полю путей к своей точке или на базу и ждёт там.
                 let field = if to == RETREAT_TO_BASE { base_flow.get(s.team as usize & 1) } else { flow.get(to as usize) };
@@ -1049,7 +1112,8 @@ impl World {
             under_fire: 0.0,
             suppression: 0.0,
             pinned: false,
-            prone: false,
+            stance: Stance::Stand,
+            stance_timer: 0.0,
             last_seen: None,
             xp: 0,
             commander: NO_COMMANDER,

@@ -1,0 +1,34 @@
+// Клип «leaving prone» — встаёт из положения лёжа в присед (тот же путь, что «лечь», обратно). Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
+(
+    key: "leaving prone",
+    about: "встаёт из положения лёжа в присед (тот же путь, что «лечь», обратно)",
+    source: "свой: позы задаёт генератор wind_lab --make-clips (character/make.rs)",
+    looped: false,
+    length: 0.55,
+    speed: 1.0,
+    speed_spread: 0.0,
+    stride: 0.0,
+    body: Full,
+    hands: Clip,
+    keys: [
+        (
+            time: 0.0,
+            points: (head: (7.75, 14.3, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.55, 1.15, 7.6), leftelbow: (7.87, 6.75, -2.2), righthand: (9.25, 5.99, 3.2), lefthand: (13.25, 6.25, 2.36), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+            events: [WeakHand(true)],
+        ),
+        (
+            time: 0.17,
+            points: (head: (9.37, 22.03, -0.3), neck: (7.64, 15.25, -0.3), rightshoulder: (4.84, 14.16, 6.7), leftshoulder: (4.84, 14.16, -7.3), rightelbow: (8.37, 6.98, 6.93), leftelbow: (9.6, 7.77, -6.57), righthand: (13.0, 2.0, 5.0), lefthand: (14.37, 2.75, -5.14), midspine: (-4.48, 10.54, -0.3), righthip: (-11.0, 8.0, 4.7), lefthip: (-11.0, 8.0, -5.3), rightknee: (-22.55, -0.81, 8.45), leftknee: (-19.59, 0.52, -15.06), rightfoot: (-35.42, 0.25, 6.98), leftfoot: (-31.0, 2.0, -9.0)),
+        ),
+        (
+            time: 0.35,
+            points: (head: (15.31, 30.44, -0.3), neck: (12.27, 24.13, -0.3), rightshoulder: (9.83, 22.39, 6.7), leftshoulder: (9.83, 22.39, -7.3), rightelbow: (10.79, 14.45, 6.98), leftelbow: (11.26, 14.52, -7.39), righthand: (12.14, 7.55, 6.19), lefthand: (12.83, 7.7, -6.36), midspine: (1.69, 16.57, -0.3), righthip: (-4.0, 12.5, 4.7), lefthip: (-4.0, 12.5, -5.3), rightknee: (-4.59, -2.39, 6.42), leftknee: (1.46, -1.38, -6.94), rightfoot: (-17.56, -1.87, 5.81), leftfoot: (-11.53, -0.86, -6.72)),
+        ),
+        (
+            time: 0.55,
+            points: (head: (5.34, 37.56, -0.04), neck: (3.9, 31.22, 2.56), rightshoulder: (-1.01, 28.46, 7.68), leftshoulder: (6.89, 28.46, -3.88), rightelbow: (4.11, 22.31, 7.74), leftelbow: (12.83, 24.0, -0.91), righthand: (9.79, 22.96, 3.58), lefthand: (18.2, 22.96, 3.58), midspine: (-0.27, 19.25, -0.3), righthip: (-3.0, 12.8, 4.7), lefthip: (-3.0, 12.8, -5.3), rightknee: (-4.53, -2.03, 6.36), leftknee: (11.83, 12.91, -7.55), rightfoot: (-17.52, -2.03, 5.77), leftfoot: (8.0, 0.5, -7.0)),
+            events: [WeakHand(false)],
+        ),
+    ],
+)

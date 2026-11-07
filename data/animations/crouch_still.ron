@@ -1,0 +1,28 @@
+// Клип «crouch still» — присел на правое колено, оружие у плеча. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
+(
+    key: "crouch still",
+    about: "присел на правое колено, оружие у плеча",
+    source: "свой: позы задаёт генератор wind_lab --make-clips (character/make.rs)",
+    looped: true,
+    length: 2.4,
+    speed: 1.0,
+    speed_spread: 0.0,
+    stride: 0.0,
+    body: Full,
+    hands: Weapon,
+    keys: [
+        (
+            time: 0.0,
+            points: (head: (5.49, 38.19, -0.3), neck: (4.79, 31.22, -0.3), rightshoulder: (3.62, 28.46, 6.7), leftshoulder: (3.62, 28.46, -7.3), rightelbow: (7.46, 21.51, 7.68), leftelbow: (10.43, 24.26, -7.38), righthand: (9.0, 27.0, 3.5), lefthand: (15.0, 28.0, -3.5), midspine: (-0.27, 19.25, -0.3), righthip: (-3.0, 12.8, 4.7), lefthip: (-3.0, 12.8, -5.3), rightknee: (-4.53, -2.03, 6.36), leftknee: (11.83, 12.91, -7.55), rightfoot: (-17.52, -2.03, 5.77), leftfoot: (8.0, 0.5, -7.0)),
+        ),
+        (
+            time: 1.1,
+            points: (head: (5.87, 37.76, -0.3), neck: (5.06, 30.8, -0.3), rightshoulder: (3.85, 28.06, 6.7), leftshoulder: (3.85, 28.06, -7.3), rightelbow: (7.96, 21.23, 7.46), leftelbow: (10.72, 23.95, -7.4), righthand: (9.0, 27.0, 3.5), lefthand: (15.0, 28.0, -3.5), midspine: (-0.18, 18.91, -0.3), righthip: (-3.0, 12.5, 4.7), lefthip: (-3.0, 12.5, -5.3), rightknee: (-4.65, -2.31, 6.41), leftknee: (11.82, 12.91, -7.55), rightfoot: (-17.63, -2.31, 5.81), leftfoot: (8.0, 0.5, -7.0)),
+        ),
+        (
+            time: 1.8,
+            points: (head: (5.68, 37.97, -0.3), neck: (4.93, 31.01, -0.3), rightshoulder: (3.74, 28.26, 6.7), leftshoulder: (3.74, 28.26, -7.3), rightelbow: (7.7, 21.36, 7.57), leftelbow: (10.57, 24.1, -7.4), righthand: (9.0, 27.0, 3.5), lefthand: (15.0, 28.0, -3.5), midspine: (-0.23, 19.08, -0.3), righthip: (-3.0, 12.65, 4.7), lefthip: (-3.0, 12.65, -5.3), rightknee: (-4.59, -2.17, 6.38), leftknee: (11.83, 12.91, -7.55), rightfoot: (-17.58, -2.17, 5.79), leftfoot: (8.0, 0.5, -7.0)),
+        ),
+    ],
+)

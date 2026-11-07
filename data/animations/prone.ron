@@ -1,0 +1,28 @@
+// Клип «prone» — лежит, опора на локти, оружие вперёд. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
+(
+    key: "prone",
+    about: "лежит, опора на локти, оружие вперёд",
+    source: "свой: позы задаёт генератор wind_lab --make-clips (character/make.rs)",
+    looped: true,
+    length: 2.6,
+    speed: 1.0,
+    speed_spread: 0.0,
+    stride: 0.0,
+    body: Full,
+    hands: Weapon,
+    keys: [
+        (
+            time: 0.0,
+            points: (head: (7.75, 14.3, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (6.75, 1.26, 7.12), leftelbow: (9.42, 6.0, -5.55), righthand: (10.0, 6.0, 3.0), lefthand: (16.17, 5.72, -3.48), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-29.11, 0.28, 7.42), leftknee: (-24.2, 0.38, -16.37), rightfoot: (-42.06, 1.31, 7.13), leftfoot: (-36.97, 1.7, -14.29)),
+        ),
+        (
+            time: 1.3,
+            points: (head: (7.75, 14.5, -0.3), neck: (4.71, 8.2, -0.3), rightshoulder: (1.75, 7.69, 6.7), leftshoulder: (1.75, 7.69, -7.3), rightelbow: (6.64, 1.37, 7.16), leftelbow: (9.4, 6.11, -5.55), righthand: (10.0, 6.0, 3.0), lefthand: (16.15, 5.75, -3.49), midspine: (-8.1, 5.99, -0.3), righthip: (-15.0, 4.8, 4.7), lefthip: (-15.0, 4.8, -5.3), rightknee: (-29.05, 0.28, 7.4), leftknee: (-24.16, 0.38, -16.33), rightfoot: (-42.0, 1.3, 7.13), leftfoot: (-36.92, 1.7, -14.27)),
+        ),
+        (
+            time: 2.0,
+            points: (head: (7.75, 14.38, -0.3), neck: (4.71, 8.08, -0.3), rightshoulder: (1.75, 7.57, 6.7), leftshoulder: (1.75, 7.57, -7.3), rightelbow: (6.71, 1.3, 7.14), leftelbow: (9.41, 6.05, -5.55), righthand: (10.0, 6.0, 3.0), lefthand: (16.16, 5.73, -3.49), midspine: (-8.1, 5.87, -0.3), righthip: (-15.0, 4.68, 4.7), lefthip: (-15.0, 4.68, -5.3), rightknee: (-29.08, 0.28, 7.41), leftknee: (-24.18, 0.38, -16.35), rightfoot: (-42.04, 1.31, 7.13), leftfoot: (-36.95, 1.7, -14.28)),
+        ),
+    ],
+)
