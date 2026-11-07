@@ -31,6 +31,8 @@ pub struct SceneSoldier {
     pub aiming: bool,
     /// Сидит в лодке.
     pub in_boat: bool,
+    /// Сколько секунд назад стрелял — отдача.
+    pub shot_ago: f32,
 }
 
 pub struct ScenePoint {
@@ -333,6 +335,7 @@ impl Viewport {
                 throwing: s.throwing,
                 aiming: s.aiming,
                 in_boat: s.in_boat,
+                shot_ago: s.shot_ago,
             })
             .collect();
         let bullets: Vec<(Vec2, Vec2)> = scene.bullets.iter().map(|&(tail, head)| (head, head - tail)).collect();

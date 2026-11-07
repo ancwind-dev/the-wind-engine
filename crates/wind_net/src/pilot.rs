@@ -16,6 +16,8 @@ const SETTLE_TIME: f32 = 1.0;
 #[derive(Default)]
 pub struct Pilot {
     pos: Option<Vec2>,
+    /// Скорость своего солдата — с инерцией, как у сервера (`wind_sim::steer`).
+    vel: Vec2,
     /// Сколько секунд солдат стоит.
     still: f32,
     /// Сколько раз пришлось вернуть солдата на место сервера — для отладки.
@@ -36,19 +38,32 @@ impl Pilot {
             // Первый кадр, возрождение или сервер не согласен — встаём туда, где он.
             Some(_) => {
                 self.snaps += 1;
+                self.vel = Vec2::ZERO;
                 server
             }
-            None => server,
+            None => {
+                self.vel = Vec2::ZERO;
+                server
+            }
         };
         let dir = move_dir.clamp_length_max(1.0);
-        if dir == Vec2::ZERO {
+        // Разгон и торможение — как у сервера: солдат трогается и встаёт не мгновенно.
+        self.vel = wind_sim::steer(self.vel, dir * speed, dt);
+        if self.vel != Vec2::ZERO {
+            let before = pos;
+            pos = walk(map, pos, self.vel * dt, radius);
+            // Упёрся в стену — скорость туда гасится, иначе «разгон» копился бы в стену.
+            if dt > 0.0 {
+                self.vel = (pos - before) / dt;
+            }
+        }
+        if dir == Vec2::ZERO && self.vel == Vec2::ZERO {
             self.still += dt;
             if self.still > SETTLE_TIME {
                 pos += (server - pos) * (1.0 - (-dt * 4.0).exp());
             }
         } else {
             self.still = 0.0;
-            pos = walk(map, pos, dir * speed * dt, radius);
         }
         self.pos = Some(pos);
         Some(pos)

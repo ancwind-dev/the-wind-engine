@@ -225,6 +225,9 @@ impl CharModel {
         save(down)?;
         save(up)?;
 
+        // --- Отдача ---
+        save(self.recoil_clip(j))?;
+
         // --- Перезарядки: стоя (по видам) и лёжа ---
         let stand = self.pose(Motion::default());
         for (kind, k, about) in [
@@ -480,6 +483,44 @@ impl CharModel {
             };
             c.keys.push(key(self, (length * u * 1000.0).round() / 1000.0, &self.shaped(j, &s), events));
         }
+        c
+    }
+
+    /// Отдача от выстрела, по устройству как у RWR («recoil»: 0,15 с, толчок за первые
+    /// 0,03 с и возврат): правая кисть уходит назад сильнее левой — ствол подбрасывает;
+    /// плечи и голова чуть назад. Клип добавочный: ключи — сдвиги от первого ключа, поэтому
+    /// ложится поверх любой стойки. Величины — свои.
+    fn recoil_clip(&self, j: Joints) -> AnimClip {
+        let mut c = AnimClip {
+            body: Body::Additive,
+            hands: Hands::Clip,
+            ..clip("recoil", "отдача от выстрела: оружие и руки назад, ствол вверх, возврат", false, 0.15, 1.0, 0.0)
+        };
+        let base = self.pose(Motion::default());
+        let pushed = {
+            let mut p = base.clone();
+            let back = |p: &mut Pose, i: usize, d: Vec3| p[i] += d;
+            back(&mut p, j.hand[0], v(-2.0, 0.3, 0.0));
+            back(&mut p, j.hand[1], v(-1.2, 1.2, 0.0));
+            back(&mut p, j.shoulder[0], v(-0.8, 0.0, 0.0));
+            back(&mut p, j.shoulder[1], v(-0.4, 0.0, 0.0));
+            back(&mut p, j.neck, v(-0.4, 0.0, 0.0));
+            back(&mut p, j.head, v(-0.6, 0.1, 0.0));
+            p
+        };
+        let half = {
+            let mut p = base.clone();
+            for (a, b) in p.iter_mut().zip(&pushed) {
+                *a += (*b - *a) * 0.35;
+            }
+            p
+        };
+        // Без выравнивания длин (`key`): это сдвиги, а не поза.
+        let raw = |time: f32, p: &Pose| Key { time, points: Points::from_array(self.points_of(p).expect("скелет")), weapon: None, events: vec![] };
+        c.keys.push(raw(0.0, &base));
+        c.keys.push(raw(0.03, &pushed));
+        c.keys.push(raw(0.08, &half));
+        c.keys.push(raw(0.15, &base));
         c
     }
 

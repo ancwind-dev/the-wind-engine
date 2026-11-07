@@ -283,6 +283,7 @@ mod tests {
             throwing: false,
             aiming: false,
             in_boat: false,
+            shot_ago: f32::INFINITY,
         };
         let mut sound = Sound::default();
         // Свой (0) стоит; рядом идёт 1, лёжа ползёт 2, далеко идёт 3. Двигаются по оси Y.

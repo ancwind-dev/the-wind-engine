@@ -33,6 +33,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
             throwing: s.throw_timer > 0.0,
             aiming: s.aiming(),
             in_boat: s.boat != wind_sim::boat::NO_BOAT,
+            shot_ago: s.shot_ago,
         })
         .collect();
     let mut bullets = Vec::new();
@@ -146,6 +147,7 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
                 throwing: s.net.is_throwing(),
                 aiming: s.net.is_aiming(),
                 in_boat: s.net.in_boat(),
+                shot_ago: s.shot_ago,
             })
         })
         .collect();

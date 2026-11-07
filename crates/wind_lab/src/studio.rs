@@ -215,7 +215,7 @@ impl Studio {
                 }
             });
             ui.horizontal(|ui| {
-                for (name, act) in [(t("Без действия"), Act::None), (t("Перезарядка"), Act::Reload), (t("Бросок гранаты"), Act::Throw)] {
+                for (name, act) in [(t("Без действия"), Act::None), (t("Перезарядка"), Act::Reload), (t("Бросок гранаты"), Act::Throw), (t("Стрельба"), Act::Fire)] {
                     if ui.selectable_label(self.dead.is_none() && self.act == act, name).clicked() {
                         self.act = act;
                         self.act_time = 0.0;
@@ -332,6 +332,17 @@ impl Studio {
         self.speed = speed;
     }
 
+    /// Действие руками сразу (ключ `--act fire|reload|throw`, для снимков).
+    pub fn set_act(&mut self, name: &str) {
+        self.act = match name {
+            "fire" => Act::Fire,
+            "reload" => Act::Reload,
+            "throw" => Act::Throw,
+            _ => Act::None,
+        };
+        self.act_time = 0.0;
+    }
+
     /// Солдат RWR рядом с анимацией `name` (ключ `--rwr`, для снимков).
     pub fn show_rwr(&mut self, name: &str) {
         self.rwr_on = true;
@@ -416,7 +427,7 @@ impl Studio {
     /// по выбранному оружию (как и сколько секунд).
     fn action(&self) -> Option<Action> {
         match self.act {
-            Act::None => None,
+            Act::None | Act::Fire => None,
             Act::Reload => {
                 let w = self.characters.as_ref()?.weapons.get(self.weapon?)?;
                 let t = (self.act_time % (w.reload_time + 0.6)) / w.reload_time.max(0.1);
@@ -463,8 +474,8 @@ impl Studio {
 
         let center = self.center();
         let model = self.model.min(self.characters.as_ref().map_or(0, |c| c.models.len().saturating_sub(1)));
-        let carry = if self.aiming { 0.0 } else { wind_render::character::run_share(self.speed) };
-        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()), carry, crouch: self.crouch, prone: self.prone, rising: self.rising, clock: self.clock };
+        let carry = if self.aiming || self.act == Act::Fire { 0.0 } else { wind_render::character::run_share(self.speed) };
+        let motion = Motion { speed: self.speed, phase: self.phase, dir: Vec2::from_angle(self.heading.to_radians()), carry, crouch: self.crouch, prone: self.prone, rising: self.rising, clock: self.clock, lean: 0.0 };
         let action = self.action();
         // Редактор анимаций: солдат в позе клипа, без действий и падения.
         let editing = self.editor.on && self.dead.is_none();
@@ -499,6 +510,8 @@ impl Studio {
                 throwing: false,
                 aiming: self.aiming,
                 in_boat: false,
+                // «Стрельба» — очередь: выстрел каждые 0,11 с, на каждый — отдача.
+                shot_ago: if self.act == Act::Fire { self.act_time % 0.11 } else { f32::INFINITY },
             }),
         }
         if rwr_pose.is_some() {
@@ -514,6 +527,7 @@ impl Studio {
                 throwing: false,
                 aiming: true,
                 in_boat: false,
+                shot_ago: f32::INFINITY,
             });
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());
@@ -587,4 +601,6 @@ enum Act {
     None,
     Reload,
     Throw,
+    /// Очередь: отдача от каждого выстрела.
+    Fire,
 }

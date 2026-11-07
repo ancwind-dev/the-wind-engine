@@ -57,7 +57,7 @@ mod tests {
     use super::*;
 
     fn soldier(id: u32, team: u8, x: f32, y: f32) -> SoldierDraw {
-        SoldierDraw { id, pos: Vec2::new(x, y), facing: 0.0, team, look: None, stance: wind_sim::Stance::Stand, reloading: false, throwing: false, aiming: false, in_boat: false }
+        SoldierDraw { id, pos: Vec2::new(x, y), facing: 0.0, team, look: None, stance: wind_sim::Stance::Stand, reloading: false, throwing: false, aiming: false, in_boat: false, shot_ago: f32::INFINITY }
     }
 
     #[test]

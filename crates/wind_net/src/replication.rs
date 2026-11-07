@@ -621,6 +621,8 @@ pub struct RemoteBoat {
 #[derive(Clone, Debug)]
 pub struct RemoteSoldier {
     pub net: NetSoldier,
+    /// Сколько секунд назад стрелял (по событиям выстрела) — для отдачи в анимации.
+    pub shot_ago: f32,
     /// Позиция из последнего снимка.
     pub pos: Vec2,
     /// Где солдат был нарисован, когда пришёл снимок: от неё плавно едем к `pos`.
@@ -977,8 +979,9 @@ impl RemoteWorld {
         for (id, s) in &view {
             let slot = &mut self.soldiers[*id as usize];
             let shown = slot.as_ref().map(|old| old.prev.lerp(old.pos, t));
+            let shot_ago = slot.as_ref().map_or(f32::INFINITY, |old| old.shot_ago);
             let pos = s.pos();
-            *slot = Some(RemoteSoldier { net: *s, pos, prev: shown.unwrap_or(pos) });
+            *slot = Some(RemoteSoldier { net: *s, pos, prev: shown.unwrap_or(pos), shot_ago });
         }
         // Кого нет в снимке — тех клиент больше не видит.
         let mut in_view = view.iter().map(|e| e.0).peekable();
@@ -994,6 +997,9 @@ impl RemoteWorld {
         for fx in effects {
             match fx {
                 Fx::Shot(shooter, angle, hidden) => {
+                    if let Some(Some(s)) = self.soldiers.get_mut(shooter as usize) {
+                        s.shot_ago = 0.0;
+                    }
                     let own = shooter == self.welcome.soldier;
                     if own {
                         self.own_shots += 1;
@@ -1081,6 +1087,9 @@ impl RemoteWorld {
 
     /// Двигает трассеры и гранаты, старит взрывы. Вызывать каждый кадр.
     pub fn advance_effects(&mut self, dt: f32) {
+        for s in self.soldiers.iter_mut().flatten() {
+            s.shot_ago += dt;
+        }
         let map = &self.map;
         self.tracers.retain_mut(|t| {
             let next = t.pos + t.vel * dt;

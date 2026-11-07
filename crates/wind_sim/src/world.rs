@@ -49,6 +49,24 @@ pub const PRONE_SHARE: f32 = 0.125;
 /// в это время не ходит и не стреляет.
 pub const GOING_PRONE: f32 = 0.55;
 
+/// Разгон: скорость тянется к желаемой с такой силой, 1/с (63 % — за 0,11 с, 95 % — за 0,33 с).
+/// У RWR разгон задан «тягой» по стойкам (`running_steer_amount` и т. п. в файле персонажа),
+/// торможение — отдельной, более сильной силой (`stopping_oppositesteer_amount`); сам расчёт
+/// — в движке игры, его в файлах нет, поэтому время подобрано на глаз под тот же характер.
+pub const ACCEL_RATE: f32 = 9.0;
+/// Торможение — когда хочет медленнее или в другую сторону: резче разгона (95 % — за 0,2 с).
+pub const BRAKE_RATE: f32 = 15.0;
+
+/// Инерция шага: скорость `vel` за `dt` тянется к желаемой `target`. Одна и та же у сервера,
+/// у ботов и у клиента, который ведёт своего солдата сам.
+pub fn steer(vel: Vec2, target: Vec2, dt: f32) -> Vec2 {
+    let braking = target.length_squared() < vel.length_squared() * 0.81 || target.dot(vel) < 0.0;
+    let rate = if braking { BRAKE_RATE } else { ACCEL_RATE };
+    let next = vel + (target - vel) * (1.0 - (-rate * dt).exp());
+    // Медленнее 0,3 м/с — уже стоит: иначе торможение долго «доползало» бы.
+    if target == Vec2::ZERO && next.length_squared() < 0.09 { Vec2::ZERO } else { next }
+}
+
 /// Стойка: стоит, присел (левый Ctrl), лежит (Z).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Stance {
@@ -148,6 +166,8 @@ pub struct Soldier {
     pub controller: Controller,
     pub pos: Vec2,
     pub vel: Vec2,
+    /// Скорость шага без расталкивания — с инерцией (`steer`).
+    pub walk_vel: Vec2,
     /// Куда смотрит, радианы.
     pub facing: f32,
     pub team: u8,
@@ -714,6 +734,7 @@ impl World {
                     // чем солдат может: на перезарядке — шагом).
                     let step = (claim - s.pos).clamp_length_max(spec.speed * share * CLAIM_CATCH_UP * dt);
                     s.vel = step / dt;
+                    s.walk_vel = s.vel;
                     s.pos = walk(map, s.pos, step, radius);
                     return;
                 }
@@ -805,7 +826,9 @@ impl World {
                 }
             });
 
-            s.vel = desired * speed + push * 4.0;
+            // Инерция: разгоняется и тормозит не сразу (см. `steer`).
+            s.walk_vel = steer(s.walk_vel, desired * speed, dt);
+            s.vel = s.walk_vel + push * 4.0;
             s.pos = walk(map, s.pos, s.vel * dt, radius);
         });
     }
@@ -1085,6 +1108,7 @@ impl World {
             controller: Controller::Ai,
             pos,
             vel: Vec2::ZERO,
+            walk_vel: Vec2::ZERO,
             facing: if team == 0 { 0.0 } else { std::f32::consts::PI },
             team,
             alive: true,

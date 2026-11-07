@@ -76,8 +76,8 @@ fn share(a: u32, b: u32) -> f32 {
 
 #[test]
 fn soldiers_fight_from_corners_in_ruins() {
-    let on = run(World::from_file(config(12.0, 40), 5, ruins()), 1600);
-    let off = run(World::from_file(config(0.0, 40), 5, ruins()), 1600);
+    let on = run(World::from_file(config(12.0, 40), 5, ruins()), 3200);
+    let off = run(World::from_file(config(0.0, 40), 5, ruins()), 3200);
     println!(
         "руины, в бою у стены: с укрытиями {:.0}% ({:.0}% в укрытии), без — {:.0}%; на перезарядке прячутся {} из {}",
         share(on.at_wall, on.fighting) * 100.0,

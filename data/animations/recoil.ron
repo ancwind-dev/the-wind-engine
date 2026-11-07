@@ -1,0 +1,32 @@
+// Клип «recoil» — отдача от выстрела: оружие и руки назад, ствол вверх, возврат. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
+(
+    key: "recoil",
+    about: "отдача от выстрела: оружие и руки назад, ствол вверх, возврат",
+    source: "свой: позы задаёт генератор wind_lab --make-clips (character/make.rs)",
+    looped: false,
+    length: 0.15,
+    speed: 1.0,
+    speed_spread: 0.0,
+    stride: 0.0,
+    body: Additive,
+    hands: Clip,
+    keys: [
+        (
+            time: 0.0,
+            points: (head: (0.48, 54.58, -0.11), neck: (0.41, 47.58, -0.11), rightshoulder: (-3.64, 44.59, 5.61), leftshoulder: (4.26, 44.59, -5.95), rightelbow: (1.48, 38.45, 5.67), leftelbow: (10.2, 40.13, -2.98), righthand: (7.16, 39.09, 1.51), lefthand: (15.57, 39.09, 1.51), midspine: (-0.02, 34.59, -0.4), righthip: (-0.3, 27.6, 4.6), lefthip: (-0.3, 27.6, -5.4), rightknee: (0.99, 12.69, 5.68), leftknee: (4.57, 13.45, -6.42), rightfoot: (-3.5, 0.5, 6.0), leftfoot: (3.5, 0.5, -6.8)),
+        ),
+        (
+            time: 0.03,
+            points: (head: (-0.12, 54.68, -0.11), neck: (0.01, 47.58, -0.11), rightshoulder: (-4.44, 44.59, 5.61), leftshoulder: (3.86, 44.59, -5.95), rightelbow: (1.48, 38.45, 5.67), leftelbow: (10.2, 40.13, -2.98), righthand: (5.16, 39.39, 1.51), lefthand: (14.37, 40.29, 1.51), midspine: (-0.02, 34.59, -0.4), righthip: (-0.3, 27.6, 4.6), lefthip: (-0.3, 27.6, -5.4), rightknee: (0.99, 12.69, 5.68), leftknee: (4.57, 13.45, -6.42), rightfoot: (-3.5, 0.5, 6.0), leftfoot: (3.5, 0.5, -6.8)),
+        ),
+        (
+            time: 0.08,
+            points: (head: (0.27, 54.62, -0.11), neck: (0.27, 47.58, -0.11), rightshoulder: (-3.92, 44.59, 5.61), leftshoulder: (4.12, 44.59, -5.95), rightelbow: (1.48, 38.45, 5.67), leftelbow: (10.2, 40.13, -2.98), righthand: (6.46, 39.2, 1.51), lefthand: (15.15, 39.51, 1.51), midspine: (-0.02, 34.59, -0.4), righthip: (-0.3, 27.6, 4.6), lefthip: (-0.3, 27.6, -5.4), rightknee: (0.99, 12.69, 5.68), leftknee: (4.57, 13.45, -6.42), rightfoot: (-3.5, 0.5, 6.0), leftfoot: (3.5, 0.5, -6.8)),
+        ),
+        (
+            time: 0.15,
+            points: (head: (0.48, 54.58, -0.11), neck: (0.41, 47.58, -0.11), rightshoulder: (-3.64, 44.59, 5.61), leftshoulder: (4.26, 44.59, -5.95), rightelbow: (1.48, 38.45, 5.67), leftelbow: (10.2, 40.13, -2.98), righthand: (7.16, 39.09, 1.51), lefthand: (15.57, 39.09, 1.51), midspine: (-0.02, 34.59, -0.4), righthip: (-0.3, 27.6, 4.6), lefthip: (-0.3, 27.6, -5.4), rightknee: (0.99, 12.69, 5.68), leftknee: (4.57, 13.45, -6.42), rightfoot: (-3.5, 0.5, 6.0), leftfoot: (3.5, 0.5, -6.8)),
+        ),
+    ],
+)

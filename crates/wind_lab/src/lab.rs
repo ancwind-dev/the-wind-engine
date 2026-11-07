@@ -208,6 +208,12 @@ impl Lab {
                     let speed = args.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
                     self.studio.set_stance(stance, speed);
                 }
+                // wind_lab --studio --act fire — действие руками в студии (fire, reload, throw).
+                "--act" => {
+                    if let Some(name) = args.next() {
+                        self.studio.set_act(&name);
+                    }
+                }
                 // wind_lab --studio --rwr "crouch still" — ВРЕМЕННО: солдат RWR рядом.
                 "--rwr" => {
                     if let Some(name) = args.next() {

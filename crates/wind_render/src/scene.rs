@@ -38,6 +38,8 @@ pub struct SoldierDraw {
     pub aiming: bool,
     /// Сидит в лодке — стоит на её полу, а не на дне.
     pub in_boat: bool,
+    /// Сколько секунд назад стрелял — отдача (клип «recoil»); давно — `f32::INFINITY`.
+    pub shot_ago: f32,
 }
 
 /// Модель, оружие и движение солдата, заданные явно.
@@ -128,6 +130,12 @@ struct Anim {
     was_throwing: bool,
     /// Как держит оружие (`Motion::carry`), плавно.
     carry: f32,
+    /// Куда смотрит, как рисуем: поворачивается к прицелу плавно, а не мгновенно.
+    facing: f32,
+    /// Наклон корпуса от разгона и торможения (`Motion::lean`), плавно.
+    lean: f32,
+    /// Скорость в прошлом кадре — для разгона.
+    prev_speed: f32,
 }
 
 /// Цель анимации стойки: (присел, лёг).
@@ -367,7 +375,7 @@ impl SceneBuilder {
                     _ => None,
                 };
                 let clock = input.time + s.id as f32 * 0.37;
-                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock }, action })
+                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock, lean: a.lean }, action })
             });
             if let Some(set) = &characters
                 && let Some(look) = look
@@ -377,6 +385,8 @@ impl SceneBuilder {
                     Some((_, p)) => p.clone(),
                     None => model.pose(look.motion),
                 };
+                // Отдача — поверх позы: от каждого выстрела оружие и руки толкает назад.
+                let pose = if look.motion.prone > 0.0 && look.motion.prone < 1.0 { pose } else { model.recoil(pose, s.shot_ago) };
                 // Пока ложится или встаёт, руки заняты — действия не показываем.
                 let (lying, getting) = (look.motion.prone >= 1.0, look.motion.prone > 0.0 && look.motion.prone < 1.0);
                 let (pose, grip, grenade) = match look.action {
@@ -391,7 +401,9 @@ impl SceneBuilder {
                 };
                 let at = to_3d(s.pos, if s.in_boat { boat_floor(input.map, s.pos, input.time) } else { stand_height(input.map, s.pos) });
                 let lod = lod_at(at);
-                let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-s.facing);
+                // Студия ставит угол сама; в игре — плавный поворот к прицелу.
+                let facing = if s.look.is_some() { s.facing } else { a.facing };
+                let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-facing);
                 by_char[model.mesh * LODS + lod].push(skin(bones.len(), s.team, false));
                 model.bones(&pose, &mut |m| bones.push((root * m).to_cols_array_2d()));
                 if let Some(weapon) = look.weapon
@@ -602,7 +614,7 @@ impl SceneBuilder {
             if fresh {
                 // Последняя поза живого солдата: шаг, залёг ли.
                 let a = self.anim.get(c.id as usize).copied().unwrap_or_default();
-                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock: input.time });
+                let pose = m.pose(Motion { speed: a.speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock: input.time, lean: 0.0 });
                 let at = to_3d(c.pos, input.map.height_at(c.pos));
                 let push = if c.push == Vec2::ZERO { -Vec2::from_angle(c.facing) * 2.0 } else { c.push };
                 let seed = c.id ^ ((input.time * 1000.0) as u32).wrapping_mul(0x9E37_79B9);
@@ -632,7 +644,7 @@ impl SceneBuilder {
         if !a.seen || moved > 3.0 {
             // Первый кадр или телепорт (возрождение).
             let (crouch, prone) = goals(s.stance);
-            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone, crouch, ..Default::default() };
+            *a = Anim { phase: 0.0, speed: 0.0, last: s.pos, seen: true, prone, crouch, facing: s.facing, ..Default::default() };
             return 0.0;
         }
         a.reload = s.reloading.then(|| a.reload.unwrap_or(0.0) + dt);
@@ -658,12 +670,22 @@ impl SceneBuilder {
         }
         let speed = if dt > 0.0 { (moved / dt).min(10.0) } else { a.speed };
         a.speed += (speed - a.speed) * 0.25;
+        // Корпус к прицелу — плавно (≈0,1 с на четверть оборота), а не рывком.
+        let turn = (s.facing - a.facing + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        a.facing += turn * (1.0 - (-dt * 16.0).exp());
+        // Разгоняется — корпус вперёд, тормозит — назад (как у бегущего человека).
+        if dt > 0.0 {
+            let accel = (a.speed - a.prev_speed) / dt;
+            let goal = (accel * 0.007).clamp(-0.14, 0.1);
+            a.lean += (goal - a.lean) * (1.0 - (-dt * 8.0).exp());
+        }
+        a.prev_speed = a.speed;
         // Круг шага — по записям движений, если они есть.
         a.phase += moved * self.characters.as_ref().map_or_else(|| stride_rate(a.speed), |c| c.stride_rate_in(a.speed, a.crouch, a.prone >= 1.0));
         // Направление шага — в осях солдата: вперёд по взгляду и вправо от него.
         if moved > 0.001 {
             let step = (s.pos - a.last) / moved;
-            let (fwd, right) = (Vec2::from_angle(s.facing), Vec2::from_angle(s.facing).perp());
+            let (fwd, right) = (Vec2::from_angle(a.facing), Vec2::from_angle(a.facing).perp());
             a.dir = a.dir.lerp(Vec2::new(step.dot(fwd), step.dot(right)), 0.3);
         }
         a.last = s.pos;

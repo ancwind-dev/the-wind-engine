@@ -227,6 +227,8 @@ pub struct Motion {
     pub rising: bool,
     /// Часы, с — для клипов на месте (дыхание): у каждого солдата свой сдвиг.
     pub clock: f32,
+    /// Наклон корпуса по ходу, рад: разгоняется — вперёд (плюс), тормозит — назад.
+    pub lean: f32,
 }
 
 /// На сколько корпус развёрнут левым плечом вперёд, когда солдат целится, рад.
@@ -257,6 +259,7 @@ impl CharModel {
             return self.prone_pose(m, j, dir);
         }
         let (mut p, twist) = self.upright(m, j, dir);
+        self.lean_torso(&mut p, j, m.lean, dir);
         // Бегом, не целясь, руки — из клипа бега (оружие у пояса, качается в такт шагу, как у
         // RWR); целясь — держат оружие стволом вперёд. Между ними — одна мера `carry`: кисть
         // идёт от одного хвата к другому, а локоть ставится заново — длина руки не меняется.
@@ -293,6 +296,45 @@ impl CharModel {
                     *v = v.lerp(c, w);
                 }
             }
+        }
+        p
+    }
+
+    /// Корпус (поясница и выше) наклоняется по ходу движения на `lean` рад вокруг таза —
+    /// разгон и торможение. Руки потом ставит оружие — они идут за плечами.
+    fn lean_torso(&self, p: &mut Pose, j: Joints, lean: f32, dir: Vec2) {
+        if lean.abs() < 1e-3 {
+            return;
+        }
+        let along = Vec3::new(dir.x, 0.0, dir.y).normalize_or(Vec3::X);
+        let axis = Vec3::Y.cross(along).normalize_or(Vec3::Z);
+        let q = Quat::from_axis_angle(axis, lean);
+        let pivot = (p[j.hip[0]] + p[j.hip[1]]) * 0.5;
+        for i in [j.mid, j.neck, j.head, j.shoulder[0], j.shoulder[1], j.elbow[0], j.elbow[1], j.hand[0], j.hand[1]] {
+            p[i] = pivot + q * (p[i] - pivot);
+        }
+    }
+
+    /// Отдача от выстрела `shot_ago` секунд назад — клип «recoil» поверх позы: его ключи —
+    /// сдвиги от первого ключа (`Body::Additive`). Голова, плечи и руки толкает назад, ствол
+    /// подбрасывает; локти ставятся заново — длина рук та же.
+    pub fn recoil(&self, mut p: Pose, shot_ago: f32) -> Pose {
+        let (Some(j), Some(clip)) = (self.joints, self.clips.get("recoil")) else { return p };
+        if !(0.0..clip.seconds).contains(&shot_ago) {
+            return p;
+        }
+        let (base, now) = (clip.at(0.0), clip.at(shot_ago / clip.seconds.max(0.01)));
+        for i in [j.head, j.neck, j.shoulder[0], j.shoulder[1], j.hand[0], j.hand[1]] {
+            p[i] += now[i] - base[i];
+        }
+        let r = &self.rest;
+        for side in 0..2 {
+            let (sh, hand) = (p[j.shoulder[side]], p[j.hand[side]]);
+            let (upper, fore) = (r[j.shoulder[side]].distance(r[j.elbow[side]]), r[j.elbow[side]].distance(r[j.hand[side]]));
+            let hand = sh + (hand - sh).clamp_length_max(upper + fore - 0.01);
+            let bend = p[j.elbow[side]] - (sh + hand) * 0.5;
+            p[j.elbow[side]] = two_bone(sh, hand, upper, fore, bend);
+            p[j.hand[side]] = hand;
         }
         p
     }
@@ -851,6 +893,30 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Отдача: за первые сотые секунды кисти уходят назад, ствол вверх, к концу клипа — на
+    /// место; руки не растягиваются. Наклон: разгоняется — голова вперёд, тормозит — назад.
+    #[test]
+    fn recoil_kicks_back_and_lean_tilts_the_torso() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for m in &set.models {
+            let j = m.joints.unwrap();
+            let base = m.pose(Motion::default());
+            let kick = m.recoil(base.clone(), 0.03);
+            assert!(kick[j.hand[0]].x < base[j.hand[0]].x - 1.0, "{}: кисть не ушла назад", m.name);
+            let aim = |p: &Pose| m.weapon_frame(p).unwrap().z_axis.truncate();
+            assert!(aim(&kick).y > aim(&base).y + 0.02, "{}: ствол не подбросило", m.name);
+            let after = m.recoil(base.clone(), 0.2);
+            assert!(after.iter().zip(&base).all(|(a, b)| a.distance(*b) < 1e-4), "{}: после отдачи — как было", m.name);
+            for side in 0..2 {
+                let want = m.rest[j.elbow[side]].distance(m.rest[j.hand[side]]);
+                assert!((kick[j.elbow[side]].distance(kick[j.hand[side]]) - want).abs() < 0.1, "{}: предплечье растянулось", m.name);
+            }
+            let moving = Motion { speed: 6.0, phase: 1.0, ..Default::default() };
+            let (fwd, back, flat) = (m.pose(Motion { lean: 0.1, ..moving }), m.pose(Motion { lean: -0.1, ..moving }), m.pose(moving));
+            assert!(fwd[j.head].x > flat[j.head].x + 1.5 && back[j.head].x < flat[j.head].x - 1.5, "{}: наклон головы", m.name);
         }
     }
 
