@@ -1,7 +1,8 @@
 //! Генератор наших клипов в стандарте анимаций (`wind_lab --make-clips`).
 //!
-//! - Шаг, бег и бросок — из записей движений CMU (старые файлы `walk.ron`, `run.ron`,
-//!   `throw.ron` переводятся один раз; плотные кадры записи — в редкие ключи).
+//! - Бросок — из записи движений CMU (старый файл `throw.ron` переводится один раз).
+//! - Шаг, бег и ползком — свои кривые по устройству и размахам RWR (см. «Как устроены
+//!   анимации RWR»).
 //! - Перезарядки — из процедурных действий (`actions.rs`): они и есть «автор» этих клипов.
 //! - «Стоит», присед, лечь, лёжа, ползком, встать — позы задаём здесь сами: где таз, как
 //!   наклонён корпус, где стопы и кисти; колени и локти ставит обратная кинематика.
@@ -181,11 +182,10 @@ impl CharModel {
         };
 
         // --- Из записей движений (один раз, из старых файлов) ---
-        for (old, key, about) in [("walk.ron", "walking", "шаг с оружием, круг — два шага"), ("run.ron", "running", "бег с оружием, круг — два шага")] {
-            if let Ok(rec) = Clip::load(&dir.join(old)) {
-                save(self.record_clip(j, &rec, key, about)?)?;
-            }
-        }
+        // Шаг — свой, по устройству RWR (до 2026-11-07 — из записи CMU).
+        save(self.walk_cycle(j))?;
+        // Бег — свой, по устройству RWR (до 2026-11-07 — из записи CMU 35_17).
+        save(self.run_cycle(j))?;
         // Бросок собирается процедурным действием поверх записи (если она загружена) —
         // как было в игре.
         let record = Clip::load(&dir.join("throw.ron")).ok();
@@ -314,25 +314,171 @@ impl CharModel {
         c
     }
 
-    /// Ползком: локти и противоположное колено попеременно, два толчка за круг.
+    /// Ползком, как у RWR по устройству: сторона за стороной — правая рука тянется далеко
+    /// вперёд вместе с подтянутым вбок правым коленом («лягушкой»), потом то же слева; два
+    /// толчка за круг. Размахи — по разбору RWR (колено почти к тазу и на ~0,55 м вбок,
+    /// кисть на ~1 м вперёд от таза, локти широко), кривые — свои.
     fn crawl(&self, j: Joints) -> AnimClip {
         let seconds = 0.4 / 0.45;
         let leg = self.skeleton().map_or(28.0, |s| s.leg);
         let stride_vox = PRONE_SPEED * seconds / VOXEL;
-        let mut c = AnimClip { body: Body::Full, hands: Hands::Clip, ..clip("prone, moving forwards", "ползёт: локоть и противоположное колено, два толчка за круг", true, 0.4, 0.45, stride_vox / leg) };
+        let mut c = AnimClip {
+            body: Body::Full,
+            hands: Hands::Clip,
+            ..clip("prone, moving forwards", "ползёт: рука и колено одной стороны вперёд, потом другой; два толчка за круг", true, 0.4, 0.45, stride_vox / leg)
+        };
         let base = self.prone_shape(0.0);
-        for k in 0..8 {
-            let ph = TAU * k as f32 / 8.0;
-            let (s, cph) = (ph.sin(), ph.cos());
+        let n = 12;
+        for k in 0..n {
+            let u = k as f32 / n as f32;
+            let ph = TAU * u;
+            // Доля «правая сторона вперёд»: 1 — правая рука вытянута и правое колено
+            // подтянуто (u = 0,25), 0 — то же слева (u = 0,75).
+            let right = 0.5 + 0.5 * ph.sin();
             let mut sh = base;
-            sh.hips += v(1.5 * cph, 0.4 * (2.0 * ph).cos().abs(), 0.8 * s);
-            sh.yaw = 0.08 * s;
-            // Правый локоть вперёд — левое колено подтянуто, и наоборот.
-            sh.hands = [v(11.0 + 5.0 * s, 4.0 + 1.5 * s.max(0.0), 4.0), v(17.0 - 5.0 * s, 4.0 + 1.5 * (-s).max(0.0), -3.5)];
-            sh.feet = [v(-40.0 + 5.0 * (-s).max(0.0), 1.5, 8.0 + 4.0 * (-s).max(0.0)), v(-39.0 + 6.0 * s.max(0.0), 1.6, -9.0 - 6.0 * s.max(0.0))];
-            sh.knees = [v(0.0, -0.4, 1.0), v(0.0, -0.4, -1.0)];
-            let events = if k == 2 || k == 6 { vec![Event::Push] } else { vec![] };
-            c.keys.push(key(self, 0.05 * k as f32, &self.shaped(j, &sh), events));
+            let hip = base.hips;
+            sh.hips = v(hip.x + 0.8 * (2.0 * ph).sin(), hip.y + 0.35 * (1.0 - (2.0 * ph).cos()), hip.z);
+            // Плечо тянущейся руки — вперёд (плюс — левое плечо вперёд).
+            sh.yaw = -0.09 * ph.sin();
+            let h = sh.hips;
+            for (side, sign, w) in [(0, 1.0, right), (1, -1.0, 1.0 - right)] {
+                // Рука, которая идёт вперёд, приподнята над землёй.
+                let forward = (sign * ph.cos()).max(0.0);
+                let near = v(h.x + 20.0, 0.8, h.z + 8.5 * sign);
+                let far = v(h.x + 31.0, 1.5, h.z + 4.0 * sign);
+                sh.hands[side] = near.lerp(far, w) + v(0.0, 2.2 * forward, 0.0);
+                sh.elbows[side] = v(0.0, -0.6, sign);
+                // Нога: вытянута назад — или подтянута коленом вбок, стопа под коленом.
+                let stretched = v(h.x - 28.0, 2.0, h.z + 6.0 * sign);
+                let drawn = v(h.x - 17.0, 1.5, h.z + 9.5 * sign);
+                sh.feet[side] = stretched.lerp(drawn, w);
+                sh.knees[side] = v(0.0, -0.5, 0.3 * sign).lerp(v(0.15, -0.15, sign), w);
+            }
+            let events = if k == 3 || k == 9 { vec![Event::Push] } else { vec![] };
+            c.keys.push(key(self, (0.4 * u * 1000.0).round() / 1000.0, &self.shaped(j, &sh), events));
+        }
+        c
+    }
+
+    /// Шаг с оружием у плеча, по устройству как у RWR — «тактический»: таз почти не
+    /// пружинит, корпус прямой, оружие не качается (руки ставит прицел, `Hands::Weapon`);
+    /// круг 0,8 с, опора — больше половины круга, стопа поднимается невысоко (~0,25 м).
+    /// Путь за круг — под шаг 2,2 м/с: стопы не скользят. Кривые — свои.
+    fn walk_cycle(&self, j: Joints) -> AnimClip {
+        let length = 0.8;
+        let leg = self.skeleton().map_or(28.0, |s| s.leg);
+        let stride_vox = 2.2 * length / VOXEL;
+        let mut c = clip("walking", "шаг с оружием у плеча: круг — два шага, корпус ровно", true, length, 1.0, stride_vox / leg);
+        let ground = 0.58;
+        let land = stride_vox * ground * 0.45;
+        let off = land - stride_vox * ground;
+        // Полёт стопы: (доля круга, вперёд, высота) — отрыв носка, колено вперёд, вынос, постановка.
+        let swing = [(ground, off, 0.5), (0.68, off + 6.0, 7.5), (0.8, -1.0, 9.5), (0.92, land - 2.0, 4.0), (1.0, land, 0.5)];
+        let foot_at = |p: f32| -> (f32, f32) {
+            let p = p.rem_euclid(1.0);
+            if p < ground {
+                return (land + (off - land) * p / ground, 0.5);
+            }
+            let i = swing.windows(2).position(|w| p <= w[1].0).unwrap_or(swing.len() - 2);
+            let at = |k: isize| swing[k.clamp(0, swing.len() as isize - 1) as usize];
+            let (p0, p1, p2, p3) = (at(i as isize - 1), at(i as isize), at(i as isize + 1), at(i as isize + 2));
+            let t = (p - p1.0) / (p2.0 - p1.0).max(1e-4);
+            let cr = |a: f32, b: f32, c: f32, d: f32| 0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t + (3.0 * b - a - 3.0 * c + d) * t * t * t);
+            (cr(p0.1, p1.1, p2.1, p3.1), cr(p0.2, p1.2, p2.2, p3.2).max(0.5))
+        };
+        let n = 12;
+        for k in 0..n {
+            let u = k as f32 / n as f32;
+            let ph = TAU * u;
+            let (rx, ry) = foot_at(u);
+            let (lx, ly) = foot_at(u + 0.5);
+            let s = Shape {
+                // Таз почти ровно: чуть выше над опорной ногой посередине опоры.
+                hips: v(0.0, 28.0 - 0.35 * (2.0 * ph).cos(), -0.4 + 0.6 * (ph - 0.6).cos()),
+                pitch: 0.07,
+                yaw: 0.04 * ph.cos(),
+                head_up: 0.04,
+                feet: [v(rx, ry, 4.5), v(lx, ly, -5.0)],
+                knees: [v(1.0, 0.1, 0.05), v(1.0, 0.1, -0.05)],
+                hands: [v(9.0, 43.0, 3.0), v(16.0, 43.5, -1.0)],
+                elbows: [v(-0.2, -1.0, 0.7), v(0.0, -1.0, -0.6)],
+            };
+            let events = match k {
+                0 => vec![Event::Step(Side::Right)],
+                6 => vec![Event::Step(Side::Left)],
+                _ => vec![],
+            };
+            c.keys.push(key(self, (length * u * 1000.0).round() / 1000.0, &self.shaped(j, &s), events));
+        }
+        c
+    }
+
+    /// Бег с оружием, по устройству как у RWR (разбор — «Как устроены анимации RWR»):
+    /// - круг 0,56 с (0,9 при скорости 1,6), опора — треть круга; после толчка пятка
+    ///   взлетает высоко позади, стопа идёт вперёд высоко, колено выносится до уровня ~0,65 м;
+    /// - корпус наклонён сильно (шея на ~0,3 м впереди таза), таз пружинит на 0,1 м и уходит
+    ///   к опорной ноге, плечи опускаются вместе с тазом;
+    /// - **руки**: оружие низко, у пояса, наискось поперёк корпуса (правая кисть ближе, левая
+    ///   дальше и левее) и в такт шагу уходит вбок: правая нога впереди — влево, левая — вправо;
+    ///   локти широко. Руки — из клипа (`Hands::Clip`), пока солдат не целится.
+    ///
+    /// Кривые и ключи — свои, числа (длительности, высоты, размахи) — по разбору.
+    fn run_cycle(&self, j: Joints) -> AnimClip {
+        let (length, speed) = (0.9, 1.6);
+        let seconds = length / speed;
+        let leg = self.skeleton().map_or(28.0, |s| s.leg);
+        let stride_vox = 6.0 * seconds / VOXEL;
+        let mut c = AnimClip { hands: Hands::Clip, ..clip("running", "бег с оружием у пояса: круг — два шага, высокое колено, оружие качается в такт", true, length, speed, stride_vox / leg) };
+        // Опора — треть круга, как у RWR: стопа проходит чуть меньше, чем тело (у RWR
+        // бег медленнее), — на 0,1 м проскальзывает, сверху не видно.
+        let ground = 0.32;
+        let (land, off) = (11.0, -16.0);
+        // Полёт стопы: (доля круга, вперёд, высота) — толчок; стопа ещё уходит назад и вверх
+        // и выше всего позади, когда встаёт другая нога (0,5); потом высоко под тазом,
+        // колено вперёд, постановка.
+        let swing = [(ground, off, 0.5), (0.5, -24.0, 20.0), (0.67, -5.0, 17.0), (0.83, 3.0, 16.5), (0.93, 10.0, 5.0), (1.0, land, 0.5)];
+        let foot_at = |p: f32| -> (f32, f32) {
+            let p = p.rem_euclid(1.0);
+            if p < ground {
+                return (land + (off - land) * p / ground, 0.5);
+            }
+            // Катмулл — Ром по точкам полёта: плавная дуга без углов.
+            let i = swing.windows(2).position(|w| p <= w[1].0).unwrap_or(swing.len() - 2);
+            let at = |k: isize| swing[k.clamp(0, swing.len() as isize - 1) as usize];
+            let (p0, p1, p2, p3) = (at(i as isize - 1), at(i as isize), at(i as isize + 1), at(i as isize + 2));
+            let t = (p - p1.0) / (p2.0 - p1.0).max(1e-4);
+            let cr = |a: f32, b: f32, c: f32, d: f32| 0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t + (3.0 * b - a - 3.0 * c + d) * t * t * t);
+            (cr(p0.1, p1.1, p2.1, p3.1), cr(p0.2, p1.2, p2.2, p3.2).max(0.5))
+        };
+        let n = 12;
+        for k in 0..n {
+            let u = k as f32 / n as f32;
+            let ph = TAU * u;
+            let (rx, ry) = foot_at(u);
+            let (lx, ly) = foot_at(u + 0.5);
+            // Таз: выше всего — когда стопа встаёт, ниже всего — посередине опоры; назад
+            // посередине опоры; вбок — к опорной ноге (правая — первая половина круга).
+            let hip_y = 27.6 + 1.8 * (2.0 * ph).cos();
+            let hips = v(-1.4 * (1.0 - (2.0 * ph).cos()), hip_y, -0.3 - 1.7 + 1.7 * (ph - 0.5).cos());
+            // Оружие у пояса, в такт шагу вбок: правая нога впереди (u = 0) — влево.
+            let swing_z = -(ph).cos();
+            let hand_y = 35.0 - 0.4 * (hip_y - 27.6);
+            let s = Shape {
+                hips,
+                pitch: 0.5 + 0.05 * (1.0 - (2.0 * ph).cos()),
+                yaw: 0.12 * ph.cos(),
+                head_up: 0.45,
+                feet: [v(rx, ry, 4.0), v(lx, ly, -4.8)],
+                knees: [v(1.0, 0.2, 0.05), v(1.0, 0.2, -0.05)],
+                hands: [v(hips.x + 14.0, hand_y, hips.z + 3.0 + 4.0 * swing_z), v(hips.x + 18.5, hand_y - 1.0, hips.z - 4.5 + 4.5 * swing_z)],
+                elbows: [v(-0.3, -1.0, 0.9), v(0.1, -1.0, -0.8)],
+            };
+            let events = match k {
+                0 => vec![Event::Step(Side::Right)],
+                6 => vec![Event::Step(Side::Left)],
+                _ => vec![],
+            };
+            c.keys.push(key(self, (length * u * 1000.0).round() / 1000.0, &self.shaped(j, &s), events));
         }
         c
     }
@@ -364,7 +510,7 @@ impl CharModel {
     /// Лёжа с оружием в руках — как в игре (руки ставит `pose`).
     fn prone_with_weapon(&self, j: Joints) -> Pose {
         let mut p = self.shaped(j, &self.prone_shape(0.0));
-        self.hold_weapon(&mut p, j, Motion { prone: 1.0, ..Default::default() }, 0.0);
+        self.hold_weapon(&mut p, j, Motion { prone: 1.0, ..Default::default() }, 0.0, true);
         p
     }
 

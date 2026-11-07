@@ -321,3 +321,16 @@ pub fn perf(painter: &Painter, rect: Rect, fps: &str, debug: Option<Vec<String>>
         }
     }
 }
+
+/// Подсказка наблюдателю внизу: как водить камеру.
+pub fn spectator_hint(painter: &Painter, rect: Rect, free: bool) {
+    let text = if free {
+        "Свободная камера: WASD (Shift — быстрее), тащить — правая кнопка, колесо — высота · Tab — за солдатом"
+    } else {
+        "Tab — следующий солдат · WASD или Пробел — свободная камера · колесо — высота"
+    };
+    let at = rect.center_bottom() - vec2(0.0, 26.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(13.0), DIM);
+    painter.rect_filled(Rect::from_center_size(at, galley.size() + vec2(24.0, 12.0)), 6, PANEL);
+    painter.galley(at - galley.size() * 0.5, galley, DIM);
+}

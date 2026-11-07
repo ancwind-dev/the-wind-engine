@@ -1,8 +1,8 @@
-// Клип «prone, moving forwards» — ползёт: локоть и противоположное колено, два толчка за круг. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
+// Клип «prone, moving forwards» — ползёт: рука и колено одной стороны вперёд, потом другой; два толчка за круг. Стандарт анимаций движка: точки скелета в вокселях, x — вперёд,
 // y — вверх от земли, z — вправо (см. crates/wind_render/src/anim.rs).
 (
     key: "prone, moving forwards",
-    about: "ползёт: локоть и противоположное колено, два толчка за круг",
+    about: "ползёт: рука и колено одной стороны вперёд, потом другой; два толчка за круг",
     source: "свой: позы задаёт генератор wind_lab --make-clips (character/make.rs)",
     looped: true,
     length: 0.4,
@@ -14,37 +14,53 @@
     keys: [
         (
             time: 0.0,
-            points: (head: (9.25, 14.7, -0.3), neck: (6.21, 8.4, -0.3), rightshoulder: (3.25, 7.89, 6.7), leftshoulder: (3.25, 7.89, -7.3), rightelbow: (6.47, 0.75, 8.34), leftelbow: (10.4, 4.55, -5.98), righthand: (11.0, 4.0, 4.0), lefthand: (17.0, 4.0, -3.5), midspine: (-6.6, 6.19, -0.3), righthip: (-13.5, 5.0, 4.7), lefthip: (-13.5, 5.0, -5.3), rightknee: (-27.16, 1.76, 9.99), leftknee: (-26.37, 1.32, -12.07), rightfoot: (-40.0, 1.5, 8.0), leftfoot: (-39.0, 1.6, -9.0)),
+            points: (head: (7.75, 14.3, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.97, 2.5, 11.32), leftelbow: (5.6, 1.93, -11.58), righthand: (10.5, 3.35, 5.95), lefthand: (10.5, 1.15, -6.55), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-26.38, 0.41, 13.53), leftknee: (-26.38, 0.41, -14.13), rightfoot: (-37.86, 1.68, 7.57), leftfoot: (-37.86, 1.68, -8.17)),
         ),
         (
-            time: 0.05,
-            points: (head: (8.78, 14.3, -1.02), neck: (5.74, 8.0, -0.85), rightshoulder: (3.18, 7.49, 6.31), leftshoulder: (2.39, 7.49, -7.67), rightelbow: (8.99, 2.07, 7.22), leftelbow: (8.04, 1.83, -7.48), righthand: (14.54, 5.06, 4.0), lefthand: (13.46, 4.0, -3.5), midspine: (-7.05, 5.79, -0.12), righthip: (-13.85, 4.6, 5.26), lefthip: (-14.02, 4.6, -4.73), rightknee: (-27.34, 1.29, 10.94), leftknee: (-22.31, 0.47, -16.53), rightfoot: (-40.0, 1.5, 8.0), leftfoot: (-34.87, 1.57, -13.33)),
+            time: 0.033,
+            points: (head: (8.42, 14.48, 0.72), neck: (5.38, 8.17, 0.59), rightshoulder: (2.11, 7.66, 7.45), leftshoulder: (2.74, 7.66, -6.54), rightelbow: (8.52, 3.27, 9.36), leftelbow: (3.86, 2.76, -12.76), righthand: (13.94, 3.23, 4.82), lefthand: (8.44, 0.98, -7.68), midspine: (-7.42, 5.96, 0.01), righthip: (-14.37, 4.78, 4.7), lefthip: (-14.24, 4.78, -5.3), rightknee: (-23.49, 0.5, 15.81), leftknee: (-27.53, 0.41, -10.72), rightfoot: (-34.07, 1.62, 8.33), leftfoot: (-39.98, 1.8, -7.25)),
+        ),
+        (
+            time: 0.067,
+            points: (head: (8.38, 14.83, 1.47), neck: (5.34, 8.52, 1.23), rightshoulder: (1.85, 8.01, 7.98), leftshoulder: (2.94, 8.01, -5.97), rightelbow: (9.06, 4.91, 6.47), leftelbow: (2.49, 4.46, -13.13), righthand: (15.4, 2.77, 4.16), lefthand: (6.43, 0.85, -8.5), midspine: (-7.43, 6.31, 0.24), righthip: (-14.42, 5.13, 4.7), lefthip: (-14.19, 5.13, -5.3), rightknee: (-21.94, 1.42, 17.14), leftknee: (-28.6, 1.52, -7.36), rightfoot: (-32.04, 1.53, 8.97), leftfoot: (-41.57, 1.97, -6.53)),
         ),
         (
             time: 0.1,
-            points: (head: (7.68, 14.7, -1.32), neck: (4.65, 8.4, -1.08), rightshoulder: (2.26, 7.89, 6.14), leftshoulder: (1.14, 7.89, -7.82), rightelbow: (9.4, 4.28, 6.21), leftelbow: (6.59, 2.03, -7.6), righthand: (16.0, 5.5, 4.0), lefthand: (12.0, 4.0, -3.5), midspine: (-8.12, 6.19, -0.05), righthip: (-14.88, 5.0, 5.5), lefthip: (-15.12, 5.0, -4.5), rightknee: (-27.7, 1.04, 12.2), leftknee: (-20.43, 0.45, -17.77), rightfoot: (-40.0, 1.5, 8.0), leftfoot: (-33.11, 1.55, -15.13)),
+            points: (head: (7.66, 15.0, 1.75), neck: (4.63, 8.7, 1.47), rightshoulder: (1.06, 8.19, 8.18), leftshoulder: (2.31, 8.19, -5.77), rightelbow: (8.09, 4.73, 6.59), leftelbow: (1.61, 5.22, -13.16), righthand: (14.28, 2.27, 4.22), lefthand: (5.0, 0.8, -8.8), midspine: (-8.13, 6.49, 0.32), righthip: (-15.13, 5.3, 4.7), lefthip: (-14.87, 5.3, -5.3), rightknee: (-22.04, 1.8, 17.55), leftknee: (-29.63, 2.85, -6.26), rightfoot: (-32.0, 1.5, 9.2), leftfoot: (-42.61, 2.05, -6.29)),
             events: [Push],
         ),
         (
-            time: 0.15,
-            points: (head: (6.66, 14.3, -1.02), neck: (3.62, 8.0, -0.85), rightshoulder: (1.06, 7.49, 6.31), leftshoulder: (0.27, 7.49, -7.67), rightelbow: (8.05, 3.6, 6.42), leftelbow: (7.12, 3.51, -6.59), righthand: (14.54, 5.06, 4.0), lefthand: (13.46, 4.0, -3.5), midspine: (-9.17, 5.79, -0.12), righthip: (-15.98, 4.6, 5.26), lefthip: (-16.15, 4.6, -4.73), rightknee: (-28.09, 0.5, 13.1), leftknee: (-22.68, 0.43, -17.57), rightfoot: (-40.01, 1.5, 8.0), leftfoot: (-34.95, 1.54, -13.42)),
+            time: 0.133,
+            points: (head: (6.99, 14.83, 1.47), neck: (3.96, 8.52, 1.23), rightshoulder: (0.46, 8.01, 7.98), leftshoulder: (1.55, 8.01, -5.97), rightelbow: (7.47, 4.44, 6.53), leftelbow: (0.66, 4.81, -13.25), righthand: (13.66, 1.88, 4.26), lefthand: (5.04, 1.95, -8.5), midspine: (-8.82, 6.31, 0.24), righthip: (-15.81, 5.13, 4.7), lefthip: (-15.58, 5.13, -5.3), rightknee: (-23.32, 1.42, 17.14), leftknee: (-29.99, 1.52, -7.36), rightfoot: (-33.43, 1.53, 8.97), leftfoot: (-42.96, 1.97, -6.53)),
+        ),
+        (
+            time: 0.167,
+            points: (head: (7.04, 14.48, 0.72), neck: (4.0, 8.17, 0.59), rightshoulder: (0.73, 7.66, 7.45), leftshoulder: (1.36, 7.66, -6.54), rightelbow: (6.88, 2.74, 8.8), leftelbow: (2.4, 3.05, -12.99), righthand: (12.56, 1.32, 4.82), lefthand: (7.06, 2.88, -7.68), midspine: (-8.8, 5.96, 0.01), righthip: (-15.76, 4.78, 4.7), lefthip: (-15.63, 4.78, -5.3), rightknee: (-24.88, 0.5, 15.81), leftknee: (-28.91, 0.41, -10.72), rightfoot: (-35.45, 1.62, 8.33), leftfoot: (-41.37, 1.8, -7.25)),
         ),
         (
             time: 0.2,
-            points: (head: (6.25, 14.7, -0.3), neck: (3.21, 8.4, -0.3), rightshoulder: (0.25, 7.89, 6.7), leftshoulder: (0.25, 7.89, -7.3), rightelbow: (5.32, 1.76, 7.57), leftelbow: (7.78, 5.59, -5.87), righthand: (11.0, 4.0, 4.0), lefthand: (14.54, 4.57, -4.06), midspine: (-9.6, 6.19, -0.3), righthip: (-16.5, 5.0, 4.7), lefthip: (-16.5, 5.0, -5.3), rightknee: (-28.09, 0.56, 13.12), leftknee: (-27.36, 0.49, -14.61), rightfoot: (-40.0, 1.5, 8.0), leftfoot: (-39.04, 1.59, -9.02)),
+            points: (head: (7.75, 14.3, -0.3), neck: (4.71, 8.0, -0.3), rightshoulder: (1.75, 7.49, 6.7), leftshoulder: (1.75, 7.49, -7.3), rightelbow: (5.6, 1.93, 10.98), leftelbow: (5.97, 2.5, -11.92), righthand: (10.5, 1.15, 5.95), lefthand: (10.5, 3.35, -6.55), midspine: (-8.1, 5.79, -0.3), righthip: (-15.0, 4.6, 4.7), lefthip: (-15.0, 4.6, -5.3), rightknee: (-26.38, 0.41, 13.53), leftknee: (-26.38, 0.41, -14.13), rightfoot: (-37.86, 1.68, 7.57), leftfoot: (-37.86, 1.68, -8.17)),
         ),
         (
-            time: 0.25,
-            points: (head: (6.66, 14.3, 0.42), neck: (3.62, 8.0, 0.25), rightshoulder: (0.27, 7.49, 7.07), leftshoulder: (1.06, 7.49, -6.91), rightelbow: (3.55, 0.34, 8.55), leftelbow: (8.84, 5.97, -5.82), righthand: (7.59, 3.89, 3.97), lefthand: (15.75, 5.66, -4.34), midspine: (-9.17, 5.79, -0.48), righthip: (-16.15, 4.6, 4.13), lefthip: (-15.98, 4.6, -5.86), rightknee: (-24.62, 0.44, 15.79), leftknee: (-27.41, 0.48, -14.66), rightfoot: (-36.64, 1.45, 10.96), leftfoot: (-39.08, 1.58, -9.03)),
+            time: 0.233,
+            points: (head: (8.42, 14.48, -1.32), neck: (5.38, 8.17, -1.19), rightshoulder: (2.74, 7.66, 5.94), leftshoulder: (2.11, 7.66, -8.05), rightelbow: (3.86, 2.76, 12.16), leftelbow: (8.52, 3.27, -9.96), righthand: (8.44, 0.98, 7.08), lefthand: (13.94, 3.23, -5.42), midspine: (-7.42, 5.96, -0.61), righthip: (-14.24, 4.78, 4.7), lefthip: (-14.37, 4.78, -5.3), rightknee: (-27.53, 0.41, 10.12), leftknee: (-23.49, 0.5, -16.41), rightfoot: (-39.98, 1.8, 6.65), leftfoot: (-34.07, 1.62, -8.93)),
+        ),
+        (
+            time: 0.267,
+            points: (head: (8.38, 14.83, -2.07), neck: (5.34, 8.52, -1.83), rightshoulder: (2.94, 8.01, 5.37), leftshoulder: (1.85, 8.01, -8.58), rightelbow: (2.49, 4.46, 12.53), leftelbow: (9.06, 4.91, -7.07), righthand: (6.43, 0.85, 7.9), lefthand: (15.4, 2.77, -4.76), midspine: (-7.43, 6.31, -0.84), righthip: (-14.19, 5.13, 4.7), lefthip: (-14.42, 5.13, -5.3), rightknee: (-28.6, 1.52, 6.76), leftknee: (-21.94, 1.42, -17.74), rightfoot: (-41.57, 1.97, 5.93), leftfoot: (-32.04, 1.53, -9.57)),
         ),
         (
             time: 0.3,
-            points: (head: (7.68, 14.7, 0.72), neck: (4.65, 8.4, 0.48), rightshoulder: (1.14, 7.89, 7.22), leftshoulder: (2.26, 7.89, -6.74), rightelbow: (2.9, 0.34, 9.21), leftelbow: (10.05, 6.4, -5.73), righthand: (6.08, 3.89, 3.97), lefthand: (16.98, 6.11, -4.32), midspine: (-8.12, 6.19, -0.55), righthip: (-15.12, 5.0, 3.9), lefthip: (-14.88, 5.0, -6.1), rightknee: (-22.74, 0.46, 16.0), leftknee: (-26.98, 0.76, -13.88), rightfoot: (-35.1, 1.47, 12.09), leftfoot: (-39.0, 1.6, -9.0)),
+            points: (head: (7.66, 15.0, -2.35), neck: (4.63, 8.7, -2.07), rightshoulder: (2.31, 8.19, 5.17), leftshoulder: (1.06, 8.19, -8.78), rightelbow: (1.61, 5.22, 12.56), leftelbow: (8.09, 4.73, -7.19), righthand: (5.0, 0.8, 8.2), lefthand: (14.28, 2.27, -4.82), midspine: (-8.13, 6.49, -0.92), righthip: (-14.87, 5.3, 4.7), lefthip: (-15.13, 5.3, -5.3), rightknee: (-29.63, 2.85, 5.66), leftknee: (-22.04, 1.8, -18.15), rightfoot: (-42.61, 2.05, 5.69), leftfoot: (-32.0, 1.5, -9.8)),
             events: [Push],
         ),
         (
-            time: 0.35,
-            points: (head: (8.78, 14.3, 0.42), neck: (5.74, 8.0, 0.25), rightshoulder: (2.39, 7.49, 7.07), leftshoulder: (3.18, 7.49, -6.91), rightelbow: (4.52, 0.04, 9.05), leftelbow: (10.91, 5.86, -5.66), righthand: (7.73, 3.69, 3.91), lefthand: (17.78, 5.45, -4.04), midspine: (-7.05, 5.79, -0.48), righthip: (-14.02, 4.6, 4.13), lefthip: (-13.85, 4.6, -5.86), rightknee: (-24.07, 0.48, 14.48), leftknee: (-26.6, 0.92, -12.86), rightfoot: (-36.52, 1.49, 10.86), leftfoot: (-39.0, 1.6, -9.0)),
+            time: 0.333,
+            points: (head: (6.99, 14.83, -2.07), neck: (3.96, 8.52, -1.83), rightshoulder: (1.55, 8.01, 5.37), leftshoulder: (0.46, 8.01, -8.58), rightelbow: (0.66, 4.81, 12.65), leftelbow: (7.47, 4.44, -7.13), righthand: (5.04, 1.95, 7.9), lefthand: (13.66, 1.88, -4.86), midspine: (-8.82, 6.31, -0.84), righthip: (-15.58, 5.13, 4.7), lefthip: (-15.81, 5.13, -5.3), rightknee: (-29.99, 1.52, 6.76), leftknee: (-23.32, 1.42, -17.74), rightfoot: (-42.96, 1.97, 5.93), leftfoot: (-33.43, 1.53, -9.57)),
+        ),
+        (
+            time: 0.367,
+            points: (head: (7.04, 14.48, -1.32), neck: (4.0, 8.17, -1.19), rightshoulder: (1.36, 7.66, 5.94), leftshoulder: (0.73, 7.66, -8.05), rightelbow: (2.4, 3.05, 12.39), leftelbow: (6.88, 2.74, -9.4), righthand: (7.06, 2.88, 7.07), lefthand: (12.56, 1.33, -5.43), midspine: (-8.8, 5.96, -0.61), righthip: (-15.63, 4.77, 4.7), lefthip: (-15.76, 4.77, -5.3), rightknee: (-28.91, 0.41, 10.12), leftknee: (-24.88, 0.5, -16.41), rightfoot: (-41.37, 1.8, 6.65), leftfoot: (-35.45, 1.62, -8.93)),
         ),
     ],
 )

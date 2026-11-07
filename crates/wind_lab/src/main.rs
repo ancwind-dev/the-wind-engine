@@ -11,6 +11,7 @@
 //! cargo run --release -p wind_lab -- --rwr-report [часть имени]  — ВРЕМЕННО: сводка анимаций RWR
 //! cargo run --release -p wind_lab -- --rwr-sheet "имя или #номер" лист.png [поз]  — лист кадров RWR
 //! cargo run --release -p wind_lab -- --anim-sheet ключ лист.png [поз]  — лист кадров нашего клипа
+//! cargo run --release -p wind_lab -- --pose-sheet скорость лист.png [поз] [crouch|prone|aim]  — поза как в игре
 //! cargo run --release -p wind_lab -- --make-clips [--force ключ|all]  — наши клипы в стандарте анимаций
 //! cargo run --release -p wind_lab -- --import-mocap запись.bvh running "источник"
 //!     — круг шага из записи движений в клип стандарта data/animations/running.ron
@@ -417,6 +418,33 @@ fn analysis_tool(args: &[String]) -> Option<Result<String, String>> {
             Ok(format!("{}\n{out}: {n} поз через {:.3} единиц времени", anim.report(), span / n as f32))
         })(),
         // Лист кадров нашего клипа из data/animations (по ключу).
+        // Лист кадров позы «как в игре»: скорость, стойка — за круг шага (руки к оружию,
+        // оружие поперёк на бегу и т. п. — всё, что делает игра поверх клипов).
+        "--pose-sheet" => (|| {
+            let project = project::sample().ok_or("не найдена наша игра (wind.project)")?;
+            let set = wind_render::character::CharacterSet::load(&project.data_dir())?;
+            let m = set.models.first().ok_or("нет моделей солдат")?;
+            let (Some(speed), Some(out)) = (args.get(1).and_then(|v| v.parse::<f32>().ok()), args.get(2)) else {
+                return Err("нужно: --pose-sheet скорость лист.png [поз] [crouch|prone|aim]".to_owned());
+            };
+            let n = args.get(3).and_then(|v| v.parse::<usize>().ok()).unwrap_or(12).clamp(1, 24);
+            let mode = args.get(4).map(String::as_str).unwrap_or("");
+            let carry = if mode == "aim" { 0.0 } else { wind_render::character::run_share(speed) };
+            let (crouch, prone) = match mode {
+                "crouch" => (1.0, 0.0),
+                "prone" => (0.0, 1.0),
+                _ => (0.0, 0.0),
+            };
+            let poses = (0..n)
+                .map(|k| {
+                    let phase = std::f32::consts::TAU * k as f32 / n as f32;
+                    let pose = m.pose(wind_render::Motion { speed, phase, dir: wind_render::glam::Vec2::X, carry, crouch, prone, ..Default::default() });
+                    m.points_of(&pose).ok_or("у модели нет скелета")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            anim_sheet::save(&poses, Path::new(out))?;
+            Ok(format!("{speed} м/с {mode}: {n} поз за круг; {out}"))
+        })(),
         "--anim-sheet" => (|| {
             let project = project::sample().ok_or("не найдена наша игра (wind.project)")?;
             let (clips, _) = wind_render::anim::load_dir(&project.data_dir().join("animations"));

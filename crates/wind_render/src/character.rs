@@ -185,7 +185,7 @@ impl CharacterSet {
         let Some(m) = self.models.first() else { return stride_rate(speed) };
         let stride = |k: &str| m.clips.get(k).map(|c| c.stride).filter(|&s| s > 0.01);
         let standing = match (stride("walking"), stride("running")) {
-            (Some(w), Some(r)) => w + (r * gait::RUN_STRIDE - w) * run_share(speed),
+            (Some(w), Some(r)) => w + (r - w) * run_share(speed),
             _ => return stride_rate(speed),
         };
         let stride = if prone {
@@ -257,7 +257,28 @@ impl CharModel {
             return self.prone_pose(m, j, dir);
         }
         let (mut p, twist) = self.upright(m, j, dir);
-        self.hold_weapon(&mut p, j, Motion { prone: 0.0, ..m }, twist);
+        // Бегом, не целясь, руки — из клипа бега (оружие у пояса, качается в такт шагу, как у
+        // RWR); целясь — держат оружие стволом вперёд. Между ними — одна мера `carry`: кисть
+        // идёт от одного хвата к другому, а локоть ставится заново — длина руки не меняется.
+        // Раньше кисть и локоть смешивались по отдельности, да ещё со вторым хватом «поперёк
+        // груди» — рука то укорачивалась, то вытягивалась, и руки болтались.
+        let arms = self.run_arms(m.phase, dir);
+        self.hold_weapon(&mut p, j, Motion { prone: 0.0, ..m }, twist, arms.is_none());
+        let k = (m.carry * (1.0 - m.crouch)).clamp(0.0, 1.0);
+        if k > 0.0
+            && let Some(arms) = arms
+        {
+            let r = &self.rest;
+            for side in 0..2 {
+                let ((elbow, ev), (hand, hv)) = (arms[side], arms[2 + side]);
+                let sh = p[j.shoulder[side]];
+                let (upper, fore) = (r[j.shoulder[side]].distance(r[j.elbow[side]]), r[j.elbow[side]].distance(r[j.hand[side]]));
+                let target = sh + (p[hand].lerp(hv, k) - sh).clamp_length_max(upper + fore - 0.01);
+                let bend = (p[elbow] - (sh + p[hand]) * 0.5).lerp(ev - (sh + hv) * 0.5, k);
+                p[elbow] = two_bone(sh, target, upper, fore, bend);
+                p[hand] = target;
+            }
+        }
         if m.prone > 0.0 {
             let (key, u) = if m.rising { ("leaving prone", 1.0 - m.prone) } else { ("going prone", m.prone) };
             if let Some(clip) = self.clips.get(key) {
@@ -307,7 +328,7 @@ impl CharModel {
             return self.rest.clone();
         };
         let mut held = crawl.clone();
-        self.hold_weapon(&mut held, j, m, 0.0);
+        self.hold_weapon(&mut held, j, m, 0.0, true);
         let k = (m.speed / full).clamp(0.0, 1.0);
         held.iter().zip(&crawl).map(|(a, b)| a.lerp(*b, k)).collect()
     }
@@ -316,14 +337,16 @@ impl CharModel {
     /// для редактора анимаций: показать клип так, как он будет в игре.
     pub fn with_weapon(&self, mut p: Pose) -> Pose {
         if let Some(j) = self.joints {
-            self.hold_weapon(&mut p, j, Motion::default(), 0.0);
+            self.hold_weapon(&mut p, j, Motion::default(), 0.0, true);
         }
         p
     }
 
     /// Руки: правая у приклада, левая на цевье, ствол вперёд — туда, куда смотрит
     /// солдат. Бегом оружие чуть ниже, стволом немного вниз, и покачивается с плечами.
-    fn hold_weapon(&self, p: &mut Pose, j: Joints, m: Motion, twist: f32) {
+    /// `across` — неся оружие (`carry`), держать его поперёк груди; без этого кисти
+    /// ставит клип бега (см. `pose`), а здесь — только прицел.
+    fn hold_weapon(&self, p: &mut Pose, j: Joints, m: Motion, twist: f32, across: bool) {
         let r = &self.rest;
         let (run, moving, ph) = (run_share(m.speed), (m.speed / 1.2).clamp(0.0, 1.0), m.phase);
         // Лёжа оружие не несут поперёк груди, и плечи не разворачивают: корпус лежит.
@@ -333,9 +356,13 @@ impl CharModel {
         // рука дотягивается до цевья. Неся оружие на бегу — прямо.
         let turn = Quat::from_rotation_y((-BLADE * (1.0 - carry) + twist) * (1.0 - lying));
         let pivot = p[j.mid];
+        let neck = p[j.neck];
         for i in [j.shoulder[0], j.shoulder[1], j.neck] {
             p[i] = pivot + turn * (p[i] - pivot);
         }
+        // Голова — за шеей: на наклонённом корпусе (бег) шея уходит вбок, и шея тянулась бы.
+        let moved = p[j.neck] - neck;
+        p[j.head] += moved;
         let (rs, ls) = (p[j.shoulder[0]], p[j.shoulder[1]]);
         let sway = Vec3::Y * (2.0 * ph).cos() * 0.6 * run * moving;
         // Целится: рукоять — перед правой стороной груди (снаружи тела), ствол — по взгляду,
@@ -348,8 +375,9 @@ impl CharModel {
         let chest = (rs + ls) * 0.5;
         let carry_grip = chest + Vec3::new(6.0, -7.0, 4.0) + sway;
         let carry_dir = Vec3::new(0.25, 0.08, -0.96).normalize();
-        let grip = aim_grip.lerp(carry_grip, carry);
-        let dir = aim_dir.lerp(carry_dir, carry).normalize();
+        let hold = if across { carry } else { 0.0 };
+        let grip = aim_grip.lerp(carry_grip, hold);
+        let dir = aim_dir.lerp(carry_dir, hold).normalize();
         // Цевьё — на линии ствола, докуда левая рука достаёт (5–10 вокселей от рукояти):
         // иначе ствол повело бы к руке.
         let reach_left = (r[j.shoulder[1]].distance(r[j.elbow[1]]) + r[j.elbow[1]].distance(r[j.hand[1]])) * 0.97;
@@ -802,6 +830,30 @@ mod tests {
         }
     }
 
+    /// Бегом руки переходят от прицела к клипу бега (оружие у пояса) по `carry` — длины
+    /// плеча и предплечья при этом не меняются (раньше рука укорачивалась, и руки болтались).
+    #[test]
+    fn running_arms_keep_their_length_between_aim_and_carry() {
+        let set = CharacterSet::load(&data()).unwrap();
+        for m in &set.models {
+            let j = m.joints.unwrap();
+            let len = |p: &Pose, a: usize, b: usize| p[a].distance(p[b]);
+            for speed in [3.0, 4.5, 6.0] {
+                for carry in [0.0, 0.3, 0.6, 1.0] {
+                    for k in 0..16 {
+                        let p = m.pose(Motion { speed, phase: k as f32 * 0.4, carry, ..Default::default() });
+                        for side in 0..2 {
+                            for (a, b) in [(j.shoulder[side], j.elbow[side]), (j.elbow[side], j.hand[side])] {
+                                let (want, got) = (len(&m.rest, a, b), len(&p, a, b));
+                                assert!((want - got).abs() < 0.1, "{}, {speed} м/с, carry {carry}: рука {got:.2} вместо {want:.2}", m.name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn walking_parts_turn_smoothly() {
         let set = CharacterSet::load(&data()).unwrap();
@@ -831,9 +883,10 @@ mod tests {
             for side in 0..2 {
                 let thigh = m.rest[j.hip[side]].distance(m.rest[j.knee[side]]);
                 let now = pose[j.hip[side]].distance(pose[j.knee[side]]);
-                assert!((thigh - now).abs() < 0.05, "бедро {thigh} → {now}");
-                // Бегом пятка подлетает выше, чем шагом, но не выше колена другой ноги.
-                assert!(pose[j.foot[side]].y < 10.0);
+                // Между собранными кадрами — по прямой: на бегу бедро короче на доли вокселя.
+                assert!((thigh - now).abs() < 0.15, "бедро {thigh} → {now}");
+                // Бегом пятка после толчка взлетает высоко (как у RWR), но не выше таза.
+                assert!(pose[j.foot[side]].y < pose[j.hip[side]].y - 6.0, "стопа {:?}", pose[j.foot[side]]);
             }
         }
         assert!(m.weapon_frame(&m.pose(Motion::default())).is_some());

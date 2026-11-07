@@ -112,7 +112,7 @@ fn parse_args() -> Result<Args, String> {
                     "wind_client                                — главное меню (настройки — Esc → Настройки)\n\
                      wind_client --play                         — сразу в бой против ИИ\n\
                      wind_client --connect адрес [--name имя]   — сразу на сервер\n\
-                     wind_client --spectate [--follow N]        — наблюдать за боем (Tab — следующий солдат)\n\
+                     wind_client --spectate [--follow N]        — наблюдать за боем (Tab — следующий солдат, WASD — свободная камера)\n\
                      wind_client --bench секунд [--soldiers N]   — замер FPS, без игрока\n\
                      wind_client --export-models                — выгрузить модели солдата в data/models/soldier/*.vox\n\
                      wind_client --export-sounds                — сохранить все звуки в notes/Звуки/*.wav\n\
@@ -236,6 +236,9 @@ struct Session {
     cursor_ndc: Vec2,
     /// За кем следит камера в режиме наблюдателя.
     follow: u32,
+    /// Наблюдатель водит камеру сам (WASD, правая или средняя кнопка — тащить), а не
+    /// следит за солдатом. Tab — снова за солдатом, Пробел — переключить.
+    free_cam: bool,
     /// Свой солдат на клиенте: двигается сразу, без ожидания сервера.
     pilot: Pilot,
     /// Отдача: 0 — спокойно, 1 — сильно. Растёт с каждым своим выстрелом и спадает.
@@ -284,6 +287,7 @@ impl Session {
             command: (Command::None, 0.0),
             rank_seen: None,
             boat_hold: 0.0,
+            free_cam: false,
             stance: wind_sim::Stance::Stand,
             stance_timer: 0.0,
             ctrl_was: false,
@@ -809,13 +813,20 @@ impl Game {
         s.shots_seen = shots;
         s.kick *= (-dt * 7.0).exp();
 
-        // Камера плавно идёт за своим солдатом, а у наблюдателя — за выбранным (Tab — следующий).
+        // Камера плавно идёт за своим солдатом, а у наблюдателя — за выбранным (Tab — следующий)
+        // или свободная (WASD, тащить правой или средней кнопкой; Пробел — переключить).
+        let spectator = !view.has_me && !s.backdrop && self.bench.is_none();
         if controls && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
             s.follow += 1;
+            s.free_cam = false;
+        }
+        if spectator && controls {
+            free_camera(s, ctx, &response, rect, aspect, dt);
         }
         let bench = self.bench.is_some();
+        let free = spectator && s.free_cam;
         let focus = view.me_pos.or_else(|| {
-            if bench {
+            if bench || free {
                 return None;
             }
             let next = view.soldiers.iter().filter(|x| x.id >= s.follow).min_by_key(|x| x.id);
@@ -909,6 +920,9 @@ impl Game {
         }
         if !s.backdrop {
             hud::draw(&painter, rect, &view, s.source.status(), !view.has_me);
+            if !view.has_me && self.bench.is_none() {
+                hud::spectator_hint(&painter, rect, s.free_cam);
+            }
             hud::round(&painter, rect, &view);
             if !bench && let Some(map) = s.source.map() {
                 let facing = s.source.own_id().and_then(|id| view.soldiers.iter().find(|x| x.id == id)).map(|x| x.facing);
@@ -1023,6 +1037,54 @@ fn squad_rings(view: &source::View, aim: Vec2) -> Vec<(Vec2, f32, [f32; 3])> {
 const SQUAD_COLOR: [f32; 3] = [0.45, 0.95, 0.45];
 const HOLD_COLOR: [f32; 3] = [1.0, 0.85, 0.3];
 const RECRUIT_RADIUS: f32 = 4.0;
+
+/// Свободная камера наблюдателя: WASD — по экрану (Shift — быстрее), правая или средняя
+/// кнопка — тащить землю, Пробел — включить или выключить. Начал водить — камера больше
+/// не следит за солдатом (Tab — снова следить). Скорость — по высоте камеры: издалека
+/// быстрее, вблизи медленнее.
+fn free_camera(s: &mut Session, ctx: &egui::Context, response: &egui::Response, rect: egui::Rect, aspect: f32, dt: f32) {
+    if ctx.egui_wants_keyboard_input() {
+        return;
+    }
+    let (forward, right) = s.camera.screen_axes();
+    let (mut d, fast, space) = ctx.input(|i| {
+        let mut d = Vec2::ZERO;
+        for (key, v) in [(egui::Key::W, Vec2::Y), (egui::Key::S, -Vec2::Y), (egui::Key::D, Vec2::X), (egui::Key::A, -Vec2::X)] {
+            if i.key_down(key) {
+                d += v;
+            }
+        }
+        (d, i.modifiers.shift, i.key_pressed(egui::Key::Space))
+    });
+    if space {
+        s.free_cam = !s.free_cam;
+    }
+    if d != Vec2::ZERO {
+        s.free_cam = true;
+        d = d.normalize();
+        let speed = s.camera.distance * if fast { 2.4 } else { 0.9 };
+        s.camera.target += (forward * d.y + right * d.x) * speed * dt;
+    }
+    // Тащим землю: точка под курсором остаётся под курсором.
+    let dragging = response.dragged_by(egui::PointerButton::Secondary) || response.dragged_by(egui::PointerButton::Middle);
+    if dragging && let Some(now) = response.interact_pointer_pos() {
+        let delta = response.drag_delta();
+        let ndc = |p: egui::Pos2| Vec2::new((p.x - rect.left()) / rect.width() * 2.0 - 1.0, 1.0 - (p.y - rect.top()) / rect.height() * 2.0);
+        let h = s.camera.target_height;
+        if let (Some(a), Some(b)) = (s.camera.ground_point(ndc(now - delta), aspect, h), s.camera.ground_point(ndc(now), aspect, h)) {
+            s.camera.target += a - b;
+            s.free_cam = true;
+        }
+    }
+    if s.free_cam
+        && let Some(map) = s.source.map()
+    {
+        let size = Vec2::new(map.width as f32, map.height as f32);
+        s.camera.target = s.camera.target.clamp(Vec2::ZERO, size);
+        let k = 1.0 - (-dt * 8.0).exp();
+        s.camera.target_height += (map.height_at(s.camera.target) - s.camera.target_height) * k;
+    }
+}
 
 #[cfg(test)]
 mod tests {

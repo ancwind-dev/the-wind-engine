@@ -9,9 +9,6 @@ use crate::mocap::{ClipFrame, EDGES};
 use glam::{Quat, Vec2, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
-/// Во сколько раз шаг бега длиннее, чем в записи: бег в игре (6 м/с) быстрее записи
-/// (≈ 3 м/с) — иначе ноги семенили бы.
-pub const RUN_STRIDE: f32 = 1.3;
 
 impl Joints {
     /// Номер точки по имени, как в `mocap::EDGES`.
@@ -90,23 +87,18 @@ impl CharModel {
             let r = ra[i].lerp(rb[i], rt);
             *v = v.lerp(w.lerp(r, share), moving);
         }
-        // Бегом шаг длиннее записи: стопы дальше от таза по ходу, колени — заново.
-        let long = 1.0 + (RUN_STRIDE - 1.0) * share * moving;
-        if long > 1.001 {
-            let r = &self.rest;
-            for side in 0..2 {
-                let hip = p[j.hip[side]];
-                let off = p[j.foot[side]] - hip;
-                let thigh = r[j.hip[side]].distance(r[j.knee[side]]);
-                let shin = r[j.knee[side]].distance(r[j.foot[side]]);
-                let foot = hip + Vec3::new(off.x * long, off.y, off.z).clamp_length_max(thigh + shin - 0.05);
-                let bend = p[j.knee[side]] - (hip + p[j.foot[side]]) * 0.5;
-                p[j.foot[side]] = foot;
-                p[j.knee[side]] = two_bone(hip, foot, thigh, shin, bend);
-            }
-        }
         self.turn_legs(&mut p, j, turn);
         Some(p)
+    }
+
+    /// Локти и кисти из клипа бега на этой фазе — если бег держит оружие сам
+    /// (`Hands::Clip`: у пояса, качается в такт шагу).
+    pub(crate) fn run_arms(&self, phase: f32, dir: Vec2) -> Option<[(usize, Vec3); 4]> {
+        let run = self.clips.get("running").filter(|c| c.hands == crate::anim::Hands::Clip)?;
+        let j = self.joints?;
+        let (u, _) = Self::cycle_dir(phase, dir);
+        let (a, b, t) = run.around(u);
+        Some([j.elbow[0], j.elbow[1], j.hand[0], j.hand[1]].map(|i| (i, a[i].lerp(b[i], t))))
     }
 
     /// Круг движения `moving` поверх клипа на месте `still`: на месте — стойка, в движении
