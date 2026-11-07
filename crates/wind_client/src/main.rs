@@ -874,7 +874,6 @@ impl Game {
                 time,
                 dt,
             };
-            self.scene.grass = self.settings.grass;
             let frame = self.scene.build(&input);
             self.notes.extend(self.scene.take_notes());
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, WorldPaint(Arc::new(frame))));

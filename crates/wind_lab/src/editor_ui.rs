@@ -723,8 +723,6 @@ impl MapWorkspace {
             slider(ui, t("Обводка"), &mut a.outline, 0.0..=1.0);
             slider(ui, t("Затенение"), &mut a.occlusion, 0.0..=1.0);
             slider(ui, t("Виньетка"), &mut a.vignette, 0.0..=1.0);
-            slider(ui, t("Ветер: сила"), &mut a.wind, 0.0..=2.0);
-            slider(ui, t("Ветер: откуда"), &mut a.wind_direction, 0.0..=360.0);
             let mut color = |ui: &mut egui::Ui, name: &str, c: &mut [f32; 3]| {
                 theme::label(ui, name);
                 changed |= ui.color_edit_button_rgb(c).changed();

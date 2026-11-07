@@ -199,11 +199,6 @@ impl Menu {
             ui.end_row();
         });
         ui.label(RichText::new("Alt+Enter или F11 — переключить экран").small().color(DIM));
-        egui::Grid::new("graphics").num_columns(2).min_col_width(LABEL).spacing(vec2(12.0, 10.0)).show(ui, |ui| {
-            ui.label("Трава");
-            ui.checkbox(&mut s.grass, "рисовать").on_hover_text("Ковёр травы у камеры; на слабой видеокарте выключи — будет быстрее");
-            ui.end_row();
-        });
         ui.add_space(4.0);
         ui.label(RichText::new("Бой против ИИ").strong());
         ui.label(RichText::new("Применяется в следующем бою").small().color(DIM));

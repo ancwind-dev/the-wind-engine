@@ -22,58 +22,6 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
     Ok(mesh)
 }
 
-/// Меш как есть — для травы: позиции (с учётом узлов), все цвета вершин (`COLOR_0`,
-/// `COLOR_1`, … — линейные, как в файле) и треугольники.
-#[derive(Debug, Default)]
-pub struct Raw {
-    pub positions: Vec<Vec3>,
-    pub colors: Vec<Vec<Vec4>>,
-    pub indices: Vec<u32>,
-}
-
-pub fn load_raw(bytes: &[u8]) -> Result<Raw, String> {
-    let (doc, bin) = split_glb(bytes)?;
-    let json = Json::parse(doc)?;
-    let mut raw = Raw::default();
-    visit_meshes(&json, &mut |index, transform| {
-        let m = json.get("meshes").and_then(|m| m.at(index)).ok_or(format!("нет меша {index}"))?;
-        for p in m.get("primitives").map(Json::items).unwrap_or(&[]) {
-            if p.get("mode").and_then(Json::as_usize).unwrap_or(4) != 4 {
-                continue;
-            }
-            let attrs = p.get("attributes").ok_or("у примитива нет attributes")?;
-            let positions = read(&json, bin, attrs.get("POSITION").and_then(Json::as_usize).ok_or("нет POSITION")?)?;
-            let first = raw.positions.len() as u32;
-            raw.positions.extend(positions.iter().map(|v| transform.transform_point3(v.truncate())));
-            let mut k = 0;
-            while let Some(a) = attrs.get(&format!("COLOR_{k}")).and_then(Json::as_usize) {
-                if raw.colors.len() <= k {
-                    // Цвет, которого не было у прежних примитивов, — белый у них.
-                    raw.colors.push(vec![Vec4::ONE; first as usize]);
-                }
-                raw.colors[k].extend(read(&json, bin, a)?);
-                k += 1;
-            }
-            for c in &mut raw.colors {
-                c.resize(raw.positions.len(), Vec4::ONE);
-            }
-            let indices: Vec<u32> = match p.get("indices").and_then(Json::as_usize) {
-                Some(a) => read(&json, bin, a)?.iter().map(|v| v.x as u32).collect(),
-                None => (0..positions.len() as u32).collect(),
-            };
-            if indices.iter().any(|&i| i as usize >= positions.len()) {
-                return Err("индекс вершины за пределами".into());
-            }
-            raw.indices.extend(indices.iter().map(|i| i + first));
-        }
-        Ok(())
-    })?;
-    if raw.indices.is_empty() {
-        return Err("в файле нет треугольников".into());
-    }
-    Ok(raw)
-}
-
 /// Обойти узлы сцены: для каждого меша — его номер и положение в мире.
 fn visit_meshes(json: &Json, f: &mut dyn FnMut(usize, Mat4) -> Result<(), String>) -> Result<(), String> {
     let scene = json.get("scene").and_then(Json::as_usize).unwrap_or(0);

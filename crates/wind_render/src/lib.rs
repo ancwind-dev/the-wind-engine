@@ -8,7 +8,6 @@ pub mod character;
 mod decals;
 mod effects;
 pub mod gltf;
-pub mod grass;
 pub mod mapmesh;
 pub mod mocap;
 pub mod models;

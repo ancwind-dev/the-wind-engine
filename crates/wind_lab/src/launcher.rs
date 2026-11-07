@@ -158,7 +158,7 @@ impl Launcher {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let templates = [
-                (Template::Game, Icon::Simulation, t("Копия нашей игры"), t("Карты, солдаты, оружие, дома и трава из «The Wind Engine» — начать с готового.")),
+                (Template::Game, Icon::Simulation, t("Копия нашей игры"), t("Карты, солдаты, оружие и дома из «The Wind Engine» — начать с готового.")),
                 (Template::Empty, Icon::New, t("Пустой"), t("Только параметры боя (sim.ron): процедурная карта и встроенные модели.")),
             ];
             for (template, icon, title, about) in templates {
