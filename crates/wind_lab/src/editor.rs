@@ -3,6 +3,7 @@
 //! Любое изменение идёт «мазком»: от нажатия до отпускания кнопки мыши. Перед первым
 //! изменением чанка его содержимое запоминается — так мазок можно отменить и вернуть.
 
+use crate::i18n::{f, t};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use wind_sim::map::{CHUNK, EMPTY, INDESTRUCTIBLE, Map};
@@ -726,19 +727,19 @@ impl MapEditor {
         let m = &self.file.map;
         let l = &self.file.layout;
         let mut issues = Vec::new();
-        let names = ["синих", "красных"];
+        let names = [t("синих"), t("красных")];
         if l.capture_points.is_empty() {
-            issues.push("Нет ни одной точки захвата".into());
+            issues.push(t("Нет ни одной точки захвата").into());
         }
         for (i, base) in l.bases.iter().enumerate() {
             if m.circle_hits_solid(*base, 1.0) {
-                issues.push(format!("База {} стоит в стене", names[i]));
+                issues.push(f("База {} стоит в стене", &[&names[i]]));
             }
         }
         for (i, p) in l.capture_points.iter().enumerate() {
             let letter = (b'A' + i as u8) as char;
             if m.circle_hits_solid(*p, 1.0) {
-                issues.push(format!("Точка {letter} стоит в стене"));
+                issues.push(f("Точка {} стоит в стене", &[&letter]));
                 continue;
             }
             let dist = distances(m, *p);
@@ -746,7 +747,7 @@ impl MapEditor {
                 let (bx, by) = Map::cell_of(*base);
                 let reachable = m.index(bx, by).is_some_and(|c| dist[c] != UNREACHABLE);
                 if !reachable {
-                    issues.push(format!("До точки {letter} не дойти от базы {}", names[team]));
+                    issues.push(f("До точки {} не дойти от базы {}", &[&letter, &names[team]]));
                 }
             }
         }

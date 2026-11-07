@@ -170,8 +170,8 @@ fn main() -> eframe::Result {
     // Во весь экран — сразу, чтобы не мелькало окно; размер окна выставим в первом кадре,
     // когда будет известен масштаб экрана. Замер FPS — всегда в окне 1600 × 900.
     let fullscreen = !args.window && args.bench.is_none() && Settings::load(&Settings::path(), Settings::default()).0.fullscreen;
-    // Значок движка — в заголовке окна и на панели задач (`icon/icon-256.png`).
-    let viewport = egui::ViewportBuilder::default().with_title("The Wind Engine").with_icon(icon());
+    // Значок движка — в заголовке окна и на панели задач (под тему Windows, см. `app_icon`).
+    let viewport = egui::ViewportBuilder::default().with_title("The Wind Engine").with_icon(wind_render::app_icon::initial());
     let options = eframe::NativeOptions {
         viewport: if fullscreen { viewport.with_fullscreen(true) } else { viewport.with_inner_size([1600.0, 900.0]) },
         depth_buffer: 32,
@@ -191,11 +191,6 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("wind_client", options, Box::new(|cc| Ok(Box::new(Game::new(cc, args)))))
-}
-
-/// Значок движка: логотип, встроенный в программу.
-fn icon() -> egui::IconData {
-    eframe::icon_data::from_png_bytes(include_bytes!("../../../icon/icon-256.png")).expect("icon-256.png — PNG")
 }
 
 /// Счётчик кадров: среднее за секунду и худший кадр.
@@ -397,6 +392,8 @@ impl Session {
 }
 
 struct Game {
+    /// Значок окна под тему Windows.
+    icon: wind_render::app_icon::Follower,
     session: Session,
     menu: Menu,
     settings: Settings,
@@ -506,6 +503,7 @@ impl Game {
 
         let maps = menu::list_maps(&data_dir().join("maps"));
         Game {
+            icon: Default::default(),
             session,
             menu: Menu::new(menu_open, maps),
             volume_applied: settings.volume,
@@ -626,6 +624,7 @@ impl Game {
 impl eframe::App for Game {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.icon.update(&ctx);
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;

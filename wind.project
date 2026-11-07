@@ -1,0 +1,6 @@
+// Проект The Wind Engine: наша игра. Движок (wind_lab) открывает его в окне выбора проекта.
+(
+    name: "The Wind Engine",
+    description: "Тактический шутер с видом сверху в духе Running With Rifles: один большой восточноевропейский мир, осень.",
+    data: "data",
+)

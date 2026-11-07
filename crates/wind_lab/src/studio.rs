@@ -2,6 +2,7 @@
 //! скелет поверх модели и ширина плавного сгиба у суставов — чтобы подбирать вид
 //! солдата, не запуская бой. Здесь же — редактор анимаций (см. `anim_editor`).
 
+use crate::i18n::{f, t};
 use crate::anim_editor::AnimEditor;
 use crate::icons::{self, Icon};
 use crate::theme;
@@ -54,11 +55,13 @@ pub struct Studio {
     editor: AnimEditor,
     /// Модели перечитаны (клип сохранён) — лаборатории обновить остальные виды.
     reloaded: Option<Arc<CharacterSet>>,
+    /// Папка данных проекта: модели и клипы.
+    data: std::path::PathBuf,
 }
 
 impl Studio {
-    pub fn new(characters: Option<Arc<CharacterSet>>, has_3d: bool) -> Self {
-        let mut view = Viewport::new();
+    pub fn new(characters: Option<Arc<CharacterSet>>, has_3d: bool, data: std::path::PathBuf) -> Self {
+        let mut view = Viewport::new(&data);
         view.has_3d = has_3d;
         view.set_characters(characters.clone());
         let center = Vec2::splat(GROUND as f32 * 0.5);
@@ -86,7 +89,8 @@ impl Studio {
             blend: JOINT_BLEND,
             skeleton: false,
             last: Instant::now(),
-            editor: AnimEditor::new(data_dir().join("animations")),
+            editor: AnimEditor::new(data.join("animations")),
+            data,
             reloaded: None,
         }
     }
@@ -98,7 +102,7 @@ impl Studio {
 
     /// Перечитать модели с клипами — после сохранения клипа.
     fn reload_characters(&mut self) {
-        match CharacterSet::load(&data_dir()) {
+        match CharacterSet::load(&self.data) {
             Ok(set) => {
                 let set = Arc::new(set);
                 self.characters = Some(set.clone());
@@ -116,10 +120,10 @@ impl Studio {
     /// Слева — модели и оружие.
     pub fn outliner(&mut self, ui: &mut egui::Ui) {
         let Some(set) = self.characters.clone() else {
-            ui.label(RichText::new("Нет своих моделей: не найден data/factions.ron").color(theme::ERROR));
+            ui.label(RichText::new(t("Нет своих моделей: не найден data/factions.ron")).color(theme::ERROR));
             return;
         };
-        ui.label(RichText::new("Модели").strong());
+        ui.label(RichText::new(t("Модели")).strong());
         // Имя вида «soldiers/usmc/rifleman»: группируем по фракции, показываем последнее слово.
         let mut faction = "";
         for (i, m) in set.models.iter().enumerate() {
@@ -135,8 +139,8 @@ impl Studio {
             }
         }
         ui.add_space(8.0);
-        ui.label(RichText::new("Оружие").strong());
-        if icons::selectable(ui, self.weapon.is_none(), Icon::Soldier, "без оружия", None).clicked() {
+        ui.label(RichText::new(t("Оружие")).strong());
+        if icons::selectable(ui, self.weapon.is_none(), Icon::Soldier, t("без оружия"), None).clicked() {
             self.weapon = None;
         }
         for (i, w) in set.weapons.iter().enumerate() {
@@ -149,20 +153,20 @@ impl Studio {
 
     /// Справа — анимация, сгиб, вид.
     pub fn properties(&mut self, ui: &mut egui::Ui) {
-        theme::panel(ui, Icon::Run, "Анимация", true, |ui| {
+        theme::panel(ui, Icon::Run, t("Анимация"), true, |ui| {
             ui.horizontal(|ui| {
-                for (name, speed) in [("Стоит", 0.0), ("Шаг", 2.2), ("Бег", 6.0)] {
+                for (name, speed) in [(t("Стоит"), 0.0), (t("Шаг"), 2.2), (t("Бег"), 6.0)] {
                     if ui.selectable_label(self.dead.is_none() && self.speed == speed, name).clicked() {
                         self.speed = speed;
                         self.dead = None;
                     }
                 }
-                if ui.selectable_label(self.dead.is_some(), "Падает").clicked() {
+                if ui.selectable_label(self.dead.is_some(), t("Падает")).clicked() {
                     self.dead = Some(0.0);
                 }
             });
             ui.horizontal(|ui| {
-                for (name, act) in [("Без действия", Act::None), ("Перезарядка", Act::Reload), ("Бросок гранаты", Act::Throw)] {
+                for (name, act) in [(t("Без действия"), Act::None), (t("Перезарядка"), Act::Reload), (t("Бросок гранаты"), Act::Throw)] {
                     if ui.selectable_label(self.dead.is_none() && self.act == act, name).clicked() {
                         self.act = act;
                         self.act_time = 0.0;
@@ -171,32 +175,32 @@ impl Studio {
                 }
             });
             theme::props(ui, "studio_anim", |ui| {
-                theme::label(ui, "Скорость");
-                ui.add(egui::Slider::new(&mut self.speed, 0.0..=8.0).suffix(" м/с"));
+                theme::label(ui, t("Скорость"));
+                ui.add(egui::Slider::new(&mut self.speed, 0.0..=8.0).suffix(t(" м/с")));
                 ui.end_row();
-                theme::label(ui, "Замедление");
+                theme::label(ui, t("Замедление"));
                 ui.add(egui::Slider::new(&mut self.tempo, 0.05..=1.0).logarithmic(true).suffix("×"));
                 ui.end_row();
-                theme::label(ui, "Фаза шага");
+                theme::label(ui, t("Фаза шага"));
                 ui.add(egui::Slider::new(&mut self.phase, 0.0..=std::f32::consts::TAU).max_decimals(2));
                 ui.end_row();
-                theme::label(ui, "Направление");
+                theme::label(ui, t("Направление"));
                 ui.add(egui::Slider::new(&mut self.heading, -180.0..=180.0).suffix("°").max_decimals(0))
-                    .on_hover_text("Куда идёт относительно взгляда: 0 — вперёд, 90 — вправо, 180 — назад");
+                    .on_hover_text(t("Куда идёт относительно взгляда: 0 — вперёд, 90 — вправо, 180 — назад"));
                 ui.end_row();
-                theme::label(ui, "Оружие");
-                ui.checkbox(&mut self.aiming, "целится").on_hover_text("Не целясь, на бегу солдат несёт оружие поперёк груди, как в RWR");
+                theme::label(ui, t("Оружие"));
+                ui.checkbox(&mut self.aiming, t("целится")).on_hover_text(t("Не целясь, на бегу солдат несёт оружие поперёк груди, как в RWR"));
                 ui.end_row();
-                theme::label(ui, "Чем убит");
+                theme::label(ui, t("Чем убит"));
                 ui.horizontal(|ui| {
                     // Выбрали — сразу падает заново.
-                    if ui.selectable_value(&mut self.blast, false, "пулей").clicked() | ui.selectable_value(&mut self.blast, true, "взрывом").clicked() {
+                    if ui.selectable_value(&mut self.blast, false, t("пулей")).clicked() | ui.selectable_value(&mut self.blast, true, t("взрывом")).clicked() {
                         self.dead = Some(0.0);
                     }
                 });
                 ui.end_row();
             });
-            let (icon, play) = if self.paused { (Icon::Play, "Дальше") } else { (Icon::Pause, "Пауза") };
+            let (icon, play) = if self.paused { (Icon::Play, t("Дальше")) } else { (Icon::Pause, t("Пауза")) };
             if icons::button(ui, icon, play).clicked() {
                 self.paused = !self.paused;
             }
@@ -204,65 +208,65 @@ impl Studio {
         let model = self.characters.clone();
         let m = model.as_ref().and_then(|c| c.models.get(self.model));
         let mut saved = false;
-        theme::panel(ui, Icon::Run, "Редактор анимаций", true, |ui| {
+        theme::panel(ui, Icon::Run, t("Редактор анимаций"), true, |ui| {
             saved = self.editor.panel(ui, m);
         });
         if saved {
             self.reload_characters();
         }
-        theme::panel(ui, Icon::Skeleton, "Сгиб у суставов", true, |ui| {
+        theme::panel(ui, Icon::Skeleton, t("Сгиб у суставов"), true, |ui| {
             theme::props(ui, "studio_blend", |ui| {
-                theme::label(ui, "Ширина");
-                ui.add(egui::Slider::new(&mut self.blend, 0.0..=12.0).suffix(" вокс."));
+                theme::label(ui, t("Ширина"));
+                ui.add(egui::Slider::new(&mut self.blend, 0.0..=12.0).suffix(t(" вокс.")));
                 ui.end_row();
             });
             ui.horizontal(|ui| {
-                if ui.button("Жёстко (0)").clicked() {
+                if ui.button(t("Жёстко (0)")).clicked() {
                     self.blend = 0.0;
                 }
-                if ui.button(format!("Как в игре ({JOINT_BLEND})")).clicked() {
+                if ui.button(f("Как в игре ({})", &[&JOINT_BLEND])).clicked() {
                     self.blend = JOINT_BLEND;
                 }
             });
             ui.label(
-                RichText::new("Воксель у сустава смешивает положение своей палки и соседней. В игре сгиб — как по умолчанию.")
+                RichText::new(t("Воксель у сустава смешивает положение своей палки и соседней. В игре сгиб — как по умолчанию."))
                     .small()
                     .color(theme::TEXT_DIM),
             );
         });
-        theme::panel(ui, Icon::Camera, "Вид", true, |ui| {
+        theme::panel(ui, Icon::Camera, t("Вид"), true, |ui| {
             theme::props(ui, "studio_view", |ui| {
-                theme::label(ui, "Скелет");
-                ui.checkbox(&mut self.skeleton, "поверх модели");
+                theme::label(ui, t("Скелет"));
+                ui.checkbox(&mut self.skeleton, t("поверх модели"));
                 ui.end_row();
-                theme::label(ui, "Поворот");
+                theme::label(ui, t("Поворот"));
                 ui.drag_angle(&mut self.facing);
                 ui.end_row();
-                theme::label(ui, "Команда");
+                theme::label(ui, t("Команда"));
                 ui.horizontal(|ui| {
                     for t in 0..2u8 {
-                        ui.selectable_value(&mut self.team, t, RichText::new(theme::TEAM_NAME[t as usize]).color(theme::TEAM[t as usize]));
+                        ui.selectable_value(&mut self.team, t, RichText::new(theme::team_name(t as usize)).color(theme::TEAM[t as usize]));
                     }
                 });
                 ui.end_row();
             });
-            if icons::button(ui, Icon::Camera, "Камеру к солдату").clicked() {
+            if icons::button(ui, Icon::Camera, t("Камеру к солдату")).clicked() {
                 self.view.look_at_3d(self.center(), 3.5, CAMERA_PITCH);
             }
         });
         if let Some(set) = &self.characters
             && let Some(m) = set.models.get(self.model)
         {
-            theme::panel(ui, Icon::Info, "Сведения", false, |ui| {
+            theme::panel(ui, Icon::Info, t("Сведения"), false, |ui| {
                 let mesh = &set.meshes[m.mesh];
                 theme::props(ui, "studio_info", |ui| {
-                    theme::label(ui, "Палок");
+                    theme::label(ui, t("Палок"));
                     ui.label(m.sticks.len().to_string());
                     ui.end_row();
-                    theme::label(ui, "Точек");
+                    theme::label(ui, t("Точек"));
                     ui.label(format!("{} / {} / {}", mesh.lods[0].points.len() / 4, mesh.lods[1].points.len() / 4, mesh.lods[2].points.len() / 4));
                     ui.end_row();
-                    theme::label(ui, "Граней тени");
+                    theme::label(ui, t("Граней тени"));
                     ui.label((mesh.indices.len() / 6).to_string());
                     ui.end_row();
                 });
@@ -332,7 +336,7 @@ impl Studio {
         }
         let name = self.characters.as_ref().and_then(|c| c.models.get(model)).map_or("—", |m| m.name.as_str());
         let scene = Scene {
-            title: format!("Студия персонажей · {name}"),
+            title: f("Студия персонажей · {}", &[&name]),
             map: &self.map,
             bases: [center; 2],
             points: Vec::new(),
@@ -402,9 +406,3 @@ enum Act {
     Reload,
     Throw,
 }
-
-/// Папка `data/` — рядом с `sim.ron`.
-pub fn data_dir() -> std::path::PathBuf {
-    crate::find_config().parent().map_or_else(|| std::path::PathBuf::from("data"), |p| p.to_path_buf())
-}
-

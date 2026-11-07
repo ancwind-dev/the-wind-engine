@@ -1,5 +1,6 @@
 //! Сборка сцены для вьюпорта: из локальной симуляции или из мира, пришедшего по сети.
 
+use crate::i18n::{f, t};
 use crate::theme;
 use crate::viewport::{Hud, Scene, ScenePoint, SceneSoldier, SelectedInfo};
 use wind_net::NetClient;
@@ -46,7 +47,7 @@ pub fn local<'a>(world: &'a World, selected: Option<u32>, blasts: &[Blast], ahea
     let sel = selected.filter(|&i| world.soldiers[i as usize].alive);
     let (rings, lines) = sel.map(|i| squad_marks(world, i)).unwrap_or_default();
     Scene {
-        title: "Вид сверху · локальная симуляция".into(),
+        title: t("Вид сверху · локальная симуляция").into(),
         map: &world.map,
         bases: world.bases,
         points: world
@@ -149,9 +150,9 @@ pub fn remote(client: &NetClient) -> Option<Scene<'_>> {
         })
         .collect();
     let me = w.my_soldier().map(|s| w.render_pos(s, now));
-    let name = |id: u32| if id == w.welcome.soldier { "Ты".to_string() } else { format!("#{id}") };
+    let name = |id: u32| if id == w.welcome.soldier { t("Ты").to_string() } else { format!("#{id}") };
     Some(Scene {
-        title: format!("Игра по сети · {}", client.server_addr()),
+        title: f("Игра по сети · {}", &[&client.server_addr()]),
         map: &w.map,
         bases: w.bases,
         points: w

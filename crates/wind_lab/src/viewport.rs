@@ -4,6 +4,7 @@
 //! Вьюпорт ничего не знает про то, откуда мир: локальная симуляция или сервер.
 //! Ему каждый кадр собирают [`Scene`].
 
+use crate::i18n::{f, t};
 use crate::editor_ui::GROUND_2D;
 use crate::theme;
 use eframe::egui::{
@@ -146,6 +147,8 @@ pub struct Viewport {
     pub has_3d: bool,
     camera_3d: wind_render::Camera,
     scene_3d: wind_render::SceneBuilder,
+    /// Модели предметов проекта (`data/models/props`).
+    props: std::path::PathBuf,
     /// Растёт при смене мира — чтобы 3D перестроило меши карты.
     generation: u64,
     last_frame: std::time::Instant,
@@ -158,8 +161,10 @@ pub struct Viewport {
 const SKY_3D: Color32 = Color32::from_rgb(158, 173, 184);
 
 impl Viewport {
-    pub fn new() -> Self {
+    /// Вид для проекта с данными в `data` (оттуда — модели предметов).
+    pub fn new(data: &std::path::Path) -> Self {
         Viewport {
+            props: data.join("models/props"),
             camera: Camera { center: Vec2::ZERO, zoom: 1.0 },
             overlays: Overlays { grid: true, bullets: true, flow: false, vision: true },
             follow: false,
@@ -185,7 +190,7 @@ impl Viewport {
 
     /// Свои солдаты для 3D (из `wind_render::install`).
     pub fn set_characters(&mut self, characters: Option<std::sync::Arc<wind_render::character::CharacterSet>>) {
-        self.scene_3d = wind_render::SceneBuilder::with_characters(characters).with_props(crate::studio::data_dir().join("models/props"));
+        self.scene_3d = wind_render::SceneBuilder::with_characters(characters).with_props(self.props.clone());
     }
 
     /// Перестроить карту (2D-текстуру и 3D-меши), не трогая камеру.
@@ -370,7 +375,7 @@ impl Viewport {
         painter.text(
             at + vec2(0.0, 16.0),
             Align2::LEFT_TOP,
-            format!("3D · {:.0} м до цели · СКМ — вращать, Shift+СКМ — двигать", cam.distance),
+            f("3D · {:.0} м до цели · СКМ — вращать, Shift+СКМ — двигать", &[&cam.distance]),
             font,
             Color32::from_gray(60),
         );
@@ -691,7 +696,7 @@ fn draw_header(painter: &egui::Painter, rect: Rect, cam: &Camera, scene: &Scene)
     painter.text(
         at + vec2(0.0, 16.0),
         Align2::LEFT_TOP,
-        format!("{:.1} пикс/м · карта {} м", cam.zoom, scene.map.width),
+        f("{:.1} пикс/м · карта {} м", &[&cam.zoom, &scene.map.width]),
         font,
         theme::TEXT_DIM,
     );
@@ -709,15 +714,10 @@ fn draw_hud(painter: &egui::Painter, rect: Rect, hud: &Hud) {
     painter.rect_filled(bar, 6, Color32::from_black_alpha(170));
     let font = FontId::proportional(14.0);
     let text = if hud.alive {
-        let ammo = if hud.reloading { "перезарядка…".to_string() } else { format!("{} / {}", hud.ammo, hud.magazine) };
-        format!(
-            "Здоровье {:.0}%   ·   Патроны {ammo}   ·   Гранаты {}   ·   Убийств {}",
-            hud.health * 100.0,
-            hud.grenades,
-            hud.kills
-        )
+        let ammo = if hud.reloading { t("перезарядка…").to_string() } else { format!("{} / {}", hud.ammo, hud.magazine) };
+        f("Здоровье {:.0}%   ·   Патроны {}   ·   Гранаты {}   ·   Убийств {}", &[&(hud.health * 100.0), &ammo, &hud.grenades, &hud.kills])
     } else {
-        format!("Убит. Появление через {:.1} с", hud.respawn_in)
+        f("Убит. Появление через {:.1} с", &[&hud.respawn_in])
     };
     let color = if hud.alive { theme::TEXT } else { theme::ERROR };
     painter.text(bar.center(), Align2::CENTER_CENTER, text, font, color);

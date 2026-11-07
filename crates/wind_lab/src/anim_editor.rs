@@ -6,6 +6,7 @@
 //! («Мягкость»). Свой клип — ключевые кадры: потянул точку в новом месте ленты — там
 //! появился ключ; между ключами — плавно.
 
+use crate::i18n::{f, t};
 use crate::icons::{self, Icon};
 use crate::theme;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
@@ -64,7 +65,7 @@ impl AnimEditor {
             selected: None,
             drag: None,
             undo: Vec::new(),
-            new_name: "новый".into(),
+            new_name: t("новый").into(),
             new_cycle: false,
             message: None,
         };
@@ -110,6 +111,7 @@ impl AnimEditor {
     fn save(&mut self) -> bool {
         let Some(clip) = &self.clip else { return false };
         let path = self.dir.join(format!("{}.ron", self.name));
+        // Заголовок файла клипа — всегда по-русски, как все наши файлы данных.
         let header = format!(
             "// Клип «{}». Источник: {}.\n// Правится в студии персонажей (лаборатория → «Редактор анимаций»); оси: x — вперёд, y — вверх, z — вправо.\n",
             self.name, clip.source
@@ -118,7 +120,7 @@ impl AnimEditor {
         match result {
             Ok(()) => {
                 self.saved = self.clip.clone();
-                self.message = Some((format!("Сохранено: {}", path.display()), false));
+                self.message = Some((f("Сохранено: {}", &[&path.display()]), false));
                 self.rescan();
                 true
             }
@@ -150,7 +152,7 @@ impl AnimEditor {
     /// клип сохранён.
     pub fn panel(&mut self, ui: &mut egui::Ui, m: Option<&CharModel>) -> bool {
         let mut saved = false;
-        ui.checkbox(&mut self.on, "Редактировать клип").on_hover_text("Студия показывает клип; точки скелета тянутся левой кнопкой мыши");
+        ui.checkbox(&mut self.on, t("Редактировать клип")).on_hover_text(t("Студия показывает клип; точки скелета тянутся левой кнопкой мыши"));
         if !self.on {
             return false;
         }
@@ -163,10 +165,10 @@ impl AnimEditor {
                     }
                 }
             });
-            if ui.add_enabled(self.dirty(), egui::Button::new("Сохранить")).clicked() {
+            if ui.add_enabled(self.dirty(), egui::Button::new(t("Сохранить"))).clicked() {
                 saved = self.save();
             }
-            if ui.add_enabled(self.dirty(), egui::Button::new("Вернуть")).on_hover_text("Как в файле").clicked() {
+            if ui.add_enabled(self.dirty(), egui::Button::new(t("Вернуть"))).on_hover_text(t("Как в файле")).clicked() {
                 self.clip = self.saved.clone();
                 self.undo.clear();
             }
@@ -194,45 +196,45 @@ impl AnimEditor {
             self.playing = false;
         }
         ui.horizontal(|ui| {
-            let (icon, play) = if self.playing { (Icon::Pause, "Пауза") } else { (Icon::Play, "Играть") };
+            let (icon, play) = if self.playing { (Icon::Pause, t("Пауза")) } else { (Icon::Play, t("Играть")) };
             if icons::button(ui, icon, play).clicked() {
                 self.playing = !self.playing;
             }
-            ui.label(format!("{:.2} с из {:.2}", self.time.min(1.0) * clip.duration, clip.duration));
+            ui.label(f("{:.2} с из {:.2}", &[&(self.time.min(1.0) * clip.duration), &clip.duration]));
         });
         theme::props(ui, "anim_props", |ui| {
             if keyed {
-                theme::label(ui, "Ключи");
+                theme::label(ui, t("Ключи"));
                 ui.horizontal(|ui| {
-                    if ui.button("Ключ здесь").clicked() {
+                    if ui.button(t("Ключ здесь")).clicked() {
                         self.undo.push(clip.clone());
                         clip.key_at(self.time);
                     }
                     let k = clip.nearest(self.time);
-                    if ui.add_enabled(k > 0 && k + 1 < clip.frames.len(), egui::Button::new("Убрать ближний")).clicked() {
+                    if ui.add_enabled(k > 0 && k + 1 < clip.frames.len(), egui::Button::new(t("Убрать ближний"))).clicked() {
                         self.undo.push(clip.clone());
                         clip.remove_key(k);
                     }
                 });
                 ui.end_row();
-                theme::label(ui, "Длина");
-                ui.add(egui::Slider::new(&mut clip.duration, 0.2..=6.0).suffix(" с"));
+                theme::label(ui, t("Длина"));
+                ui.add(egui::Slider::new(&mut clip.duration, 0.2..=6.0).suffix(t(" с")));
                 ui.end_row();
-                theme::label(ui, "Круг");
-                ui.checkbox(&mut clip.cycle, "повторяется");
+                theme::label(ui, t("Круг"));
+                ui.checkbox(&mut clip.cycle, t("повторяется"));
                 ui.end_row();
             } else {
-                theme::label(ui, "Мягкость");
-                ui.add(egui::Slider::new(&mut self.soft, 0..=10).suffix(" кадр.")).on_hover_text("На сколько соседних кадров расходится правка (слабея)");
+                theme::label(ui, t("Мягкость"));
+                ui.add(egui::Slider::new(&mut self.soft, 0..=10).suffix(t(" кадр."))).on_hover_text(t("На сколько соседних кадров расходится правка (слабея)"));
                 ui.end_row();
             }
-            theme::label(ui, "Руки");
-            ui.checkbox(&mut self.weapon, "держат оружие, как в игре")
-                .on_hover_text("В шаге и беге руки в игре ставятся к оружию; точки рук на скелете — из клипа (их видно в бросках и своих клипах)");
+            theme::label(ui, t("Руки"));
+            ui.checkbox(&mut self.weapon, t("держат оружие, как в игре"))
+                .on_hover_text(t("В шаге и беге руки в игре ставятся к оружию; точки рук на скелете — из клипа (их видно в бросках и своих клипах)"));
             ui.end_row();
         });
         let point = self.selected.map_or("—".to_string(), point_name);
-        ui.label(RichText::new(format!("Точка: {point}. Левая кнопка — выбрать и тянуть; Ctrl+Z — отменить.")).small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(f("Точка: {}. Левая кнопка — выбрать и тянуть; Ctrl+Z — отменить.", &[&point])).small().color(theme::TEXT_DIM));
         if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z))
             && let Some(prev) = self.undo.pop()
         {
@@ -250,9 +252,9 @@ impl AnimEditor {
     fn new_clip_ui(&mut self, ui: &mut egui::Ui, m: Option<&CharModel>) {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.new_name).desired_width(110.0));
-            ui.checkbox(&mut self.new_cycle, "круг");
+            ui.checkbox(&mut self.new_cycle, t("круг"));
             let free = !self.new_name.trim().is_empty() && !self.names.iter().any(|n| n == self.new_name.trim());
-            if ui.add_enabled(free && m.is_some(), egui::Button::new("Новый клип")).on_hover_text("Из позы «стоит с оружием»; имя файла — в data/animations").clicked()
+            if ui.add_enabled(free && m.is_some(), egui::Button::new(t("Новый клип"))).on_hover_text(t("Из позы «стоит с оружием»; имя файла — в data/animations")).clicked()
                 && let Some(m) = m
                 && let Some(sk) = m.skeleton()
             {
@@ -335,22 +337,22 @@ fn screen_to_plane(view_proj: Mat4, rect: Rect, p: Pos2, anchor: Vec3, eye: Vec3
 fn point_name(i: usize) -> String {
     let name = if i == 0 { "hips" } else { EDGES[i - 1].1 };
     match name {
-        "hips" => "таз",
-        "righthip" => "правое бедро",
-        "lefthip" => "левое бедро",
-        "rightknee" => "правое колено",
-        "leftknee" => "левое колено",
-        "rightfoot" => "правая стопа",
-        "leftfoot" => "левая стопа",
-        "midspine" => "поясница",
-        "neck" => "шея",
-        "head" => "голова",
-        "rightshoulder" => "правое плечо",
-        "leftshoulder" => "левое плечо",
-        "rightelbow" => "правый локоть",
-        "leftelbow" => "левый локоть",
-        "righthand" => "правая кисть",
-        "lefthand" => "левая кисть",
+        "hips" => t("таз"),
+        "righthip" => t("правое бедро"),
+        "lefthip" => t("левое бедро"),
+        "rightknee" => t("правое колено"),
+        "leftknee" => t("левое колено"),
+        "rightfoot" => t("правая стопа"),
+        "leftfoot" => t("левая стопа"),
+        "midspine" => t("поясница"),
+        "neck" => t("шея"),
+        "head" => t("голова"),
+        "rightshoulder" => t("правое плечо"),
+        "leftshoulder" => t("левое плечо"),
+        "rightelbow" => t("правый локоть"),
+        "leftelbow" => t("левый локоть"),
+        "righthand" => t("правая кисть"),
+        "lefthand" => t("левая кисть"),
         other => other,
     }
     .to_owned()

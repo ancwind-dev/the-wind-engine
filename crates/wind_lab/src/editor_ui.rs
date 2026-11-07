@@ -1,6 +1,7 @@
 //! Рабочее пространство «Редактор карт»: полка инструментов слева,
 //! свойства справа, подсказки снизу — как в Blender.
 
+use crate::i18n::{f, t};
 use crate::editor::{FENCE, HOUSE_WALL, MapEditor, Pointer, TerrainMode, Tool, WallShape};
 use wind_sim::prefab::{self, Prefab};
 use crate::icons::{self, Icon};
@@ -12,6 +13,22 @@ use wind_sim::map::{GROUND_NAMES, INDESTRUCTIBLE};
 use wind_sim::atmosphere::{Atmosphere, Preset};
 use wind_sim::mapfile::{MapFile, Prop};
 use wind_sim::{SimConfig, Vec2};
+
+/// Названия покрытий на языке интерфейса; порядок — как в `wind_sim::map::GROUND_NAMES`.
+fn ground_names() -> [&'static str; GROUND_NAMES.len()] {
+    [t("Трава"), t("Сухая трава"), t("Земля"), t("Песок"), t("Асфальт"), t("Бетон")]
+}
+
+/// Название предустановки атмосферы на языке интерфейса.
+fn preset_name(p: Preset) -> &'static str {
+    match p {
+        Preset::Day => t("День"),
+        Preset::Sunset => t("Закат"),
+        Preset::Overcast => t("Пасмурно"),
+        Preset::Desert => t("Пустыня"),
+        Preset::Night => t("Ночь"),
+    }
+}
 
 /// Цвета покрытия в 2D-виде (sRGB). Порядок — как в `GROUND_NAMES`.
 pub const GROUND_2D: [Color32; 6] = [
@@ -68,7 +85,7 @@ impl MapWorkspace {
         MapWorkspace {
             editor: MapEditor::new(file, config.capture.radius),
             maps_dir,
-            new_name: "моя карта".into(),
+            new_name: t("моя карта").into(),
             new_size: 512,
             generate: false,
             new_seed: 1,
@@ -80,7 +97,7 @@ impl MapWorkspace {
             generation: 0,
             builtin: prefab::builtin(),
             user: Vec::new(),
-            prefab_name: "моё здание".into(),
+            prefab_name: t("моё здание").into(),
             prop_models: Vec::new(),
             prop_models_at: None,
             shown_props: Vec::new(),
@@ -113,7 +130,7 @@ impl MapWorkspace {
         match prefab::save(&self.prefabs_path(), &self.user) {
             Ok(()) => {
                 self.editor.stamp = Some(p);
-                self.info(format!("Здание «{name}» сохранено в {}", self.prefabs_path().display()));
+                self.info(f("Здание «{}» сохранено в {}", &[&name, &(self.prefabs_path().display())]));
             }
             Err(e) => self.error(e),
         }
@@ -135,7 +152,7 @@ impl MapWorkspace {
 
     fn save(&mut self) {
         match self.editor.save(&self.maps_dir) {
-            Ok(dir) => self.info(format!("Сохранено: {}", dir.display())),
+            Ok(dir) => self.info(f("Сохранено: {}", &[&dir.display()])),
             Err(e) => self.error(e),
         }
     }
@@ -144,7 +161,7 @@ impl MapWorkspace {
         if self.editor.dirty && self.pending.as_ref() != Some(&action) {
             // Первый клик только предупреждает.
             self.pending = Some(action);
-            self.error("Есть несохранённые изменения — нажми ещё раз, чтобы продолжить без сохранения".into());
+            self.error(t("Есть несохранённые изменения — нажми ещё раз, чтобы продолжить без сохранения").into());
             return;
         }
         self.pending = None;
@@ -157,12 +174,12 @@ impl MapWorkspace {
                     MapEditor::blank(&name, self.new_size)
                 };
                 self.replace(file);
-                self.info(format!("Новая карта «{name}», {0}×{0} м", self.new_size));
+                self.info(f("Новая карта «{}», {}×{} м", &[&name, &self.new_size, &self.new_size]));
             }
             Pending::Open(name) => match MapFile::load(&self.maps_dir.join(&name)) {
                 Ok(file) => {
                     self.replace(file);
-                    self.info(format!("Открыта карта «{name}»"));
+                    self.info(f("Открыта карта «{}»", &[&name]));
                 }
                 Err(e) => self.error(e),
             },
@@ -219,10 +236,10 @@ impl MapWorkspace {
             )
         });
         if copy && self.editor.copy() {
-            self.info("Скопировано: Ctrl+V — вставить".into());
+            self.info(t("Скопировано: Ctrl+V — вставить").into());
         }
         if paste && !self.editor.paste() {
-            self.error("Буфер пуст: выдели кусок карты и нажми Ctrl+C".into());
+            self.error(t("Буфер пуст: выдели кусок карты и нажми Ctrl+C").into());
         }
         if delete && self.editor.tool == Tool::Select {
             self.editor.delete_selection();
@@ -346,7 +363,7 @@ impl MapWorkspace {
             }
         });
         Scene {
-            title: format!("Редактор карт · {}{}", file.name, if e.dirty { " *" } else { "" }),
+            title: f("Редактор карт · {}{}", &[&file.name, &(if e.dirty { " *" } else { "" })]),
             map: &file.map,
             bases: file.layout.bases,
             points: file
@@ -377,31 +394,31 @@ impl MapWorkspace {
     pub fn hint(&self) -> &'static str {
         match self.editor.tool {
             Tool::Walls => match self.editor.wall_shape {
-                WallShape::Brush => "ЛКМ — рисовать стены · Ctrl — стирать · [ ] — размер кисти · Ctrl+Z — отмена · Ctrl+S — сохранить",
-                WallShape::Line => "Тяни ЛКМ — линия стены · Ctrl — стереть линией · Ctrl+Z — отмена",
-                WallShape::Rect => "Тяни ЛКМ — дом из угла в угол · Ctrl — стереть контур · Ctrl+Z — отмена",
+                WallShape::Brush => t("ЛКМ — рисовать стены · Ctrl — стирать · [ ] — размер кисти · Ctrl+Z — отмена · Ctrl+S — сохранить"),
+                WallShape::Line => t("Тяни ЛКМ — линия стены · Ctrl — стереть линией · Ctrl+Z — отмена"),
+                WallShape::Rect => t("Тяни ЛКМ — дом из угла в угол · Ctrl — стереть контур · Ctrl+Z — отмена"),
             },
-            Tool::Terrain => "ЛКМ — менять рельеф · Ctrl — наоборот · Shift — сгладить · [ ] — размер кисти",
-            Tool::Ground => "ЛКМ — красить землю · [ ] — размер кисти · Ctrl+Z — отмена",
-            Tool::Points => "ЛКМ по пустому месту — новая точка · тяни точку или базу — двигать · Ctrl+ЛКМ — удалить точку",
-            Tool::Select => "Тяни ЛКМ — выделить · Ctrl+C — копировать · Ctrl+V — вставить · Delete — стереть стены · Esc — снять",
-            Tool::Buildings => "ЛКМ — поставить здание · R — повернуть · Ctrl+V — вставить скопированное · Ctrl+Z — отмена",
-            Tool::Props => "ЛКМ — поставить предмет · R — повернуть на 45° · Ctrl+ЛКМ — убрать ближайший · Ctrl+Z — отмена",
+            Tool::Terrain => t("ЛКМ — менять рельеф · Ctrl — наоборот · Shift — сгладить · [ ] — размер кисти"),
+            Tool::Ground => t("ЛКМ — красить землю · [ ] — размер кисти · Ctrl+Z — отмена"),
+            Tool::Points => t("ЛКМ по пустому месту — новая точка · тяни точку или базу — двигать · Ctrl+ЛКМ — удалить точку"),
+            Tool::Select => t("Тяни ЛКМ — выделить · Ctrl+C — копировать · Ctrl+V — вставить · Delete — стереть стены · Esc — снять"),
+            Tool::Buildings => t("ЛКМ — поставить здание · R — повернуть · Ctrl+V — вставить скопированное · Ctrl+Z — отмена"),
+            Tool::Props => t("ЛКМ — поставить предмет · R — повернуть на 45° · Ctrl+ЛКМ — убрать ближайший · Ctrl+Z — отмена"),
         }
     }
 
     /// Полка инструментов слева (как T-панель в Blender) и список объектов карты.
     pub fn tool_shelf(&mut self, ui: &mut egui::Ui) -> Option<Vec2> {
-        ui.label(RichText::new("Инструменты").strong());
+        ui.label(RichText::new(t("Инструменты")).strong());
         ui.add_space(2.0);
         let tools = [
-            ("1", Tool::Walls, Icon::Walls, "Стены"),
-            ("2", Tool::Terrain, Icon::Terrain, "Рельеф"),
-            ("3", Tool::Ground, Icon::Ground, "Покрытие"),
-            ("4", Tool::Points, Icon::Flag, "Точки и базы"),
-            ("5", Tool::Select, Icon::Select, "Выделение"),
-            ("6", Tool::Buildings, Icon::Building, "Здания"),
-            ("7", Tool::Props, Icon::Terrain, "Предметы"),
+            ("1", Tool::Walls, Icon::Walls, t("Стены")),
+            ("2", Tool::Terrain, Icon::Terrain, t("Рельеф")),
+            ("3", Tool::Ground, Icon::Ground, t("Покрытие")),
+            ("4", Tool::Points, Icon::Flag, t("Точки и базы")),
+            ("5", Tool::Select, Icon::Select, t("Выделение")),
+            ("6", Tool::Buildings, Icon::Building, t("Здания")),
+            ("7", Tool::Props, Icon::Terrain, t("Предметы")),
         ];
         for (key, tool, icon, name) in tools {
             let text = format!("{name}   {key}");
@@ -411,17 +428,17 @@ impl MapWorkspace {
             }
         }
         ui.add_space(10.0);
-        ui.label(RichText::new("Сцена").strong());
+        ui.label(RichText::new(t("Сцена")).strong());
         ui.separator();
         let mut focus = None;
         let l = &self.editor.file.layout;
         for (i, base) in l.bases.iter().enumerate() {
-            if icons::selectable(ui, false, Icon::Team, &format!("База {}", ["синих", "красных"][i]), Some(theme::TEAM[i])).clicked() {
+            if icons::selectable(ui, false, Icon::Team, &f("База {}", &[&([t("синих"), t("красных")][i])]), Some(theme::TEAM[i])).clicked() {
                 focus = Some(*base);
             }
         }
         for (i, p) in l.capture_points.iter().enumerate() {
-            if icons::selectable(ui, false, Icon::Flag, &format!("Точка {}", (b'A' + i as u8) as char), None).clicked() {
+            if icons::selectable(ui, false, Icon::Flag, &f("Точка {}", &[&((b'A' + i as u8) as char)]), None).clicked() {
                 focus = Some(*p);
             }
         }
@@ -431,19 +448,19 @@ impl MapWorkspace {
     /// Свойства справа. Возвращает просьбу к лаборатории, если она есть.
     pub fn properties(&mut self, ui: &mut egui::Ui) -> Option<Request> {
         let mut request = None;
-        theme::panel(ui, Icon::Wrench, "Инструмент", true, |ui| self.tool_panel(ui));
-        theme::panel(ui, Icon::MapEditor, "Карта", true, |ui| request = self.map_panel(ui));
-        theme::panel(ui, Icon::Sun, "Атмосфера", true, |ui| self.atmosphere_panel(ui));
-        theme::panel(ui, Icon::Check, "Проверка", true, |ui| {
+        theme::panel(ui, Icon::Wrench, t("Инструмент"), true, |ui| self.tool_panel(ui));
+        theme::panel(ui, Icon::MapEditor, t("Карта"), true, |ui| request = self.map_panel(ui));
+        theme::panel(ui, Icon::Sun, t("Атмосфера"), true, |ui| self.atmosphere_panel(ui));
+        theme::panel(ui, Icon::Check, t("Проверка"), true, |ui| {
             if self.editor.issues.is_empty() {
-                icons::label(ui, Icon::Check, "Всё в порядке: на карте можно играть", Color32::from_rgb(120, 200, 110));
+                icons::label(ui, Icon::Check, t("Всё в порядке: на карте можно играть"), Color32::from_rgb(120, 200, 110));
             }
             for issue in &self.editor.issues {
                 icons::label(ui, Icon::Warning, issue, theme::ERROR);
             }
         });
-        theme::panel(ui, Icon::New, "Новая карта", false, |ui| self.new_panel(ui));
-        theme::panel(ui, Icon::Open, "Открыть", true, |ui| self.open_panel(ui));
+        theme::panel(ui, Icon::New, t("Новая карта"), false, |ui| self.new_panel(ui));
+        theme::panel(ui, Icon::Open, t("Открыть"), true, |ui| self.open_panel(ui));
         if !self.message.0.is_empty() {
             ui.label(RichText::new(&self.message.0).small().color(self.message.1));
         }
@@ -460,33 +477,33 @@ impl MapWorkspace {
         let e = &mut self.editor;
         theme::props(ui, "tool_props", |ui| match e.tool {
             Tool::Walls => {
-                theme::label(ui, "Форма");
+                theme::label(ui, t("Форма"));
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut e.wall_shape, WallShape::Brush, "Кисть");
-                    ui.selectable_value(&mut e.wall_shape, WallShape::Line, "Линия");
-                    ui.selectable_value(&mut e.wall_shape, WallShape::Rect, "Дом");
+                    ui.selectable_value(&mut e.wall_shape, WallShape::Brush, t("Кисть"));
+                    ui.selectable_value(&mut e.wall_shape, WallShape::Line, t("Линия"));
+                    ui.selectable_value(&mut e.wall_shape, WallShape::Rect, t("Дом"));
                 });
                 ui.end_row();
-                theme::label(ui, "Материал");
+                theme::label(ui, t("Материал"));
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut e.wall_kind, HOUSE_WALL, "Стена");
-                    ui.selectable_value(&mut e.wall_kind, FENCE, "Забор");
-                    ui.selectable_value(&mut e.wall_kind, INDESTRUCTIBLE, "Скала");
+                    ui.selectable_value(&mut e.wall_kind, HOUSE_WALL, t("Стена"));
+                    ui.selectable_value(&mut e.wall_kind, FENCE, t("Забор"));
+                    ui.selectable_value(&mut e.wall_kind, INDESTRUCTIBLE, t("Скала"));
                 });
                 ui.end_row();
                 if e.wall_shape == WallShape::Rect {
-                    theme::label(ui, "Двери");
-                    ui.checkbox(&mut e.doors, "по одной на сторону");
+                    theme::label(ui, t("Двери"));
+                    ui.checkbox(&mut e.doors, t("по одной на сторону"));
                     ui.end_row();
                 }
                 if e.wall_shape == WallShape::Brush {
-                    theme::label(ui, "Радиус");
-                    ui.add(egui::Slider::new(&mut e.radius, 0.5..=20.0).suffix(" м"));
+                    theme::label(ui, t("Радиус"));
+                    ui.add(egui::Slider::new(&mut e.radius, 0.5..=20.0).suffix(t(" м")));
                     ui.end_row();
                 }
             }
             Tool::Terrain => {
-                theme::label(ui, "Режим");
+                theme::label(ui, t("Режим"));
                 egui::ComboBox::from_id_salt("terrain_mode")
                     .selected_text(terrain_name(e.terrain_mode))
                     .show_ui(ui, |ui| {
@@ -495,32 +512,32 @@ impl MapWorkspace {
                         }
                     });
                 ui.end_row();
-                theme::label(ui, "Радиус");
-                ui.add(egui::Slider::new(&mut e.radius, 1.0..=60.0).suffix(" м"));
+                theme::label(ui, t("Радиус"));
+                ui.add(egui::Slider::new(&mut e.radius, 1.0..=60.0).suffix(t(" м")));
                 ui.end_row();
-                theme::label(ui, "Сила");
-                ui.add(egui::Slider::new(&mut e.strength, 0.2..=10.0).suffix(" м/с"));
+                theme::label(ui, t("Сила"));
+                ui.add(egui::Slider::new(&mut e.strength, 0.2..=10.0).suffix(t(" м/с")));
                 ui.end_row();
             }
             Tool::Ground => {
-                theme::label(ui, "Покрытие");
+                theme::label(ui, t("Покрытие"));
                 ui.vertical(|ui| {
-                    for (i, name) in GROUND_NAMES.iter().enumerate() {
+                    for (i, name) in ground_names().into_iter().enumerate() {
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
                             ui.painter().rect_filled(r, 3, GROUND_2D[i]);
-                            ui.selectable_value(&mut e.ground_material, i as u8, *name);
+                            ui.selectable_value(&mut e.ground_material, i as u8, name);
                         });
                     }
                 });
                 ui.end_row();
-                theme::label(ui, "Радиус");
-                ui.add(egui::Slider::new(&mut e.radius, 0.5..=40.0).suffix(" м"));
+                theme::label(ui, t("Радиус"));
+                ui.add(egui::Slider::new(&mut e.radius, 0.5..=40.0).suffix(t(" м")));
                 ui.end_row();
             }
             Tool::Points => {
-                theme::label(ui, "Точек");
-                ui.label(format!("{} из {}", e.file.layout.capture_points.len(), crate::editor::MAX_POINTS));
+                theme::label(ui, t("Точек"));
+                ui.label(f("{} из {}", &[&e.file.layout.capture_points.len(), &(crate::editor::MAX_POINTS)]));
                 ui.end_row();
             }
             Tool::Select | Tool::Buildings | Tool::Props => {}
@@ -530,29 +547,29 @@ impl MapWorkspace {
 
     fn select_panel(&mut self, ui: &mut egui::Ui) {
         let Some(s) = self.editor.selection else {
-            ui.label(RichText::new("Протяни мышью по карте, чтобы выделить.").color(theme::TEXT_DIM));
+            ui.label(RichText::new(t("Протяни мышью по карте, чтобы выделить.")).color(theme::TEXT_DIM));
             ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
             return;
         };
-        ui.label(format!("Выделено {}×{} м", s.width(), s.height()));
+        ui.label(f("Выделено {}×{} м", &[&s.width(), &s.height()]));
         ui.horizontal(|ui| {
-            if ui.button("Копировать  Ctrl+C").clicked() && self.editor.copy() {
-                self.info("Скопировано: Ctrl+V — вставить".into());
+            if ui.button(t("Копировать  Ctrl+C")).clicked() && self.editor.copy() {
+                self.info(t("Скопировано: Ctrl+V — вставить").into());
             }
-            if ui.button("Стереть стены  Del").clicked() {
+            if ui.button(t("Стереть стены  Del")).clicked() {
                 self.editor.delete_selection();
             }
         });
         ui.add_space(4.0);
-        ui.label(RichText::new("Сохранить как здание").strong());
+        ui.label(RichText::new(t("Сохранить как здание")).strong());
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut self.prefab_name).desired_width(150.0));
             let ok = !self.prefab_name.trim().is_empty() && s.width() <= 64 && s.height() <= 64;
-            if icons::button_enabled(ui, ok, Icon::Save, "Сохранить").clicked() {
+            if icons::button_enabled(ui, ok, Icon::Save, t("Сохранить")).clicked() {
                 self.save_selection_as_prefab();
             }
         });
-        ui.label(RichText::new("Попадёт в data/prefabs.ron — его можно поправить и руками.").small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(t("Попадёт в data/prefabs.ron — его можно поправить и руками.")).small().color(theme::TEXT_DIM));
         ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
     }
 
@@ -571,10 +588,10 @@ impl MapWorkspace {
                 }
             }
         };
-        list(ui, "Встроенные", &self.builtin);
-        list(ui, "Свои (data/prefabs.ron)", &self.user);
+        list(ui, t("Встроенные"), &self.builtin);
+        list(ui, t("Свои (data/prefabs.ron)"), &self.user);
         if let Some(clip) = &self.editor.clipboard
-            && ui.selectable_label(current.as_deref() == Some("Копия"), format!("Из буфера   {}×{}", clip.width, clip.height)).clicked()
+            && ui.selectable_label(current.as_deref() == Some("Копия"), f("Из буфера   {}×{}", &[&clip.width, &clip.height])).clicked()
         {
             chosen = Some(clip.clone());
         }
@@ -584,7 +601,7 @@ impl MapWorkspace {
         if let Some(stamp) = &self.editor.stamp {
             ui.add_space(4.0);
             prefab_preview(ui, stamp);
-            if ui.button("Повернуть  R").clicked() {
+            if ui.button(t("Повернуть  R")).clicked() {
                 self.editor.rotate_stamp();
             }
         }
@@ -592,9 +609,9 @@ impl MapWorkspace {
     }
 
     fn props_panel(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Модели").strong());
+        ui.label(RichText::new(t("Модели")).strong());
         if self.prop_models.is_empty() {
-            ui.label(RichText::new("Нет моделей: положи .glb из Blender в data/models/props").small().color(theme::TEXT_DIM));
+            ui.label(RichText::new(t("Нет моделей: положи .glb из Blender в data/models/props")).small().color(theme::TEXT_DIM));
         }
         for name in &self.prop_models {
             let count = self.editor.file.props.iter().filter(|p| &p.model == name).count();
@@ -606,21 +623,21 @@ impl MapWorkspace {
         ui.add_space(4.0);
         let e = &mut self.editor;
         theme::props(ui, "prop_props", |ui| {
-            theme::label(ui, "Поворот");
+            theme::label(ui, t("Поворот"));
             let mut degrees = e.prop_angle.to_degrees().round();
             if ui.add(egui::DragValue::new(&mut degrees).range(0.0..=359.0).speed(1.0).suffix("°")).changed() {
                 e.prop_angle = degrees.to_radians();
             }
             ui.end_row();
-            theme::label(ui, "Размер");
+            theme::label(ui, t("Размер"));
             ui.add(egui::Slider::new(&mut e.prop_scale, 0.5..=2.0).fixed_decimals(2));
             ui.end_row();
-            theme::label(ui, "Разброс");
-            ui.checkbox(&mut e.prop_scatter, "свой поворот и размер").on_hover_text("Для деревьев: каждое новое — со своим поворотом и размером ±20 %");
+            theme::label(ui, t("Разброс"));
+            ui.checkbox(&mut e.prop_scatter, t("свой поворот и размер")).on_hover_text(t("Для деревьев: каждое новое — со своим поворотом и размером ±20 %"));
             ui.end_row();
         });
-        ui.label(RichText::new(format!("На карте предметов: {}", self.editor.file.props.len())).small());
-        ui.label(RichText::new("Модели — data/models/props/*.glb из Blender; сохранишь там — обновятся тут.").small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(f("На карте предметов: {}", &[&self.editor.file.props.len()])).small());
+        ui.label(RichText::new(t("Модели — data/models/props/*.glb из Blender; сохранишь там — обновятся тут.")).small().color(theme::TEXT_DIM));
         ui.label(RichText::new(self.hint()).small().color(theme::TEXT_DIM));
     }
 
@@ -628,31 +645,31 @@ impl MapWorkspace {
         let mut request = None;
         let size = self.editor.file.map.width;
         theme::props(ui, "map_props", |ui| {
-            theme::label(ui, "Имя");
+            theme::label(ui, t("Имя"));
             if ui.add(egui::TextEdit::singleline(&mut self.editor.file.name).desired_width(160.0)).changed() {
                 self.editor.dirty = true;
             }
             ui.end_row();
-            theme::label(ui, "Размер");
-            ui.label(format!("{size}×{size} м, чанков {0}×{0}", crate::editor::chunks_per_side(size)));
+            theme::label(ui, t("Размер"));
+            ui.label(f("{}×{} м, чанков {}×{}", &[&size, &size, &crate::editor::chunks_per_side(size), &crate::editor::chunks_per_side(size)]));
             ui.end_row();
             // Вода: где земля ниже уровня. Рыть дно и насыпать берег — кистью рельефа.
-            theme::label(ui, "Вода");
+            theme::label(ui, t("Вода"));
             ui.horizontal(|ui| {
                 let map = &mut self.editor.file.map;
                 let mut on = map.water.is_some();
-                if ui.checkbox(&mut on, "есть").on_hover_text("Где земля ниже уровня — вода; глубже 1,1 м — плывут").changed() {
+                if ui.checkbox(&mut on, t("есть")).on_hover_text(t("Где земля ниже уровня — вода; глубже 1,1 м — плывут")).changed() {
                     map.water = on.then_some(map.water.unwrap_or(1.0));
                     self.editor.dirty = true;
                 }
                 if let Some(level) = &mut map.water
-                    && ui.add(egui::DragValue::new(level).range(0.0..=60.0).speed(0.02).suffix(" м")).changed()
+                    && ui.add(egui::DragValue::new(level).range(0.0..=60.0).speed(0.02).suffix(t(" м"))).changed()
                 {
                     self.editor.dirty = true;
                 }
             });
             ui.end_row();
-            theme::label(ui, "Отмена");
+            theme::label(ui, t("Отмена"));
             ui.horizontal(|ui| {
                 if icons::button_enabled(ui, self.editor.can_undo(), Icon::Undo, "Ctrl+Z").clicked() {
                     self.editor.undo();
@@ -664,16 +681,16 @@ impl MapWorkspace {
             ui.end_row();
         });
         ui.horizontal(|ui| {
-            let save = if self.editor.dirty { "Сохранить *  (Ctrl+S)" } else { "Сохранить  (Ctrl+S)" };
+            let save = if self.editor.dirty { t("Сохранить *  (Ctrl+S)") } else { t("Сохранить  (Ctrl+S)") };
             if icons::button(ui, Icon::Save, save).clicked() {
                 self.save();
             }
             let playable = self.editor.issues.is_empty();
-            if icons::button_enabled(ui, playable, Icon::Play, "Играть на этой карте").clicked() {
+            if icons::button_enabled(ui, playable, Icon::Play, t("Играть на этой карте")).clicked() {
                 request = Some(Request::Play(self.editor.file.clone()));
             }
         });
-        ui.label(RichText::new(format!("Папка: {}", self.maps_dir.join(&self.editor.file.name).display())).small().color(theme::TEXT_DIM));
+        ui.label(RichText::new(f("Папка: {}", &[&(self.maps_dir.join(&self.editor.file.name).display())])).small().color(theme::TEXT_DIM));
         request
     }
 
@@ -683,7 +700,7 @@ impl MapWorkspace {
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
             for p in Preset::ALL {
-                if ui.button(p.name()).clicked() {
+                if ui.button(preset_name(p)).clicked() {
                     *a = Atmosphere::preset(p);
                     changed = true;
                 }
@@ -695,28 +712,28 @@ impl MapWorkspace {
                 changed |= ui.add(egui::Slider::new(v, range)).changed();
                 ui.end_row();
             };
-            slider(ui, "Солнце: азимут", &mut a.sun_azimuth, 0.0..=360.0);
-            slider(ui, "Солнце: высота", &mut a.sun_elevation, 5.0..=90.0);
-            slider(ui, "Солнце: сила", &mut a.sun_strength, 0.0..=3.0);
-            slider(ui, "Туман", &mut a.fog, 0.0..=0.03);
-            slider(ui, "Ступенчатость света", &mut a.toon, 0.0..=1.0);
-            slider(ui, "Насыщенность", &mut a.saturation, 0.0..=1.5);
-            slider(ui, "Контраст", &mut a.contrast, 0.5..=1.5);
-            slider(ui, "Яркость", &mut a.brightness, 0.5..=1.5);
-            slider(ui, "Обводка", &mut a.outline, 0.0..=1.0);
-            slider(ui, "Затенение", &mut a.occlusion, 0.0..=1.0);
-            slider(ui, "Виньетка", &mut a.vignette, 0.0..=1.0);
-            slider(ui, "Ветер: сила", &mut a.wind, 0.0..=2.0);
-            slider(ui, "Ветер: откуда", &mut a.wind_direction, 0.0..=360.0);
+            slider(ui, t("Солнце: азимут"), &mut a.sun_azimuth, 0.0..=360.0);
+            slider(ui, t("Солнце: высота"), &mut a.sun_elevation, 5.0..=90.0);
+            slider(ui, t("Солнце: сила"), &mut a.sun_strength, 0.0..=3.0);
+            slider(ui, t("Туман"), &mut a.fog, 0.0..=0.03);
+            slider(ui, t("Ступенчатость света"), &mut a.toon, 0.0..=1.0);
+            slider(ui, t("Насыщенность"), &mut a.saturation, 0.0..=1.5);
+            slider(ui, t("Контраст"), &mut a.contrast, 0.5..=1.5);
+            slider(ui, t("Яркость"), &mut a.brightness, 0.5..=1.5);
+            slider(ui, t("Обводка"), &mut a.outline, 0.0..=1.0);
+            slider(ui, t("Затенение"), &mut a.occlusion, 0.0..=1.0);
+            slider(ui, t("Виньетка"), &mut a.vignette, 0.0..=1.0);
+            slider(ui, t("Ветер: сила"), &mut a.wind, 0.0..=2.0);
+            slider(ui, t("Ветер: откуда"), &mut a.wind_direction, 0.0..=360.0);
             let mut color = |ui: &mut egui::Ui, name: &str, c: &mut [f32; 3]| {
                 theme::label(ui, name);
                 changed |= ui.color_edit_button_rgb(c).changed();
                 ui.end_row();
             };
-            color(ui, "Цвет солнца", &mut a.sun_color);
-            color(ui, "Цвет неба", &mut a.sky_color);
-            color(ui, "Цвет тени", &mut a.shadow_color);
-            color(ui, "Оттенок", &mut a.tint);
+            color(ui, t("Цвет солнца"), &mut a.sun_color);
+            color(ui, t("Цвет неба"), &mut a.sky_color);
+            color(ui, t("Цвет тени"), &mut a.shadow_color);
+            color(ui, t("Оттенок"), &mut a.tint);
         });
         if changed {
             self.editor.dirty = true;
@@ -725,34 +742,34 @@ impl MapWorkspace {
 
     fn new_panel(&mut self, ui: &mut egui::Ui) {
         theme::props(ui, "new_props", |ui| {
-            theme::label(ui, "Имя");
+            theme::label(ui, t("Имя"));
             ui.add(egui::TextEdit::singleline(&mut self.new_name).desired_width(160.0));
             ui.end_row();
-            theme::label(ui, "Размер");
+            theme::label(ui, t("Размер"));
             egui::ComboBox::from_id_salt("new_size")
-                .selected_text(format!("{0}×{0} м", self.new_size))
+                .selected_text(f("{}×{} м", &[&self.new_size, &self.new_size]))
                 .show_ui(ui, |ui| {
                     for s in [128, 256, 512, 1024, 2048] {
-                        ui.selectable_value(&mut self.new_size, s, format!("{s}×{s} м"));
+                        ui.selectable_value(&mut self.new_size, s, f("{}×{} м", &[&s, &s]));
                     }
                 });
             ui.end_row();
-            theme::label(ui, "Начать с");
+            theme::label(ui, t("Начать с"));
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.generate, false, "Пустой");
-                ui.selectable_value(&mut self.generate, true, "Генерации");
+                ui.selectable_value(&mut self.generate, false, t("Пустой"));
+                ui.selectable_value(&mut self.generate, true, t("Генерации"));
             });
             ui.end_row();
             if self.generate {
                 theme::label(ui, "Seed");
                 ui.add(egui::DragValue::new(&mut self.new_seed));
                 ui.end_row();
-                theme::label(ui, "Точек захвата");
+                theme::label(ui, t("Точек захвата"));
                 ui.add(egui::DragValue::new(&mut self.new_points).range(1..=26));
                 ui.end_row();
             }
         });
-        if icons::wide_button(ui, Icon::New, "Создать").clicked() {
+        if icons::wide_button(ui, Icon::New, t("Создать")).clicked() {
             self.run(Pending::New);
         }
     }
@@ -760,7 +777,7 @@ impl MapWorkspace {
     fn open_panel(&mut self, ui: &mut egui::Ui) {
         let maps = MapFile::list(&self.maps_dir);
         if maps.is_empty() {
-            ui.label(RichText::new("В папке data/maps пока нет карт.").color(theme::TEXT_DIM));
+            ui.label(RichText::new(t("В папке data/maps пока нет карт.")).color(theme::TEXT_DIM));
             return;
         }
         if !maps.contains(&self.open_choice) {
@@ -772,7 +789,7 @@ impl MapWorkspace {
                     ui.selectable_value(&mut self.open_choice, m.clone(), m);
                 }
             });
-            if icons::button(ui, Icon::Open, "Открыть").clicked() {
+            if icons::button(ui, Icon::Open, t("Открыть")).clicked() {
                 let name = self.open_choice.clone();
                 self.run(Pending::Open(name));
             }
@@ -827,10 +844,10 @@ fn prefab_preview(ui: &mut egui::Ui, p: &Prefab) {
 
 fn terrain_name(m: TerrainMode) -> &'static str {
     match m {
-        TerrainMode::Raise => "Поднять",
-        TerrainMode::Lower => "Опустить",
-        TerrainMode::Smooth => "Сгладить",
-        TerrainMode::Flatten => "Выровнять",
+        TerrainMode::Raise => t("Поднять"),
+        TerrainMode::Lower => t("Опустить"),
+        TerrainMode::Smooth => t("Сгладить"),
+        TerrainMode::Flatten => t("Выровнять"),
     }
 }
 

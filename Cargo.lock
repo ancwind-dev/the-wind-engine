@@ -4300,6 +4300,8 @@ name = "wind_lab"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "ron",
+ "serde",
  "wind_net",
  "wind_render",
  "wind_sim",
