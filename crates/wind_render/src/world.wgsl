@@ -72,18 +72,6 @@ fn light(albedo_srgb: vec3<f32>, n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
     return lit(albedo_srgb, n, shadow(world, n));
 }
 
-// Тень одной выборкой — для травы: на ряби ковра мягкий край не виден, а выборок
-// на её перекрытиях было бы слишком много.
-fn shadow_quick(world: vec3<f32>) -> f32 {
-    let p = g.light_view_proj * vec4<f32>(world, 1.0);
-    let ndc = p.xyz / p.w;
-    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
-    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z > 1.0) {
-        return 1.0;
-    }
-    return mix(1.0, textureSampleCompareLevel(shadow_map, shadow_sampler, uv, ndc.z - 0.0015), g.sun_color.w);
-}
-
 fn lit(albedo_srgb: vec3<f32>, n: vec3<f32>, sh: f32) -> vec3<f32> {
     let albedo = to_linear(albedo_srgb);
     let direct = max(dot(n, g.sun_dir.xyz), 0.0) * sh;
@@ -256,18 +244,116 @@ fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec
     return albedo;
 }
 
-fn material(m: u32, p: vec2<f32>) -> vec3<f32> {
+// --- Земля: нарисованная, по приёму RWR -----------------------------------------
+// Ковра травинок нет (см. «Растительность — как у RWR, без ветра и ковра»): трава — это
+// раскраска земли. Крупные пятна осенних тонов (палитра травы хозяина), короткие
+// наклонные мазки травы, гуще пучками, и плавные «рисованные» границы между покрытиями.
+
+// Крупные пятна (0..1): градиентный шум в три октавы — круглые, без граней по сетке.
+fn ground_patches(p: vec2<f32>) -> f32 {
+    let q = p * 0.07;
+    let n = perlin(q) * 0.6 + perlin(q * 2.3 + vec2<f32>(5.2, 1.3)) * 0.3 + perlin(q * 5.1 + vec2<f32>(1.7, 9.2)) * 0.1;
+    return clamp(0.5 + n * 0.9, 0.0, 1.0);
+}
+
+// Тон покрытия без мазков (sRGB) при пятнистости `n`.
+fn ground_tone(m: u32, n: f32, p: vec2<f32>) -> vec3<f32> {
     var c: vec3<f32>;
     switch m {
-        case 1u: { c = vec3<f32>(0.56, 0.48, 0.28); }  // сухая трава
-        case 2u: { c = vec3<f32>(0.47, 0.40, 0.30); }  // земля
-        case 3u: { c = vec3<f32>(0.74, 0.68, 0.50); }  // песок
+        // Сухая трава: солома, светлее на «высоких» пятнах.
+        case 1u: { c = mix(vec3<f32>(0.55, 0.46, 0.27), vec3<f32>(0.68, 0.58, 0.36), smoothstep(0.3, 0.8, n)); }
+        case 2u: { c = vec3<f32>(0.47, 0.40, 0.30) * (0.92 + 0.12 * n); }  // земля
+        case 3u: { c = vec3<f32>(0.74, 0.68, 0.50) * (0.95 + 0.07 * n); }  // песок
         case 4u: { c = vec3<f32>(0.30, 0.30, 0.31); }  // асфальт
         case 5u: { c = vec3<f32>(0.62, 0.61, 0.58); }  // бетон
-        default: { c = vec3<f32>(0.47, 0.43, 0.24); }  // трава (осенняя)
+        // Трава (осенняя): тёмная олива → охра → приглушённое золото.
+        default: {
+            c = mix(vec3<f32>(0.33, 0.33, 0.17), vec3<f32>(0.50, 0.44, 0.21), smoothstep(0.25, 0.55, n));
+            c = mix(c, vec3<f32>(0.63, 0.52, 0.25), smoothstep(0.6, 0.85, n));
+        }
     }
-    // Лёгкая разница по клеткам (воксельный вид) и мягкие пятна внутри материала.
-    return c * (0.95 + 0.05 * hash2(floor(p))) * (0.94 + 0.08 * noise(p / 4.0));
+    // Чуть-чуть мелкого шума — без него большие пятна выглядят пластиком.
+    return c * (0.96 + 0.08 * noise(p * 0.9));
+}
+
+// Мазки травы: пучки из 2–3 коротких стеблей веером от одного корня — как нарисованная
+// трава у RWR2. Пучок «смотрит» от камеры: на экране стебли торчат вверх, будто трава
+// стоит, хотя это раскраска земли. Тёмные стебли — тень между травой, изредка светлые —
+// освещённые кончики. Возвращает (тёмные, светлые) 0..1. Гуще — пучками по шуму; вдали
+// гаснут (`fade`), чтобы не рябило.
+fn grass_strokes(p: vec2<f32>, fade: f32) -> vec2<f32> {
+    if (fade <= 0.0) {
+        return vec2<f32>(0.0);
+    }
+    let cell = 0.5;
+    let base = floor(p / cell);
+    let clump = smoothstep(0.3, 0.75, noise(p * 0.45));
+    // От камеры по земле — «вверх» на экране.
+    let away = normalize(p - g.eye.xz + vec2<f32>(1e-3, 0.0));
+    let up_angle = atan2(away.y, away.x);
+    var dark = 0.0;
+    var light = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let c = base + vec2<f32>(f32(dx), f32(dy));
+            let h1 = hash2(c);
+            let h2 = hash2(c + vec2<f32>(17.0, 3.0));
+            let h3 = hash2(c + vec2<f32>(41.0, 29.0));
+            // Вне пучков — реже.
+            if (h3 > 0.4 + 0.55 * clump) {
+                continue;
+            }
+            let root = (c + vec2<f32>(0.15 + 0.7 * h1, 0.15 + 0.7 * h2)) * cell;
+            let bright = h3 < 0.07;
+            let blades = 2 + i32(h2 * 1.99);
+            for (var b = 0; b < blades; b++) {
+                let fb = f32(b) - f32(blades - 1) * 0.5;
+                let a = up_angle + fb * 0.5 + (hash2(c + vec2<f32>(f32(b) * 7.0, 11.0)) - 0.5) * 0.35;
+                let dir = vec2<f32>(cos(a), sin(a));
+                let len = 0.13 + 0.14 * hash2(c + vec2<f32>(5.0, f32(b) * 13.0));
+                let t = clamp(dot(p - root, dir), 0.0, len);
+                let d = length(p - root - dir * t);
+                // К кончику тоньше.
+                let w = 0.03 * (1.0 - 0.7 * t / len);
+                let s = 1.0 - smoothstep(w * 0.5, w, d);
+                if (bright) {
+                    light = max(light, s);
+                } else {
+                    dark = max(dark, s);
+                }
+            }
+        }
+    }
+    return vec2<f32>(dark, light) * fade;
+}
+
+// Раскраска земли в точке (sRGB, до света): покрытия четырёх соседних клеток смешиваются
+// через неровный край (сдвиг по шуму + сглаженная граница ~0,6 м), на траве — мазки.
+fn ground_color(p: vec2<f32>, eye_dist: f32) -> vec3<f32> {
+    let size = vec2<i32>(textureDimensions(ground_tex));
+    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
+    let q = p + jitter - vec2<f32>(0.5);
+    let i = vec2<i32>(floor(q));
+    let f = smoothstep(vec2<f32>(0.2), vec2<f32>(0.8), fract(q));
+    let n = ground_patches(p);
+    var color = vec3<f32>(0.0);
+    var grassy = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = vec2<i32>(k & 1, k >> 1);
+        let cell = clamp(i + o, vec2<i32>(0), size - vec2<i32>(1));
+        let m = textureLoad(ground_tex, cell, 0).r;
+        let wx = select(1.0 - f.x, f.x, o.x == 1);
+        let wy = select(1.0 - f.y, f.y, o.y == 1);
+        color += ground_tone(m, n, p) * (wx * wy);
+        grassy += select(0.0, wx * wy, m <= 1u);
+    }
+    if (grassy > 0.01) {
+        let fade = 1.0 - smoothstep(45.0, 95.0, eye_dist);
+        let s = grass_strokes(p, fade * grassy);
+        color = mix(color, color * vec3<f32>(0.66, 0.64, 0.58), s.x * 0.7);
+        color = mix(color, color * 1.25 + vec3<f32>(0.03, 0.025, 0.0), s.y * 0.7);
+    }
+    return color;
 }
 
 // Зоны захвата, метка своего солдата, кисть редактора.
@@ -292,20 +378,11 @@ fn zones(albedo_in: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     return albedo;
 }
 
-// Покрытие в точке: со сдвигом по шуму — границы неровные, «рисованные».
-fn ground_at(p: vec2<f32>) -> u32 {
-    let size = vec2<i32>(textureDimensions(ground_tex));
-    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
-    let cell = clamp(vec2<i32>(floor(p + jitter)), vec2<i32>(0), size - vec2<i32>(1));
-    return textureLoad(ground_tex, cell, 0).r;
-}
-
 @fragment
 fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
     let size = vec2<i32>(textureDimensions(ground_tex));
-    let m = ground_at(p);
-    let albedo = zones(battle_traces(material(m, p), p, vec2<f32>(size)), p);
+    let albedo = zones(battle_traces(ground_color(p, distance(in.world, g.eye.xyz)), p, vec2<f32>(size)), p);
     let c = light(albedo, normalize(in.normal), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
