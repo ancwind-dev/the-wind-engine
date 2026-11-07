@@ -11,3 +11,6 @@ wind_audio = { version = "0.1.0", path = "../wind_audio" }
 wind_net = { version = "0.1.0", path = "../wind_net" }
 wind_render = { version = "0.1.0", path = "../wind_render" }
 wind_sim = { version = "0.1.0", path = "../wind_sim" }
+
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.34"

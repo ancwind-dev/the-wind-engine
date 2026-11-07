@@ -170,12 +170,10 @@ fn main() -> eframe::Result {
     // Во весь экран — сразу, чтобы не мелькало окно; размер окна выставим в первом кадре,
     // когда будет известен масштаб экрана. Замер FPS — всегда в окне 1600 × 900.
     let fullscreen = !args.window && args.bench.is_none() && Settings::load(&Settings::path(), Settings::default()).0.fullscreen;
+    // Значок движка — в заголовке окна и на панели задач (`icon/icon-256.png`).
+    let viewport = egui::ViewportBuilder::default().with_title("The Wind Engine").with_icon(icon());
     let options = eframe::NativeOptions {
-        viewport: if fullscreen {
-            egui::ViewportBuilder::default().with_title("The Wind Engine").with_fullscreen(true)
-        } else {
-            egui::ViewportBuilder::default().with_title("The Wind Engine").with_inner_size([1600.0, 900.0])
-        },
+        viewport: if fullscreen { viewport.with_fullscreen(true) } else { viewport.with_inner_size([1600.0, 900.0]) },
         depth_buffer: 32,
         multisampling: MSAA as u16,
         wgpu_options: egui_wgpu::WgpuConfiguration {
@@ -193,6 +191,11 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native("wind_client", options, Box::new(|cc| Ok(Box::new(Game::new(cc, args)))))
+}
+
+/// Значок движка: логотип, встроенный в программу.
+fn icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../../icon/icon-256.png")).expect("icon-256.png — PNG")
 }
 
 /// Счётчик кадров: среднее за секунду и худший кадр.

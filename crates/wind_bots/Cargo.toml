@@ -6,3 +6,6 @@ edition.workspace = true
 [dependencies]
 wind_net = { version = "0.1.0", path = "../wind_net" }
 wind_sim = { version = "0.1.0", path = "../wind_sim" }
+
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.34"

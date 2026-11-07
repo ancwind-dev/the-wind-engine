@@ -52,7 +52,9 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("The Wind Engine — Лаборатория")
-            .with_inner_size([1600.0, 950.0]),
+            .with_inner_size([1600.0, 950.0])
+            // Значок движка — в заголовке окна и на панели задач.
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../../icon/icon-256.png")).expect("icon-256.png — PNG")),
         // Для 3D-вида: буфер глубины и сглаживание, как в игре.
         depth_buffer: 32,
         multisampling: MSAA as u16,
