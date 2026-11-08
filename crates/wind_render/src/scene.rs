@@ -180,9 +180,12 @@ pub struct SceneBuilder {
     props: PropLibrary,
     /// Что не прочиталось из моделей предметов — забирает `take_notes`.
     notes: Vec<String>,
-    /// Пучки травы карты и для чего они расставлены: (карта, покрытие, предметы, модели).
-    tufts: Vec<crate::tufts::Tuft>,
-    tufts_key: Option<(u64, u64, u64, u64)>,
+    /// Файлы травы (`data/models/grass`), перечитываются на лету.
+    grass_files: crate::grass::GrassLibrary,
+    /// Для чего расставлена трава: (карта, покрытие, предметы, модели предметов).
+    grass_key: Option<(u64, u64, u64, u64)>,
+    /// Сколько кусков травы на карте.
+    pub grass_pieces: usize,
 }
 
 /// Ширина сгиба по умолчанию, воксели.
@@ -207,8 +210,9 @@ impl Default for SceneBuilder {
             pose_overrides: Vec::new(),
             props: PropLibrary::default(),
             notes: Vec::new(),
-            tufts: Vec::new(),
-            tufts_key: None,
+            grass_files: Default::default(),
+            grass_key: None,
+            grass_pieces: 0,
         }
     }
 }
@@ -239,8 +243,12 @@ impl SceneBuilder {
         SceneBuilder { characters, ..Default::default() }
     }
 
-    /// Модели предметов — из папки `dir` (обычно `data/models/props`).
+    /// Модели предметов — из папки `dir` (обычно `data/models/props`); трава — из соседней
+    /// папки `grass`.
     pub fn with_props(mut self, dir: PathBuf) -> Self {
+        if let Some(parent) = dir.parent() {
+            self.grass_files = crate::grass::GrassLibrary::new(parent.join("grass"));
+        }
         self.props = PropLibrary::new(dir);
         self
     }
@@ -470,28 +478,24 @@ impl SceneBuilder {
             }
         }
 
-        // Пучки травы: расставляются заново, когда поменялась карта, покрытие, предметы
-        // или их модели; в кадр — те, что рядом.
+        // Трава: расставляется заново, когда поменялась карта, покрытие, предметы или их
+        // модели, и целиком уходит на GPU; рисуются куски видимых чанков.
         let props_hash = input.props.iter().fold(input.props.len() as u64, |h, p| {
             let v = [p.pos.0, p.pos.1, p.angle, p.scale].iter().fold(h, |h, f| h.rotate_left(7) ^ u64::from(f.to_bits()));
             p.model.bytes().fold(v, |h, b| h.rotate_left(5) ^ u64::from(b))
         });
-        let tufts_key = (input.map_key, input.map.ground_revision, props_hash, self.props.generation());
-        if self.tufts_key != Some(tufts_key) {
-            self.tufts_key = Some(tufts_key);
-            self.tufts = crate::tufts::place(input.map, input.props, |name| self.props.footprint(name));
+        match self.grass_files.poll() {
+            Some(Ok(assets)) => self.pending.lock().unwrap_or_else(|e| e.into_inner()).grass_assets = Some(assets),
+            Some(Err(e)) => self.notes.push(format!("трава: {e}")),
+            None => {}
         }
-        // Пучки мелкие: дальше края экрана их не видно, а тень от них короткая.
-        let tuft_reach2 = (cam.distance * 1.3 + 10.0).min(reach).powi(2);
-        for t in &self.tufts {
-            if t.pos.distance_squared(cam.target) > tuft_reach2 {
-                continue;
-            }
-            let m = Mat4::from_translation(to_3d(t.pos, input.map.height_at(t.pos)))
-                * Mat4::from_rotation_y(t.angle)
-                * Mat4::from_scale(Vec3::splat(t.scale));
-            let [r, g, b] = t.tint;
-            by_mesh[MeshId::Tuft as usize].push(Instance { model: m.to_cols_array_2d(), tint: [r, g, b, 0.5] });
+        let grass_key = (input.map_key, input.map.ground_revision, props_hash, self.props.generation());
+        if self.grass_key != Some(grass_key) {
+            self.grass_key = Some(grass_key);
+            let pieces = crate::grass::place(input.map, input.props, |name| self.props.footprint(name));
+            self.grass_pieces = pieces.len();
+            let upload = crate::grass::upload(input.map, pieces);
+            self.pending.lock().unwrap_or_else(|e| e.into_inner()).grass = Some(upload);
         }
 
         let mut instances = Vec::new();

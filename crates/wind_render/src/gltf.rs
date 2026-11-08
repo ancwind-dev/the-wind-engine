@@ -22,6 +22,47 @@ pub fn load(bytes: &[u8]) -> Result<Mesh, String> {
     Ok(mesh)
 }
 
+/// Карточки с картинкой (трава): положения и UV (`TEXCOORD_0`) всех треугольников файла.
+/// Материал и нормали не берём — картинку и свет даёт движок.
+pub fn load_cards(bytes: &[u8]) -> Result<(Vec<crate::grass::CardVertex>, Vec<u32>), String> {
+    let (doc, bin) = split_glb(bytes)?;
+    let json = Json::parse(doc)?;
+    let (mut vertices, mut indices) = (Vec::new(), Vec::new());
+    visit_meshes(&json, &mut |index, transform| {
+        let m = json.get("meshes").and_then(|m| m.at(index)).ok_or(format!("нет меша {index}"))?;
+        let mirrored = transform.determinant() < 0.0;
+        for p in m.get("primitives").map(Json::items).unwrap_or(&[]) {
+            if p.get("mode").and_then(Json::as_usize).unwrap_or(4) != 4 {
+                continue;
+            }
+            let attrs = p.get("attributes").ok_or("у примитива нет attributes")?;
+            let positions = read(&json, bin, attrs.get("POSITION").and_then(Json::as_usize).ok_or("нет POSITION")?)?;
+            let uvs = read(&json, bin, attrs.get("TEXCOORD_0").and_then(Json::as_usize).ok_or("нет TEXCOORD_0 (UV)")?)?;
+            let local: Vec<u32> = match p.get("indices").and_then(Json::as_usize) {
+                Some(a) => read(&json, bin, a)?.iter().map(|v| v.x as u32).collect(),
+                None => (0..positions.len() as u32).collect(),
+            };
+            if local.iter().any(|&i| i as usize >= positions.len().min(uvs.len())) {
+                return Err("индекс вершины за пределами".into());
+            }
+            let first = vertices.len() as u32;
+            for (pos, uv) in positions.iter().zip(&uvs) {
+                let pos = transform.transform_point3(pos.truncate());
+                vertices.push(crate::grass::CardVertex { pos: pos.to_array(), uv: [uv.x, uv.y] });
+            }
+            for &[a, b, c] in local.as_chunks::<3>().0 {
+                let [a, b, c] = [a + first, b + first, c + first];
+                indices.extend(if mirrored { [a, c, b] } else { [a, b, c] });
+            }
+        }
+        Ok(())
+    })?;
+    if indices.is_empty() {
+        return Err("в файле нет треугольников".into());
+    }
+    Ok((vertices, indices))
+}
+
 /// Обойти узлы сцены: для каждого меша — его номер и положение в мире.
 fn visit_meshes(json: &Json, f: &mut dyn FnMut(usize, Mat4) -> Result<(), String>) -> Result<(), String> {
     let scene = json.get("scene").and_then(Json::as_usize).unwrap_or(0);

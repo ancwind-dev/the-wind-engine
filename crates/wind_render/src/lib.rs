@@ -8,6 +8,7 @@ pub mod character;
 mod decals;
 mod effects;
 pub mod gltf;
+pub mod grass;
 pub mod mapmesh;
 pub mod mocap;
 pub mod models;
@@ -17,7 +18,6 @@ pub mod renderer;
 pub mod rwr;
 pub mod rwr_anim;
 pub mod scene;
-pub mod tufts;
 pub mod voxel;
 
 pub use camera::Camera;

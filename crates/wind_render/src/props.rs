@@ -3,7 +3,7 @@
 //! Папка перечитывается на лету: сохранил модель в Blender — она тут же поменялась в
 //! игре и в редакторе. Имя модели — имя файла без `.glb`.
 
-use crate::tufts::Footprint;
+use crate::grass::Footprint;
 use crate::voxel::Mesh;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

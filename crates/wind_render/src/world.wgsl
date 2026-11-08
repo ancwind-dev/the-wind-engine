@@ -232,6 +232,8 @@ fn noise(p: vec2<f32>) -> f32 {
 // Следы боя на всю карту: r — подпалины, g — кровь.
 @group(1) @binding(2) var decal_tex: texture_2d<f32>;
 @group(1) @binding(3) var decal_sampler: sampler;
+// Густота травы-карточек по клеткам (0..1).
+@group(1) @binding(7) var grass_density: texture_2d<f32>;
 
 fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec3<f32> {
     let t = textureSample(decal_tex, decal_sampler, p / map_size).rg;
@@ -245,11 +247,9 @@ fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec
 }
 
 // --- Земля: нарисованная, по приёму RWR2 ----------------------------------------
-// Ковра травинок нет (см. «Растительность — как у RWR, без ветра и ковра»): трава — это
-// раскраска земли. Как на референсах RWR2: покрытия ровного тона, границы между ними
-// чёткие и неровные, с тонкой тёмной каймой; трава — длинные стебли пучками тон в тон,
-// чуть темнее и чуть светлее фона. Высокие пучки у заборов и стен — отдельные картинки
-// (`tufts`).
+// Как на референсах RWR2: покрытия ровного тона, границы между ними чёткие и неровные,
+// с тонкой тёмной каймой. Сама трава — карточки GrassV1 хозяина (`grass.rs`, `vs_grass`),
+// нарисованных стеблей на земле больше нет (2026-11-08).
 
 // Крупные пятна (0..1): градиентный шум в три октавы — круглые, без граней по сетке.
 fn ground_patches(p: vec2<f32>) -> f32 {
@@ -258,8 +258,7 @@ fn ground_patches(p: vec2<f32>) -> f32 {
     return clamp(0.5 + n * 0.9, 0.0, 1.0);
 }
 
-// Тон покрытия без мазков (sRGB) при пятнистости `n`. Пятна — слабые: у RWR2 покрытие
-// почти ровное, фактуру дают мазки.
+// Тон покрытия (sRGB) при пятнистости `n`. Пятна — слабые: у RWR2 покрытие почти ровное.
 fn ground_tone(m: u32, n: f32) -> vec3<f32> {
     switch m {
         // Сухая трава: солома.
@@ -273,69 +272,11 @@ fn ground_tone(m: u32, n: f32) -> vec3<f32> {
     }
 }
 
-// Мазки травы — как поле на референсах RWR2: длинные тонкие стебли пучками, почти
-// параллельно, с лёгким изгибом. Пучок «смотрит» от камеры — на экране стебли торчат
-// вверх, будто трава стоит, хотя это раскраска земли. Тон в тон: чаще чуть темнее фона,
-// реже чуть светлее. Возвращает (тёмные, светлые) 0..1. Гуще — пятнами по шуму; вдали
-// гаснут (`fade`), чтобы не рябило.
-fn grass_strokes(p: vec2<f32>, fade: f32) -> vec2<f32> {
-    if (fade <= 0.0) {
-        return vec2<f32>(0.0);
-    }
-    let cell = 0.45;
-    // От камеры по земле — «вверх» на экране.
-    let away = normalize(p - g.eye.xz + vec2<f32>(1e-3, 0.0));
-    let side = vec2<f32>(-away.y, away.x);
-    // Корни, чьи стебли дотягиваются до точки, лежат «ниже» неё — ищем вокруг p − away·0,35.
-    let base = floor((p - away * 0.35) / cell);
-    let clump = smoothstep(0.2, 0.7, noise(p * 0.3 + vec2<f32>(7.0, 3.0)));
-    var dark = 0.0;
-    var light = 0.0;
-    for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-            let c = base + vec2<f32>(f32(dx), f32(dy));
-            let h1 = hash2(c);
-            let h2 = hash2(c + vec2<f32>(17.0, 3.0));
-            let h3 = hash2(c + vec2<f32>(41.0, 29.0));
-            // Вне пятен — реже.
-            if (h3 > 0.25 + 0.7 * clump) {
-                continue;
-            }
-            let root = (c + vec2<f32>(h1, h2)) * cell;
-            let lit = h3 < 0.1;
-            let tilt = (h1 - 0.5) * 0.5;
-            let bend = (h2 - 0.5) * 0.5;
-            for (var b = 0; b < 3; b++) {
-                let hb = hash2(c + vec2<f32>(f32(b) * 7.0, 11.0));
-                let a = tilt + (f32(b) - 1.0) * 0.12;
-                let dir = away * cos(a) + side * sin(a);
-                let nrm = vec2<f32>(-dir.y, dir.x);
-                let r = root + side * ((f32(b) - 1.0) * 0.07 + (hb - 0.5) * 0.05);
-                let len = (0.38 + 0.4 * hb) * (0.7 + 0.4 * clump);
-                let rel = p - r;
-                let u = clamp(dot(rel, dir), 0.0, len);
-                // Лёгкий изгиб: стебель уходит вбок пропорционально квадрату длины.
-                let v = dot(rel, nrm) - bend * u * u / len;
-                let d = length(vec2<f32>(dot(rel, dir) - u, v));
-                // К кончику тоньше.
-                let w = 0.026 * (1.0 - 0.8 * u / len);
-                let s = 1.0 - smoothstep(w * 0.4, w, d);
-                if (lit) {
-                    light = max(light, s);
-                } else {
-                    dark = max(dark, s);
-                }
-            }
-        }
-    }
-    return vec2<f32>(dark, light) * fade;
-}
-
 // Раскраска земли в точке (sRGB, до света). Доля каждого покрытия — билинейно по четырём
 // соседним клеткам, через сдвиг по шуму; в точке берём покрытие с наибольшей долей —
 // граница выходит чёткой, со скруглёнными углами вместо ступенек по клеткам. Сглаживание
 // края — на ширину пикселя; по самому краю — тонкая тёмная кайма, как в RWR2.
-fn ground_color(p: vec2<f32>, eye_dist: f32) -> vec3<f32> {
+fn ground_color(p: vec2<f32>) -> vec3<f32> {
     let size = vec2<i32>(textureDimensions(ground_tex));
     let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.2
         + vec2<f32>(perlin(p * 1.9), perlin(p * 1.9 + vec2<f32>(13.0, 7.0))) * 0.22;
@@ -385,12 +326,15 @@ fn ground_color(p: vec2<f32>, eye_dist: f32) -> vec3<f32> {
     let meters_per_px = max(length(fwidth(p)) * 0.7, 1e-4);
     let edge_m = edge_px * meters_per_px;
     var color = mix(ground_tone(m2, n), ground_tone(m1, n), 0.5 + 0.5 * clamp(edge_px, 0.0, 1.0));
-    let grassy = select(0.0, 1.0, m1 <= 1u) * clamp(edge_px, 0.0, 1.0);
-    if (grassy > 0.0) {
-        let fade = 1.0 - smoothstep(45.0, 95.0, eye_dist);
-        let s = grass_strokes(p, fade * grassy);
-        color = mix(color, color * vec3<f32>(0.84, 0.82, 0.78), s.x);
-        color = mix(color, color * 1.09 + vec3<f32>(0.02, 0.018, 0.0), s.y);
+    // Подложка под травой: где карточки густые, земля — в средний тон атласа травы, как
+    // «сплошная подложка того же тона» в превью хозяина; между кусками не просвечивает
+    // светлая земля. Граница подложки — неровная, по шуму.
+    if (m1 <= 1u) {
+        let dens = textureSampleLevel(grass_density, decal_sampler, p / vec2<f32>(size), 0.0).r;
+        // Подложка — средний тон атласа травы (сплошная масса под стеблями, как в превью).
+        let under = select(vec3<f32>(0.46, 0.40, 0.24), vec3<f32>(0.50, 0.42, 0.25), m1 == 1u) * (0.94 + 0.12 * noise(p * 0.6));
+        let k = smoothstep(0.25, 0.75, dens + (noise(p * 1.3) - 0.5) * 0.3);
+        color = mix(color, under, k * clamp(edge_px, 0.0, 1.0) * 0.9);
     }
     // Кайма по краю покрытия: ~3 см, но не тоньше пикселя.
     if (m1 != m2) {
@@ -426,7 +370,7 @@ fn zones(albedo_in: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
 fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
     let size = vec2<i32>(textureDimensions(ground_tex));
-    let albedo = zones(battle_traces(ground_color(p, distance(in.world, g.eye.xyz)), p, vec2<f32>(size)), p);
+    let albedo = zones(battle_traces(ground_color(p), p, vec2<f32>(size)), p);
     let c = light(albedo, normalize(in.normal), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
@@ -439,6 +383,90 @@ fn fs_ground(in: GOut) -> @location(0) vec4<f32> {
     let albedo = vec3<f32>(0.47, 0.43, 0.24) * 0.45 * (0.95 + 0.05 * hash2(floor(p)));
     let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
+}
+
+// --- Трава карточками (GrassV1 хозяина, см. grass.rs) -------------------------
+// Кусок — карточка с рисованными стеблями из атласа; края — отсечение по альфе (в основном
+// проходе — через покрытие MSAA, сглаженно; в тенях — порог 0,3, чтобы тонкие стебли не
+// теряли тень). Нормаль — вверх: кусок освещён как земля под ним.
+
+@group(1) @binding(5) var grass_tex: texture_2d<f32>;
+@group(1) @binding(6) var grass_sampler: sampler;
+
+struct GrassIn {
+    @location(0) pos: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    // Где стоит (xyz) и разброс поворота от «лицом к камере» (w); размер и яркость;
+    // вид и признаки (бит 0 — отбрасывает тень).
+    @location(2) at_angle: vec4<f32>,
+    @location(3) scale_shade: vec2<f32>,
+    @location(4) kind_flags: vec2<u32>,
+};
+
+struct GrassOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) shade: f32,
+};
+
+fn grass_world(v: GrassIn) -> vec3<f32> {
+    // Лицом к камере, как у RWR2: ось z куска (куда он наклонён) — от камеры, так что
+    // наклон уводит верх куска от глаза и картинка видна лицом. Плюс свой разброс.
+    let d = v.at_angle.xz - g.eye.xz;
+    let a = atan2(-d.x, d.y) + v.at_angle.w;
+    let c = cos(a);
+    let s = sin(a);
+    let p = v.pos * v.scale_shade.x;
+    // При a = 0 ось x куска — вдоль +x карты, ось z — вдоль +y карты.
+    return v.at_angle.xyz + vec3<f32>(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+}
+
+@vertex
+fn vs_grass(v: GrassIn) -> GrassOut {
+    var out: GrassOut;
+    out.world = grass_world(v);
+    out.clip = g.view_proj * vec4<f32>(out.world, 1.0);
+    out.uv = v.uv;
+    out.shade = v.scale_shade.y;
+    return out;
+}
+
+@vertex
+fn vs_grass_shadow(v: GrassIn) -> GrassOut {
+    var out: GrassOut;
+    out.world = grass_world(v);
+    out.clip = g.light_view_proj * vec4<f32>(out.world, 1.0);
+    // Куски в поле тени не отбрасывают: вырождаем треугольники в точку за картой теней.
+    if ((v.kind_flags.y & 1u) == 0u) {
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    }
+    out.uv = v.uv;
+    out.shade = v.scale_shade.y;
+    return out;
+}
+
+@fragment
+fn fs_grass(in: GrassOut) -> @location(0) vec4<f32> {
+    // Мип на ступень резче: силуэт стеблей не расплывается в мыло на игровой камере.
+    let t = textureSampleBias(grass_tex, grass_sampler, in.uv, -1.0);
+    // Альфа резче на ширину пикселя — край стебля чёткий, но сглаженный покрытием MSAA.
+    let a = clamp((t.a - 0.5) / max(fwidth(t.a), 1e-4) + 0.5, 0.0, 1.0);
+    if (t.a < 0.15) {
+        discard;
+    }
+    // Цвета — свои, из атласа хозяина.
+    let albedo = t.rgb * in.shade;
+    // Свет — общий с землёй: тени домов ложатся на траву так же, как рядом на землю.
+    let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
+    return vec4<f32>(fogged(c, in.world), a);
+}
+
+@fragment
+fn fs_grass_shadow(in: GrassOut) {
+    if (textureSample(grass_tex, grass_sampler, in.uv).a < 0.3) {
+        discard;
+    }
 }
 
 // --- Свои солдаты ------------------------------------------------------------

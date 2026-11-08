@@ -2,6 +2,7 @@
 //! и вызывается из paint callback (см. [`WorldPaint`]).
 
 use crate::character::{CharVertex, CharacterSet, LODS, PointVertex};
+use crate::grass::{CardVertex, GrassAssets, GrassUpload, Piece};
 use crate::mapmesh::ChunkMeshes;
 use crate::models::{self, MESH_COUNT};
 use crate::voxel::{Mesh, Vertex};
@@ -98,6 +99,10 @@ pub struct PendingMap {
     pub decal_rects: Vec<([u32; 4], Vec<u8>)>,
     /// Новые и изменённые модели предметов: (имя, меш).
     pub props: Vec<(String, Mesh)>,
+    /// Трава карты — целиком, при смене карты, покрытия или предметов.
+    pub grass: Option<GrassUpload>,
+    /// Новые файлы травы (куски и атлас) — при запуске и когда их перевыгрузили.
+    pub grass_assets: Option<GrassAssets>,
 }
 
 /// Всё, что нужно GPU для одного кадра. Собирает [`crate::scene::SceneBuilder`].
@@ -172,6 +177,8 @@ pub struct WorldRenderer {
     ground_texture: wgpu::Texture,
     decal_texture: wgpu::Texture,
     decal_sampler: wgpu::Sampler,
+    /// Густота травы по клеткам (см. `GrassUpload::density`).
+    grass_density: wgpu::Texture,
     ground_bind: wgpu::BindGroup,
     globals: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -216,7 +223,218 @@ pub struct WorldRenderer {
     particle_capacity: usize,
     particle_count: u32,
     nd: Option<NdTarget>,
+    /// Трава карточками: конвейеры (картинка и тень, обе — с отсечением по альфе), атлас,
+    /// меши кусков, куски карты и где в них какой вид и чанк.
+    grass: GrassGpu,
     pub stats: RenderStats,
+}
+
+struct GrassGpu {
+    pipeline: wgpu::RenderPipeline,
+    shadow: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    /// Атлас и меши кусков — когда файлы травы прочитаны.
+    bind: Option<wgpu::BindGroup>,
+    meshes: Vec<GpuMesh>,
+    pieces: Option<wgpu::Buffer>,
+    /// Вид × чанков + чанк → (первый кусок, сколько).
+    ranges: Vec<(u32, u32)>,
+    chunks: usize,
+}
+
+const CARD_ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+const PIECE_ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x2, 4 => Uint32x2];
+
+fn grass_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<CardVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &CARD_ATTRS,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<Piece>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &PIECE_ATTRS,
+        }),
+    ]
+}
+
+impl GrassGpu {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule,
+        main_layout: &wgpu::BindGroupLayout,
+        shadow_layout: &wgpu::BindGroupLayout,
+        color_format: wgpu::TextureFormat,
+        msaa: u32,
+    ) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grass atlas"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let main = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("grass"),
+            bind_group_layouts: &[Some(main_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let shadow_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("grass shadow"),
+            bind_group_layouts: &[Some(shadow_layout), Some(&layout)],
+            immediate_size: 0,
+        });
+        let buffers = grass_layouts();
+        let depth = |bias: wgpu::DepthBiasState| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias,
+        };
+        // Края стеблей — через альфу в покрытие MSAA (сглаженно), альфу кадра не трогаем.
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("grass"),
+            layout: Some(&main),
+            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_grass"), compilation_options: Default::default(), buffers: &buffers },
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(depth(Default::default())),
+            multisample: wgpu::MultisampleState { count: msaa.max(1), mask: !0, alpha_to_coverage_enabled: msaa > 1 },
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fs_grass"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: color_format, blend: None, write_mask: wgpu::ColorWrites::COLOR })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let shadow = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("grass shadow"),
+            layout: Some(&shadow_pl),
+            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_grass_shadow"), compilation_options: Default::default(), buffers: &buffers },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(depth(wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 })),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState { module: shader, entry_point: Some("fs_grass_shadow"), compilation_options: Default::default(), targets: &[] }),
+            multiview_mask: None,
+            cache: None,
+        });
+        GrassGpu { pipeline, shadow, layout, bind: None, meshes: Vec::new(), pieces: None, ranges: Vec::new(), chunks: 0 }
+    }
+
+    /// Новые куски и атлас (при запуске и после перевыгрузки из Blender).
+    fn set_assets(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, assets: &GrassAssets) {
+        let layout = &self.layout;
+        // Атлас с мип-уровнями (альфа подобрана для отсечения, см. `grass::atlas_mips`).
+        // Цвета в нём — sRGB, но формат «как есть»: свет (`light`) сам переводит из sRGB.
+        let (w, h, rgba) = &assets.atlas;
+        let mips = crate::grass::atlas_mips(*w, *h, rgba);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("grass atlas"),
+            size: wgpu::Extent3d { width: *w, height: *h, depth_or_array_layers: 1 },
+            mip_level_count: mips.len() as u32,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        for (level, (lw, lh, texels)) in mips.iter().enumerate() {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: level as u32, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                texels,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(lw * 4), rows_per_image: Some(*lh) },
+                wgpu::Extent3d { width: *lw, height: *lh, depth_or_array_layers: 1 },
+            );
+        }
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("grass atlas"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grass atlas"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        self.meshes = assets
+            .meshes
+            .iter()
+            .enumerate()
+            .map(|(i, (v, idx))| GpuMesh::raw(device, bytemuck::cast_slice(v), idx, &format!("grass {i}")))
+            .collect();
+        self.bind = Some(bind);
+    }
+
+    fn upload(&mut self, device: &wgpu::Device, up: GrassUpload) {
+        self.pieces = (!up.pieces.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("grass pieces"),
+                contents: bytemuck::cast_slice(&up.pieces),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
+        self.ranges = up.ranges;
+        self.chunks = up.chunks;
+    }
+
+    /// Куски видимых чанков: по видам, соседние диапазоны — одним вызовом.
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, visible: &[u32]) -> usize {
+        let (Some(pieces), Some(bind)) = (&self.pieces, &self.bind) else { return 0 };
+        pass.set_bind_group(1, bind, &[]);
+        pass.set_vertex_buffer(1, pieces.slice(..));
+        let mut sorted: Vec<u32> = visible.iter().copied().filter(|&c| (c as usize) < self.chunks).collect();
+        sorted.sort_unstable();
+        let mut calls = 0;
+        for (kind, mesh) in self.meshes.iter().enumerate() {
+            let mut run: Option<(u32, u32)> = None;
+            for &c in &sorted {
+                let (first, count) = self.ranges[kind * self.chunks + c as usize];
+                if count == 0 {
+                    continue;
+                }
+                run = match run {
+                    Some((a, b)) if b == first => Some((a, first + count)),
+                    Some((a, b)) => {
+                        mesh.draw(pass, a..b);
+                        calls += 1;
+                        Some((first, first + count))
+                    }
+                    None => Some((first, first + count)),
+                };
+            }
+            if let Some((a, b)) = run {
+                mesh.draw(pass, a..b);
+                calls += 1;
+            }
+        }
+        calls
+    }
 }
 
 const MESH_ATTRS: [wgpu::VertexAttribute; 3] =
@@ -391,6 +609,17 @@ impl WorldRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Густота травы по клеткам — подложка тона травы на земле.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let ground_texture = layer_texture(device, "ground", wgpu::TextureFormat::R8Uint, 1, 1);
@@ -401,7 +630,8 @@ impl WorldRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        let ground_bind = ground_bind(device, &ground_layout, &ground_texture, &decal_texture, &decal_sampler);
+        let grass_density = layer_texture(device, "grass density", wgpu::TextureFormat::R8Unorm, 1, 1);
+        let ground_bind = ground_bind(device, &ground_layout, &ground_texture, &decal_texture, &grass_density, &decal_sampler);
 
         let main_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("world"),
@@ -716,6 +946,7 @@ impl WorldRenderer {
             cache: None,
         });
         let particle_capacity = 256;
+        let grass = GrassGpu::new(device, &shader, &main_layout, &shadow_layout, color_format, msaa);
 
         let (char_meshes, char_points) = characters
             .map(|c| {
@@ -753,6 +984,7 @@ impl WorldRenderer {
             ground_texture,
             decal_texture,
             decal_sampler,
+            grass_density,
             ground_bind,
             globals,
             bind,
@@ -795,6 +1027,7 @@ impl WorldRenderer {
             particle_capacity,
             particle_count: 0,
             nd: None,
+            grass,
             stats: RenderStats::default(),
         }
     }
@@ -810,6 +1043,26 @@ impl WorldRenderer {
                 let terrain = GpuMesh::new(device, &meshes.terrain, "map terrain");
                 let water = meshes.water.map(|m| GpuMesh::new(device, &m, "map water"));
                 self.chunks.insert(chunk, (walls, terrain, water));
+            }
+            if let Some(assets) = pending.grass_assets.take() {
+                self.grass.set_assets(device, queue, &assets);
+            }
+            if let Some(mut up) = pending.grass.take() {
+                let (w, h, cells) = std::mem::take(&mut up.density);
+                let size = self.grass_density.size();
+                if size.width != w || size.height != h {
+                    self.grass_density = layer_texture(device, "grass density", wgpu::TextureFormat::R8Unorm, w, h);
+                    self.rebind_ground(device);
+                }
+                if w * h > 0 {
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { texture: &self.grass_density, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                        &cells,
+                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+                        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    );
+                }
+                self.grass.upload(device, up);
             }
             for (name, mesh) in pending.props.drain(..) {
                 let gpu = GpuMesh::new(device, &mesh, &format!("prop {name}"));
@@ -913,6 +1166,8 @@ impl WorldRenderer {
         for &(mesh, _, first, count) in &self.char_batches {
             self.char_meshes[mesh].draw(&mut pass, first..first + count);
         }
+        pass.set_pipeline(&self.grass.shadow);
+        self.grass.draw(&mut pass, &self.visible);
         drop(pass);
 
         // Проход нормалей и глубины — для обводки и затенения.
@@ -979,6 +1234,10 @@ impl WorldRenderer {
             pass.set_pipeline(pipeline);
             self.draw_characters(pass);
         }
+        // Трава — после солдат: силуэт сквозь стены не должен вспыхивать за каждым пучком,
+        // а солдата в траве она закрывает по глубине.
+        pass.set_pipeline(&self.grass.pipeline);
+        self.grass.draw(pass, &self.visible);
         if let Some(nd) = &self.nd {
             pass.set_pipeline(&self.post);
             pass.set_bind_group(1, &nd.bind, &[]);
@@ -1005,7 +1264,7 @@ impl WorldRenderer {
     }
 
     fn rebind_ground(&mut self, device: &wgpu::Device) {
-        self.ground_bind = ground_bind(device, &self.ground_layout, &self.ground_texture, &self.decal_texture, &self.decal_sampler);
+        self.ground_bind = ground_bind(device, &self.ground_layout, &self.ground_texture, &self.decal_texture, &self.grass_density, &self.decal_sampler);
     }
 
     fn draw_characters(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -1084,10 +1343,12 @@ fn ground_bind(
     layout: &wgpu::BindGroupLayout,
     ground: &wgpu::Texture,
     decals: &wgpu::Texture,
+    grass: &wgpu::Texture,
     sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let ground = ground.create_view(&wgpu::TextureViewDescriptor::default());
     let decals = decals.create_view(&wgpu::TextureViewDescriptor::default());
+    let grass = grass.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ground"),
         layout,
@@ -1095,6 +1356,7 @@ fn ground_bind(
             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&ground) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&decals) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&grass) },
         ],
     })
 }

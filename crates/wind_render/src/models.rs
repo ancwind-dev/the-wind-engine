@@ -20,11 +20,9 @@ pub enum MeshId {
     Rifle,
     Cube,
     Boat,
-    /// Пучок травы (см. `tufts`).
-    Tuft,
 }
 
-pub const MESH_COUNT: usize = 8;
+pub const MESH_COUNT: usize = 7;
 
 /// Размер вокселя лодки, м.
 pub const BOAT_VOXEL: f32 = 0.12;
@@ -137,7 +135,6 @@ pub fn build_meshes(models_dir: Option<&Path>) -> (Vec<Mesh>, Vec<String>) {
     }
     meshes.push(cube());
     meshes.push(greedy_mesh(&boat(), Vec3::new(18.0, 0.0, 7.5), BOAT_VOXEL));
-    meshes.push(tuft());
     (meshes, notes)
 }
 
@@ -195,40 +192,6 @@ fn boat() -> VoxelModel {
 }
 
 /// Единичный белый куб с центром в начале координат — для пуль, гранат, взрывов.
-/// Пучок травы: густой веер плоских стеблей (двусторонних), до 0,75 м высотой. Свет —
-/// цветом вершин, как у карточек RWR: у корня темно, к кончику светло, а цвет травы даёт
-/// `tint` экземпляра. Нормаль у всех вершин — вверх: пучок освещён как земля под ним, без
-/// пёстрых бликов на стеблях.
-fn tuft() -> Mesh {
-    const BLADES: u32 = 14;
-    let h = |i: u32, k: u32| {
-        let mut v = i.wrapping_mul(0x9E37_79B1) ^ k.wrapping_mul(0x85EB_CA77);
-        v ^= v >> 15;
-        v = v.wrapping_mul(0x2C1B_3C6D);
-        v ^= v >> 13;
-        (v >> 8) as f32 / 16_777_216.0
-    };
-    let mut m = Mesh::default();
-    let up = [0, 127, 0];
-    let (root_c, tip_c) = ([92, 88, 80, 255], [255, 252, 240, 255]);
-    for i in 0..BLADES {
-        let around = (i as f32 + 0.6 * h(i, 1)) / BLADES as f32 * std::f32::consts::TAU;
-        let out = Vec3::new(around.cos(), 0.0, around.sin());
-        let side = Vec3::new(-out.z, 0.0, out.x);
-        // Наклон от вертикали: средние стебли прямее, крайние — в стороны.
-        let lean = 0.2 + 0.75 * h(i, 2);
-        let height = 0.4 + 0.35 * h(i, 3);
-        let root = out * (0.02 + 0.1 * h(i, 4));
-        let tip = root + out * (height * lean.sin()) + Vec3::Y * (height * lean.cos());
-        let w = 0.05 + 0.035 * h(i, 5);
-        let c = [root - side * w, root + side * w, tip + side * (w * 0.12), tip - side * (w * 0.12)];
-        let colors = [root_c, root_c, tip_c, tip_c];
-        m.quad(c, up, colors);
-        m.quad([c[1], c[0], c[3], c[2]], up, [root_c, root_c, tip_c, tip_c]);
-    }
-    m
-}
-
 fn cube() -> Mesh {
     let mut m = VoxelModel::new([1, 1, 1]);
     m.palette[1] = [255, 255, 255, 255];

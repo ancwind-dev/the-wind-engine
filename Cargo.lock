@@ -4328,6 +4328,7 @@ dependencies = [
  "bytemuck",
  "eframe",
  "glam",
+ "png",
  "ron",
  "serde",
  "wind_sim",
