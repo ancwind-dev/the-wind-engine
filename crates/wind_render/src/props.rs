@@ -3,6 +3,7 @@
 //! Папка перечитывается на лету: сохранил модель в Blender — она тут же поменялась в
 //! игре и в редакторе. Имя модели — имя файла без `.glb`.
 
+use crate::tufts::Footprint;
 use crate::voxel::Mesh;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,10 +15,16 @@ const POLL: Duration = Duration::from_millis(500);
 #[derive(Default)]
 pub struct PropLibrary {
     dir: Option<PathBuf>,
-    /// Имя модели → (когда файл изменён, радиус модели вокруг начала, м).
-    models: HashMap<String, (SystemTime, f32)>,
+    /// Имя модели → (когда файл изменён, радиус модели вокруг начала, м, основание).
+    models: HashMap<String, (SystemTime, f32, Option<Footprint>)>,
     last_poll: Option<Instant>,
+    /// Растёт при каждой новой или изменённой модели — по нему перестраивают то, что
+    /// зависит от формы моделей (пучки травы у их основания).
+    generation: u64,
 }
+
+/// Ниже этого — «основание» модели (то, что стоит на земле), м.
+const BASE_HEIGHT: f32 = 0.6;
 
 impl PropLibrary {
     pub fn new(dir: PathBuf) -> Self {
@@ -28,6 +35,16 @@ impl PropLibrary {
     /// нет (пока или вовсе).
     pub fn radius(&self, name: &str) -> Option<f32> {
         self.models.get(name).map(|m| m.1)
+    }
+
+    /// Основание модели — прямоугольник вокруг её частей ниже `BASE_HEIGHT` в её
+    /// координатах: у дома — стены, у дерева — ствол.
+    pub fn footprint(&self, name: &str) -> Option<Footprint> {
+        self.models.get(name).and_then(|m| m.2)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Заглянуть в папку (не чаще раза в полсекунды): новые и изменённые модели —
@@ -48,17 +65,29 @@ impl PropLibrary {
             match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| crate::gltf::load(&b)) {
                 Ok(mesh) => {
                     let radius = mesh.vertices.iter().map(|v| (v.pos[0].powi(2) + v.pos[2].powi(2)).sqrt()).fold(0.0, f32::max);
-                    self.models.insert(name.clone(), (modified, radius));
+                    self.models.insert(name.clone(), (modified, radius, footprint(&mesh)));
+                    self.generation += 1;
                     loaded.push((name, mesh));
                 }
                 Err(e) => {
-                    self.models.insert(name.clone(), (modified, self.radius(&name).unwrap_or(0.0)));
+                    let footprint = self.footprint(&name);
+                    self.models.insert(name.clone(), (modified, self.radius(&name).unwrap_or(0.0), footprint));
                     errors.push(format!("модель {}: {e}", path.display()));
                 }
             }
         }
         (loaded, errors)
     }
+}
+
+fn footprint(mesh: &Mesh) -> Option<Footprint> {
+    mesh.vertices.iter().filter(|v| v.pos[1] < BASE_HEIGHT).fold(None, |acc, v| {
+        let [x, _, z] = v.pos;
+        Some(match acc {
+            None => [x, z, x, z],
+            Some([x0, z0, x1, z1]) => [x0.min(x), z0.min(z), x1.max(x), z1.max(z)],
+        })
+    })
 }
 
 /// Модели в папке: (имя, путь, когда изменён) — по имени.

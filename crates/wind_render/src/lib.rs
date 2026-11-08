@@ -17,6 +17,7 @@ pub mod renderer;
 pub mod rwr;
 pub mod rwr_anim;
 pub mod scene;
+pub mod tufts;
 pub mod voxel;
 
 pub use camera::Camera;

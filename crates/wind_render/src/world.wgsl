@@ -244,10 +244,12 @@ fn battle_traces(albedo_in: vec3<f32>, p: vec2<f32>, map_size: vec2<f32>) -> vec
     return albedo;
 }
 
-// --- Земля: нарисованная, по приёму RWR -----------------------------------------
+// --- Земля: нарисованная, по приёму RWR2 ----------------------------------------
 // Ковра травинок нет (см. «Растительность — как у RWR, без ветра и ковра»): трава — это
-// раскраска земли. Крупные пятна осенних тонов (палитра травы хозяина), короткие
-// наклонные мазки травы, гуще пучками, и плавные «рисованные» границы между покрытиями.
+// раскраска земли. Как на референсах RWR2: покрытия ровного тона, границы между ними
+// чёткие и неровные, с тонкой тёмной каймой; трава — длинные стебли пучками тон в тон,
+// чуть темнее и чуть светлее фона. Высокие пучки у заборов и стен — отдельные картинки
+// (`tufts`).
 
 // Крупные пятна (0..1): градиентный шум в три октавы — круглые, без граней по сетке.
 fn ground_patches(p: vec2<f32>) -> f32 {
@@ -256,41 +258,37 @@ fn ground_patches(p: vec2<f32>) -> f32 {
     return clamp(0.5 + n * 0.9, 0.0, 1.0);
 }
 
-// Тон покрытия без мазков (sRGB) при пятнистости `n`.
-fn ground_tone(m: u32, n: f32, p: vec2<f32>) -> vec3<f32> {
-    var c: vec3<f32>;
+// Тон покрытия без мазков (sRGB) при пятнистости `n`. Пятна — слабые: у RWR2 покрытие
+// почти ровное, фактуру дают мазки.
+fn ground_tone(m: u32, n: f32) -> vec3<f32> {
     switch m {
-        // Сухая трава: солома, светлее на «высоких» пятнах.
-        case 1u: { c = mix(vec3<f32>(0.55, 0.46, 0.27), vec3<f32>(0.68, 0.58, 0.36), smoothstep(0.3, 0.8, n)); }
-        case 2u: { c = vec3<f32>(0.47, 0.40, 0.30) * (0.92 + 0.12 * n); }  // земля
-        case 3u: { c = vec3<f32>(0.74, 0.68, 0.50) * (0.95 + 0.07 * n); }  // песок
-        case 4u: { c = vec3<f32>(0.30, 0.30, 0.31); }  // асфальт
-        case 5u: { c = vec3<f32>(0.62, 0.61, 0.58); }  // бетон
-        // Трава (осенняя): тёмная олива → охра → приглушённое золото.
-        default: {
-            c = mix(vec3<f32>(0.33, 0.33, 0.17), vec3<f32>(0.50, 0.44, 0.21), smoothstep(0.25, 0.55, n));
-            c = mix(c, vec3<f32>(0.63, 0.52, 0.25), smoothstep(0.6, 0.85, n));
-        }
+        // Сухая трава: солома.
+        case 1u: { return mix(vec3<f32>(0.60, 0.51, 0.31), vec3<f32>(0.66, 0.56, 0.35), smoothstep(0.3, 0.7, n)); }
+        case 2u: { return vec3<f32>(0.50, 0.42, 0.31) * (0.96 + 0.06 * n); }  // земля
+        case 3u: { return vec3<f32>(0.74, 0.68, 0.50) * (0.97 + 0.05 * n); }  // песок
+        case 4u: { return vec3<f32>(0.30, 0.30, 0.31); }  // асфальт
+        case 5u: { return vec3<f32>(0.62, 0.61, 0.58); }  // бетон
+        // Трава (осенняя): олива → охра.
+        default: { return mix(vec3<f32>(0.42, 0.40, 0.21), vec3<f32>(0.53, 0.47, 0.25), smoothstep(0.3, 0.7, n)); }
     }
-    // Чуть-чуть мелкого шума — без него большие пятна выглядят пластиком.
-    return c * (0.96 + 0.08 * noise(p * 0.9));
 }
 
-// Мазки травы: пучки из 2–3 коротких стеблей веером от одного корня — как нарисованная
-// трава у RWR2. Пучок «смотрит» от камеры: на экране стебли торчат вверх, будто трава
-// стоит, хотя это раскраска земли. Тёмные стебли — тень между травой, изредка светлые —
-// освещённые кончики. Возвращает (тёмные, светлые) 0..1. Гуще — пучками по шуму; вдали
+// Мазки травы — как поле на референсах RWR2: длинные тонкие стебли пучками, почти
+// параллельно, с лёгким изгибом. Пучок «смотрит» от камеры — на экране стебли торчат
+// вверх, будто трава стоит, хотя это раскраска земли. Тон в тон: чаще чуть темнее фона,
+// реже чуть светлее. Возвращает (тёмные, светлые) 0..1. Гуще — пятнами по шуму; вдали
 // гаснут (`fade`), чтобы не рябило.
 fn grass_strokes(p: vec2<f32>, fade: f32) -> vec2<f32> {
     if (fade <= 0.0) {
         return vec2<f32>(0.0);
     }
-    let cell = 0.5;
-    let base = floor(p / cell);
-    let clump = smoothstep(0.3, 0.75, noise(p * 0.45));
+    let cell = 0.45;
     // От камеры по земле — «вверх» на экране.
     let away = normalize(p - g.eye.xz + vec2<f32>(1e-3, 0.0));
-    let up_angle = atan2(away.y, away.x);
+    let side = vec2<f32>(-away.y, away.x);
+    // Корни, чьи стебли дотягиваются до точки, лежат «ниже» неё — ищем вокруг p − away·0,35.
+    let base = floor((p - away * 0.35) / cell);
+    let clump = smoothstep(0.2, 0.7, noise(p * 0.3 + vec2<f32>(7.0, 3.0)));
     var dark = 0.0;
     var light = 0.0;
     for (var dy = -1; dy <= 1; dy++) {
@@ -299,24 +297,30 @@ fn grass_strokes(p: vec2<f32>, fade: f32) -> vec2<f32> {
             let h1 = hash2(c);
             let h2 = hash2(c + vec2<f32>(17.0, 3.0));
             let h3 = hash2(c + vec2<f32>(41.0, 29.0));
-            // Вне пучков — реже.
-            if (h3 > 0.4 + 0.55 * clump) {
+            // Вне пятен — реже.
+            if (h3 > 0.25 + 0.7 * clump) {
                 continue;
             }
-            let root = (c + vec2<f32>(0.15 + 0.7 * h1, 0.15 + 0.7 * h2)) * cell;
-            let bright = h3 < 0.07;
-            let blades = 2 + i32(h2 * 1.99);
-            for (var b = 0; b < blades; b++) {
-                let fb = f32(b) - f32(blades - 1) * 0.5;
-                let a = up_angle + fb * 0.5 + (hash2(c + vec2<f32>(f32(b) * 7.0, 11.0)) - 0.5) * 0.35;
-                let dir = vec2<f32>(cos(a), sin(a));
-                let len = 0.13 + 0.14 * hash2(c + vec2<f32>(5.0, f32(b) * 13.0));
-                let t = clamp(dot(p - root, dir), 0.0, len);
-                let d = length(p - root - dir * t);
+            let root = (c + vec2<f32>(h1, h2)) * cell;
+            let lit = h3 < 0.1;
+            let tilt = (h1 - 0.5) * 0.5;
+            let bend = (h2 - 0.5) * 0.5;
+            for (var b = 0; b < 3; b++) {
+                let hb = hash2(c + vec2<f32>(f32(b) * 7.0, 11.0));
+                let a = tilt + (f32(b) - 1.0) * 0.12;
+                let dir = away * cos(a) + side * sin(a);
+                let nrm = vec2<f32>(-dir.y, dir.x);
+                let r = root + side * ((f32(b) - 1.0) * 0.07 + (hb - 0.5) * 0.05);
+                let len = (0.38 + 0.4 * hb) * (0.7 + 0.4 * clump);
+                let rel = p - r;
+                let u = clamp(dot(rel, dir), 0.0, len);
+                // Лёгкий изгиб: стебель уходит вбок пропорционально квадрату длины.
+                let v = dot(rel, nrm) - bend * u * u / len;
+                let d = length(vec2<f32>(dot(rel, dir) - u, v));
                 // К кончику тоньше.
-                let w = 0.03 * (1.0 - 0.7 * t / len);
-                let s = 1.0 - smoothstep(w * 0.5, w, d);
-                if (bright) {
+                let w = 0.026 * (1.0 - 0.8 * u / len);
+                let s = 1.0 - smoothstep(w * 0.4, w, d);
+                if (lit) {
                     light = max(light, s);
                 } else {
                     dark = max(dark, s);
@@ -327,31 +331,71 @@ fn grass_strokes(p: vec2<f32>, fade: f32) -> vec2<f32> {
     return vec2<f32>(dark, light) * fade;
 }
 
-// Раскраска земли в точке (sRGB, до света): покрытия четырёх соседних клеток смешиваются
-// через неровный край (сдвиг по шуму + сглаженная граница ~0,6 м), на траве — мазки.
+// Раскраска земли в точке (sRGB, до света). Доля каждого покрытия — билинейно по четырём
+// соседним клеткам, через сдвиг по шуму; в точке берём покрытие с наибольшей долей —
+// граница выходит чёткой, со скруглёнными углами вместо ступенек по клеткам. Сглаживание
+// края — на ширину пикселя; по самому краю — тонкая тёмная кайма, как в RWR2.
 fn ground_color(p: vec2<f32>, eye_dist: f32) -> vec3<f32> {
     let size = vec2<i32>(textureDimensions(ground_tex));
-    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.4;
+    let jitter = vec2<f32>(noise(p * 0.35) - 0.5, noise(p * 0.35 + vec2<f32>(31.0, 17.0)) - 0.5) * 1.2
+        + vec2<f32>(perlin(p * 1.9), perlin(p * 1.9 + vec2<f32>(13.0, 7.0))) * 0.22;
     let q = p + jitter - vec2<f32>(0.5);
     let i = vec2<i32>(floor(q));
-    let f = smoothstep(vec2<f32>(0.2), vec2<f32>(0.8), fract(q));
-    let n = ground_patches(p);
-    var color = vec3<f32>(0.0);
-    var grassy = 0.0;
+    let f = fract(q);
+    var mats: array<u32, 4>;
+    var ws: array<f32, 4>;
     for (var k = 0; k < 4; k++) {
         let o = vec2<i32>(k & 1, k >> 1);
         let cell = clamp(i + o, vec2<i32>(0), size - vec2<i32>(1));
-        let m = textureLoad(ground_tex, cell, 0).r;
+        mats[k] = textureLoad(ground_tex, cell, 0).r;
         let wx = select(1.0 - f.x, f.x, o.x == 1);
         let wy = select(1.0 - f.y, f.y, o.y == 1);
-        color += ground_tone(m, n, p) * (wx * wy);
-        grassy += select(0.0, wx * wy, m <= 1u);
+        ws[k] = wx * wy;
     }
-    if (grassy > 0.01) {
+    // Доля покрытия каждой клетки (вместе с соседями того же покрытия).
+    var best = 0;
+    var best_w = -1.0;
+    var shares: array<f32, 4>;
+    for (var k = 0; k < 4; k++) {
+        var sum = 0.0;
+        for (var j = 0; j < 4; j++) {
+            sum += select(0.0, ws[j], mats[j] == mats[k]);
+        }
+        shares[k] = sum;
+        if (sum > best_w) {
+            best_w = sum;
+            best = k;
+        }
+    }
+    var second_w = 0.0;
+    var second = best;
+    for (var k = 0; k < 4; k++) {
+        if (mats[k] != mats[best] && shares[k] > second_w) {
+            second_w = shares[k];
+            second = k;
+        }
+    }
+    let n = ground_patches(p);
+    let m1 = mats[best];
+    let m2 = mats[second];
+    // Разница долей: 0 на границе; в пикселях и метрах — через производные.
+    let t = best_w - second_w;
+    let px = max(fwidth(t), 1e-5);
+    let edge_px = t / px;
+    let meters_per_px = max(length(fwidth(p)) * 0.7, 1e-4);
+    let edge_m = edge_px * meters_per_px;
+    var color = mix(ground_tone(m2, n), ground_tone(m1, n), 0.5 + 0.5 * clamp(edge_px, 0.0, 1.0));
+    let grassy = select(0.0, 1.0, m1 <= 1u) * clamp(edge_px, 0.0, 1.0);
+    if (grassy > 0.0) {
         let fade = 1.0 - smoothstep(45.0, 95.0, eye_dist);
         let s = grass_strokes(p, fade * grassy);
-        color = mix(color, color * vec3<f32>(0.66, 0.64, 0.58), s.x * 0.7);
-        color = mix(color, color * 1.25 + vec3<f32>(0.03, 0.025, 0.0), s.y * 0.7);
+        color = mix(color, color * vec3<f32>(0.84, 0.82, 0.78), s.x);
+        color = mix(color, color * 1.09 + vec3<f32>(0.02, 0.018, 0.0), s.y);
+    }
+    // Кайма по краю покрытия: ~3 см, но не тоньше пикселя.
+    if (m1 != m2) {
+        let rim = 1.0 - smoothstep(max(0.03, meters_per_px * 0.7), max(0.06, meters_per_px * 1.7), edge_m);
+        color = mix(color, color * vec3<f32>(0.62, 0.58, 0.52), rim * 0.5);
     }
     return color;
 }

@@ -180,6 +180,9 @@ pub struct SceneBuilder {
     props: PropLibrary,
     /// Что не прочиталось из моделей предметов — забирает `take_notes`.
     notes: Vec<String>,
+    /// Пучки травы карты и для чего они расставлены: (карта, покрытие, предметы, модели).
+    tufts: Vec<crate::tufts::Tuft>,
+    tufts_key: Option<(u64, u64, u64, u64)>,
 }
 
 /// Ширина сгиба по умолчанию, воксели.
@@ -204,6 +207,8 @@ impl Default for SceneBuilder {
             pose_overrides: Vec::new(),
             props: PropLibrary::default(),
             notes: Vec::new(),
+            tufts: Vec::new(),
+            tufts_key: None,
         }
     }
 }
@@ -463,6 +468,30 @@ impl SceneBuilder {
                 by_char[model.mesh * LODS + lod].push(skin(bones.len(), c.team, false));
                 model.bones(&r.pose(origin), &mut |m| bones.push((root * m).to_cols_array_2d()));
             }
+        }
+
+        // Пучки травы: расставляются заново, когда поменялась карта, покрытие, предметы
+        // или их модели; в кадр — те, что рядом.
+        let props_hash = input.props.iter().fold(input.props.len() as u64, |h, p| {
+            let v = [p.pos.0, p.pos.1, p.angle, p.scale].iter().fold(h, |h, f| h.rotate_left(7) ^ u64::from(f.to_bits()));
+            p.model.bytes().fold(v, |h, b| h.rotate_left(5) ^ u64::from(b))
+        });
+        let tufts_key = (input.map_key, input.map.ground_revision, props_hash, self.props.generation());
+        if self.tufts_key != Some(tufts_key) {
+            self.tufts_key = Some(tufts_key);
+            self.tufts = crate::tufts::place(input.map, input.props, |name| self.props.footprint(name));
+        }
+        // Пучки мелкие: дальше края экрана их не видно, а тень от них короткая.
+        let tuft_reach2 = (cam.distance * 1.3 + 10.0).min(reach).powi(2);
+        for t in &self.tufts {
+            if t.pos.distance_squared(cam.target) > tuft_reach2 {
+                continue;
+            }
+            let m = Mat4::from_translation(to_3d(t.pos, input.map.height_at(t.pos)))
+                * Mat4::from_rotation_y(t.angle)
+                * Mat4::from_scale(Vec3::splat(t.scale));
+            let [r, g, b] = t.tint;
+            by_mesh[MeshId::Tuft as usize].push(Instance { model: m.to_cols_array_2d(), tint: [r, g, b, 0.5] });
         }
 
         let mut instances = Vec::new();
