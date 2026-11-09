@@ -482,7 +482,11 @@ impl Game {
             settings.soldiers_per_team = n;
         }
         if let Some(m) = args.map {
+            // `--map N` — процедурная карта N × N (без `--map-file` — не сохранённая карта).
             settings.map_size = m;
+            if args.map_file.is_none() {
+                settings.map_file.clear();
+            }
         }
         if let Some(f) = &args.map_file {
             settings.map_file = f.clone();

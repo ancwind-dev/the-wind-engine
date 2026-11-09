@@ -474,6 +474,7 @@ impl MapWorkspace {
             Tool::Props => return self.props_panel(ui),
             _ => {}
         }
+        let props_dir = self.maps_dir.parent().map_or_else(|| PathBuf::from("data/models/props"), |d| d.join("models/props"));
         let e = &mut self.editor;
         theme::props(ui, "tool_props", |ui| match e.tool {
             Tool::Walls => {
@@ -517,6 +518,15 @@ impl MapWorkspace {
                 ui.end_row();
                 theme::label(ui, t("Сила"));
                 ui.add(egui::Slider::new(&mut e.strength, 0.2..=10.0).suffix(t(" м/с")));
+                ui.end_row();
+                theme::label(ui, t("Вся карта"));
+                if ui
+                    .button(t("Холмы"))
+                    .on_hover_text(t("Пологие холмы до 7 м по всей карте. Под домами, дорогами, у точек, баз и предметов — ровно, у воды холмов нет. Ctrl+Z — отмена"))
+                    .clicked()
+                {
+                    e.add_hills(&props_dir);
+                }
                 ui.end_row();
             }
             Tool::Ground => {

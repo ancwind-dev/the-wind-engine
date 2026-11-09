@@ -121,6 +121,17 @@ impl MapFile {
         Ok(())
     }
 
+    /// Пологие холмы по всей карте (см. [`crate::relief`]): ровно у баз и точек захвата,
+    /// под зданиями из стен и дорогами, и в кругах `pads` — там, где стоят предметы-здания
+    /// (избы, сараи; их размер знает только отрисовка, см. `wind_lab::editor::building_pads`).
+    /// Деревья и заборы стоят на склонах — им ровное место не нужно.
+    pub fn raise_hills(&mut self, seed: u64, height: f32, pads: &[(Vec2, f32)]) {
+        let mut keep: Vec<(Vec2, f32)> = self.layout.bases.iter().map(|&b| (b, 12.0)).collect();
+        keep.extend(self.layout.capture_points.iter().map(|&p| (p, 8.0)));
+        keep.extend_from_slice(pads);
+        crate::relief::raise_hills(&mut self.map, seed, height, &keep);
+    }
+
     /// Отпечаток карты: если у клиента и сервера он разный — карты разные.
     pub fn fingerprint(&self) -> u64 {
         let mut h = Fnv::default();

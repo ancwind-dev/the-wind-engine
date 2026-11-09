@@ -99,7 +99,8 @@ pub struct Piece {
     /// Яркость (разброс ±7 %, как `jitter` материала в Blender).
     pub shade: f32,
     pub kind: u32,
-    /// Признаки: [`CASTS_SHADOW`].
+    /// Признаки: бит 0 — [`CASTS_SHADOW`]; биты 8–15 и 16–23 — нормаль земли под куском
+    /// (x и z, −1…1 → 0…255) для светотени склонов, как у земли (`hillshade`).
     pub flags: u32,
 }
 
@@ -334,6 +335,16 @@ impl Placer<'_> {
         }
         let h = |k: u32| hash(seed.0, seed.1, seed.2.wrapping_mul(8).wrapping_add(k));
         let angle = (h(4) - 0.5) * 2.0 * TURN;
+        // Нормаль земли — как у сетки земли (`mapmesh::terrain_chunk`): по соседним высотам.
+        let m = self.map;
+        let n = glam::Vec3::new(
+            m.height_at(p - Vec2::X) - m.height_at(p + Vec2::X),
+            2.0,
+            m.height_at(p - Vec2::Y) - m.height_at(p + Vec2::Y),
+        )
+        .normalize();
+        let q = |v: f32| ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u32;
+        let flags = flags | q(n.x) << 8 | q(n.z) << 16;
         let kind = pick(weights, h(1));
         let (s0, s1) = kind.scale();
         self.out.push(Piece {

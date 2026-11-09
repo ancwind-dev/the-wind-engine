@@ -366,12 +366,22 @@ fn zones(albedo_in: vec3<f32>, p: vec2<f32>) -> vec3<f32> {
     return albedo;
 }
 
+// Светотень склонов: мультяшный свет ступенями пологие холмы не различает (склон в 15°
+// освещён так же, как ровная земля), поэтому склону к солнцу — чуть светлее, от солнца —
+// темнее, плавно, по отличию N·L от ровной земли. Так холмы видно сверху.
+fn hillshade(n: vec3<f32>) -> f32 {
+    let sun = g.sun_dir.xyz;
+    let rel = max(dot(n, sun), 0.0) - max(sun.y, 0.05);
+    return 1.0 + clamp(rel * 2.2, -0.45, 0.3);
+}
+
 @fragment
 fn fs_terrain(in: VOut) -> @location(0) vec4<f32> {
     let p = in.world.xz;
     let size = vec2<i32>(textureDimensions(ground_tex));
-    let albedo = zones(battle_traces(ground_color(p), p, vec2<f32>(size)), p);
-    let c = light(albedo, normalize(in.normal), in.world);
+    let n = normalize(in.normal);
+    let albedo = zones(battle_traces(ground_color(p), p, vec2<f32>(size)), p) * hillshade(n);
+    let c = light(albedo, n, in.world);
     return vec4<f32>(fogged(c, in.world), 1.0);
 }
 
@@ -408,6 +418,7 @@ struct GrassOut {
     @location(0) world: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) shade: f32,
+    @location(3) @interpolate(flat) flags: u32,
 };
 
 fn grass_world(v: GrassIn) -> vec3<f32> {
@@ -429,6 +440,7 @@ fn vs_grass(v: GrassIn) -> GrassOut {
     out.clip = g.view_proj * vec4<f32>(out.world, 1.0);
     out.uv = v.uv;
     out.shade = v.scale_shade.y;
+    out.flags = v.kind_flags.y;
     return out;
 }
 
@@ -443,6 +455,7 @@ fn vs_grass_shadow(v: GrassIn) -> GrassOut {
     }
     out.uv = v.uv;
     out.shade = v.scale_shade.y;
+    out.flags = v.kind_flags.y;
     return out;
 }
 
@@ -455,8 +468,11 @@ fn fs_grass(in: GrassOut) -> @location(0) vec4<f32> {
     if (t.a < 0.15) {
         discard;
     }
-    // Цвета — свои, из атласа хозяина.
-    let albedo = t.rgb * in.shade;
+    // Цвета — свои, из атласа хозяина; светотень склона — как у земли под куском.
+    let nx = f32((in.flags >> 8u) & 255u) / 255.0 * 2.0 - 1.0;
+    let nz = f32((in.flags >> 16u) & 255u) / 255.0 * 2.0 - 1.0;
+    let ground_n = normalize(vec3<f32>(nx, sqrt(max(1.0 - nx * nx - nz * nz, 0.0)), nz));
+    let albedo = t.rgb * in.shade * hillshade(ground_n);
     // Свет — общий с землёй: тени домов ложатся на траву так же, как рядом на землю.
     let c = light(albedo, vec3<f32>(0.0, 1.0, 0.0), in.world);
     return vec4<f32>(fogged(c, in.world), a);

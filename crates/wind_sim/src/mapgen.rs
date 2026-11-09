@@ -1,6 +1,6 @@
 //! Процедурная карта: базы по краям, между ними дорога через все точки захвата,
 //! вокруг каждой точки — квартал (улицы сеткой, дома из готовых зданий, площадь),
-//! у дороги — хутора, по полям — заборы и скалы.
+//! у дороги — хутора, по полям — заборы и скалы, по всей карте — пологие холмы.
 //!
 //! Карту по сети не передают: клиент строит её сам из того же зерна. Поэтому
 //! генератор строго детерминированный — только `Rng` от зерна и встроенные здания
@@ -212,6 +212,12 @@ pub fn generate(size: u32, capture_points: u32, seed: u64) -> (Map, Layout) {
     // от озера не меняется.
     lakes(&mut map, &bases, &points, seed);
 
+    // --- Пологие холмы — после озёр (у воды их нет); под домами, дорогами, у точек и баз —
+    // спокойно (см. `relief`).
+    let mut keep: Vec<(Vec2, f32)> = bases.iter().map(|&b| (b, BASE_CLEAR)).collect();
+    keep.extend(points.iter().map(|&p| (p, PLAZA + 3.0)));
+    crate::relief::raise_hills(&mut map, seed, crate::relief::HILLS, &keep);
+
     // Край карты.
     for i in 0..n {
         map.set(i, 0, INDESTRUCTIBLE);
@@ -379,7 +385,7 @@ mod tests {
     fn same_seed_same_map() {
         let (a, la) = generate(256, 3, 9);
         let (b, lb) = generate(256, 3, 9);
-        assert!(a.solid == b.solid && a.ground == b.ground && la.capture_points == lb.capture_points);
+        assert!(a.solid == b.solid && a.ground == b.ground && a.heights == b.heights && la.capture_points == lb.capture_points);
         let (c, _) = generate(256, 3, 10);
         assert!(a.solid != c.solid);
     }

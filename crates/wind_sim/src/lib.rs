@@ -13,6 +13,7 @@ pub mod mapfile;
 pub mod mapgen;
 pub mod nav;
 pub mod prefab;
+pub mod relief;
 pub mod rng;
 pub mod round;
 pub mod sight;

@@ -92,6 +92,29 @@ struct ChunkBackup {
     heights: Vec<u16>,
 }
 
+/// Где на карте нужны ровные площадки под предметы: у моделей с широким основанием
+/// (изба, сарай, колодец — основание шире метра с обеих сторон) — круг по основанию с
+/// запасом в метр. Деревья (основание — ствол) и заборы (узкие) стоят на склонах.
+pub fn building_pads(props_dir: &Path, props: &[Prop]) -> Vec<(Vec2, f32)> {
+    let mut library = wind_render::props::PropLibrary::new(props_dir.to_path_buf());
+    library.poll();
+    props
+        .iter()
+        .filter_map(|p| {
+            let [x0, z0, x1, z1] = library.footprint(&p.model)?;
+            let (w, d) = ((x1 - x0) * p.scale, (z1 - z0) * p.scale);
+            if w.min(d) < 1.0 {
+                return None;
+            }
+            // Середина основания в координатах карты (поворот — как у предметов).
+            let (sin, cos) = p.angle.sin_cos();
+            let (cx, cz) = ((x0 + x1) * 0.5 * p.scale, (z0 + z1) * 0.5 * p.scale);
+            let c = p.at() + Vec2::new(cx * cos - cz * sin, cx * sin + cz * cos);
+            Some((c, 0.5 * w.hypot(d) + 1.0))
+        })
+        .collect()
+}
+
 /// Один отменяемый шаг.
 #[derive(Default)]
 struct Stroke {
@@ -700,6 +723,20 @@ impl MapEditor {
         if let Some(props) = &mut stroke.props {
             std::mem::swap(props, &mut self.file.props);
         }
+    }
+
+    /// «Холмы на всю карту»: пологие холмы поверх рельефа (ровно — под домами и дорогами,
+    /// у точек, баз и предметов). Одним шагом отмены. Зерно — от версии карты: нажал
+    /// ещё раз — холмы другие (и прибавятся к прежним).
+    pub fn add_hills(&mut self, props_dir: &Path) {
+        self.stroke = Some(Stroke::default());
+        for chunk in 0..self.file.map.chunk_revisions.len() {
+            self.backup(chunk);
+        }
+        let seed = self.file.map.revision ^ 0x9E37_79B9_7F4A_7C15 ^ (self.undo.len() as u64) << 32;
+        let pads = building_pads(props_dir, &self.file.props);
+        self.file.raise_hills(seed, wind_sim::relief::HILLS, &pads);
+        self.finish_stroke();
     }
 
     pub fn undo(&mut self) {

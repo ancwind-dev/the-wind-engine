@@ -468,6 +468,21 @@ fn analysis_tool(args: &[String]) -> Option<Result<String, String>> {
             let made = model.make_clips(&project.data_dir().join("animations"), &force)?;
             Ok(if made.is_empty() { "все клипы уже есть (--force ключ — переделать)".to_owned() } else { made.join("\n") })
         })(),
+        // Пологие холмы на карте проекта: `--hills <карта> [зерно]` (data/maps/<карта>).
+        "--hills" => (|| {
+            let project = project::sample().ok_or("не найдена наша игра (wind.project)")?;
+            let name = args.get(1).ok_or("--hills <карта> [зерно]")?;
+            let seed = args.get(2).and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+            let dir = project.maps_dir().join(name);
+            let mut file = wind_sim::mapfile::MapFile::load(&dir)?;
+            let before = file.map.heights.iter().copied().max().unwrap_or(0);
+            let pads = editor::building_pads(&project.data_dir().join("models/props"), &file.props);
+            file.raise_hills(seed, wind_sim::relief::HILLS, &pads);
+            let after = file.map.heights.iter().copied().max().unwrap_or(0);
+            file.save(&dir)?;
+            let m = wind_sim::map::HEIGHT_SCALE;
+            Ok(format!("{}: холмы подняты (зерно {seed}), высшая точка {:.1} → {:.1} м, площадок под здания {}", dir.display(), before as f32 / m, after as f32 / m, pads.len()))
+        })(),
         _ => return None,
     })
 }
