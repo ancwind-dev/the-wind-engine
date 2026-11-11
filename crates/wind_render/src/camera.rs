@@ -34,7 +34,33 @@ pub fn to_3d(p: Vec2, height: f32) -> Vec3 {
     Vec3::new(p.x, height, p.y)
 }
 
+/// Пирамида видимости камеры: шесть плоскостей, нормали внутрь. По ней отбирается то, что
+/// попадает на экран, — рисовать и считать позы тех, кого не видно, незачем.
+#[derive(Clone, Copy, Debug)]
+pub struct Frustum {
+    planes: [glam::Vec4; 6],
+}
+
+impl Frustum {
+    /// Из матрицы «мир → экран» (глубина 0…1, как у wgpu).
+    pub fn new(view_proj: Mat4) -> Self {
+        let (r0, r1, r2, r3) = (view_proj.row(0), view_proj.row(1), view_proj.row(2), view_proj.row(3));
+        let planes = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2].map(|p| p / p.truncate().length().max(1e-6));
+        Frustum { planes }
+    }
+
+    /// Шар с центром `center` и радиусом `radius` хотя бы краем попадает в кадр.
+    /// (С запасом: у углов пирамиды может пропустить и невидимое — это не страшно.)
+    pub fn sees(&self, center: Vec3, radius: f32) -> bool {
+        self.planes.iter().all(|p| p.truncate().dot(center) + p.w >= -radius)
+    }
+}
+
 impl Camera {
+    pub fn frustum(&self, aspect: f32) -> Frustum {
+        Frustum::new(self.view_proj(aspect))
+    }
+
     pub fn eye(&self) -> Vec3 {
         let (sp, cp) = self.pitch.sin_cos();
         let (sy, cy) = self.yaw.sin_cos();
@@ -90,6 +116,31 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frustum_sees_what_is_on_screen() {
+        let cam = Camera { target: Vec2::new(100.0, 100.0), ..Default::default() };
+        let (aspect, f) = (1.6, cam.frustum(1.6));
+        let vp = cam.view_proj(aspect);
+        let mut inside = 0;
+        for y in 0..200 {
+            for x in 0..200 {
+                let p = to_3d(Vec2::new(x as f32, y as f32), 0.0);
+                let ndc = vp.project_point3(p);
+                let on_screen = ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && (0.0..=1.0).contains(&ndc.z);
+                // Всё, что на экране, — видит; то, что дальше 3 м от экрана, — нет.
+                assert!(!on_screen || f.sees(p, 0.0), "{p} на экране, но отброшена");
+                if f.sees(p, 0.0) {
+                    inside += 1;
+                    assert!(ndc.x.abs() <= 1.001 && ndc.y.abs() <= 1.001, "{p} не на экране, но оставлена");
+                }
+            }
+        }
+        // На экране — малая часть площадки 200 × 200 м, а не круг в сотню метров.
+        assert!(inside > 500 && inside < 6000, "точек в кадре: {inside}");
+        assert!(f.sees(to_3d(cam.target, 0.0), 0.0));
+        assert!(!f.sees(to_3d(cam.target + Vec2::new(90.0, 0.0), 0.0), 3.0));
+    }
 
     #[test]
     fn screen_center_hits_target() {

@@ -124,6 +124,29 @@ pub struct FrameData {
     pub map: Arc<Mutex<PendingMap>>,
     /// Чанки, которые стоит рисовать в этом кадре.
     pub visible_chunks: Vec<u32>,
+    /// Куда вернуть большие буферы кадра, когда он нарисован (см. [`Spare`]).
+    pub spare: Arc<Mutex<Vec<Spare>>>,
+}
+
+/// Буферы прошлых кадров — под следующие. Матрицы палок 2000 солдат — 2 МБ на кадр;
+/// выделять их заново каждый кадр — значит каждый раз получать от системы свежие
+/// страницы памяти (≈1 мс на кадр). Содержимое не чистим: кадр перезаписывает всё, что читает.
+#[derive(Default)]
+pub struct Spare {
+    pub bones: Vec<[[f32; 4]; 4]>,
+    pub instances: Vec<Instance>,
+    pub skins: Vec<SkinInstance>,
+}
+
+impl Drop for FrameData {
+    fn drop(&mut self) {
+        let spare = Spare { bones: std::mem::take(&mut self.bones), instances: std::mem::take(&mut self.instances), skins: std::mem::take(&mut self.skins) };
+        let mut pool = self.spare.lock().unwrap_or_else(|e| e.into_inner());
+        // Кадров в работе — один-два: больше трёх наборов не держим.
+        if pool.len() < 3 {
+            pool.push(spare);
+        }
+    }
 }
 
 struct GpuMesh {

@@ -4329,6 +4329,7 @@ dependencies = [
  "eframe",
  "glam",
  "png",
+ "rayon",
  "ron",
  "serde",
  "wind_sim",

@@ -42,6 +42,8 @@ struct Args {
     map: Option<u32>,
     seed: Option<u64>,
     bench: Option<f32>,
+    /// Замер с игровой камерой (над серединой карты), а не со всей картой в кадре.
+    near: bool,
     /// Сразу в бой против ИИ, без меню.
     play: bool,
     spectate: bool,
@@ -64,6 +66,7 @@ fn parse_args() -> Result<Args, String> {
         map: None,
         seed: None,
         bench: None,
+        near: false,
         play: false,
         spectate: false,
         follow: 0,
@@ -84,6 +87,7 @@ fn parse_args() -> Result<Args, String> {
             "--map" => a.map = Some(num(value()?)? as u32),
             "--seed" => a.seed = Some(num(value()?)? as u64),
             "--bench" => a.bench = Some(num(value()?)? as f32),
+            "--near" => a.near = true,
             "--play" => a.play = true,
             "--vsync" => a.vsync = true,
             "--volume" => a.volume = Some((num(value()?)? as f32).clamp(0.0, 1.0)),
@@ -113,7 +117,7 @@ fn parse_args() -> Result<Args, String> {
                      wind_client --play                         — сразу в бой против ИИ\n\
                      wind_client --connect адрес [--name имя]   — сразу на сервер\n\
                      wind_client --spectate [--follow N]        — наблюдать за боем (Tab — следующий солдат, WASD — свободная камера)\n\
-                     wind_client --bench секунд [--soldiers N]   — замер FPS, без игрока\n\
+                     wind_client --bench секунд [--soldiers N] [--near]   — замер FPS, без игрока (--near — с игровой камерой)\n\
                      wind_client --export-models                — выгрузить модели солдата в data/models/soldier/*.vox\n\
                      wind_client --export-sounds                — сохранить все звуки в notes/Звуки/*.wav\n\
                      --soldiers N на команду, --map сторона, --map-file имя, --seed N — бой против ИИ на этот запуск\n\
@@ -222,6 +226,9 @@ struct Bench {
     seconds: f32,
     samples: Vec<f32>,
     on_screen: Vec<usize>,
+    /// Время процессора за кадр, мс: симуляция с видом и сборка кадра (`SceneBuilder::build`).
+    sim_ms: Vec<f32>,
+    build_ms: Vec<f32>,
 }
 
 /// Один бой: откуда мир, камера и всё, что про своего солдата. Новый бой —
@@ -529,9 +536,12 @@ impl Game {
             if let Source::Local(l) = &session.source {
                 let size = l.world.map.width as f32;
                 session.camera.target = Vec2::splat(size * 0.5);
-                session.camera.distance = size * 0.95;
+                // `--near` — камера как в игре: видно, во что обходится картинка вблизи.
+                if !args.near {
+                    session.camera.distance = size * 0.95;
+                }
             }
-            Bench { started: Instant::now(), seconds, samples: Vec::new(), on_screen: Vec::new() }
+            Bench { started: Instant::now(), seconds, samples: Vec::new(), on_screen: Vec::new(), sim_ms: Vec::new(), build_ms: Vec::new() }
         });
 
         let maps = menu::list_maps(&data_dir().join("maps"));
@@ -641,6 +651,9 @@ impl Game {
         let stats = self.render_state.as_ref().map(wind_render::stats).unwrap_or_default();
         println!("Замер {:.0} с, {} кадров:", b.seconds, frame_ms.len());
         println!("  FPS в среднем {:.0} (кадр {avg_ms:.2} мс), 1% худших кадров — {p99:.2} мс и дольше", 1000.0 / avg_ms.max(0.001));
+        let mean = |v: &[f32]| v[v.len() / 8..].iter().sum::<f32>() / (v.len() - v.len() / 8).max(1) as f32;
+        let (sim, build) = (mean(&b.sim_ms), mean(&b.build_ms));
+        println!("  из кадра: симуляция и вид {sim:.2} мс, сборка кадра {build:.2} мс, остальное (интерфейс, видеокарта) {:.2} мс", avg_ms - sim - build);
         println!("  солдат на экране в среднем {on_screen:.0}");
         println!(
             "  последний кадр: экземпляров {}, чанков карты {} из {}, вызовов отрисовки {}",
@@ -777,8 +790,12 @@ impl Game {
         }
         // Своя игра в паузе стоит: время мира не идёт.
         let sim_dt = if paused && matches!(s.source, Source::Local(_)) { 0.0 } else { dt };
+        let sim_started = Instant::now();
         s.source.update(sim_dt, input);
         let mut view = s.source.view();
+        if let Some(b) = &mut self.bench {
+            b.sim_ms.push(sim_started.elapsed().as_secs_f32() * 1000.0);
+        }
         if let (Some(p), Some(id)) = (s.pilot.pos(), s.source.own_id()) {
             view.me_pos = Some(p);
             let look = s.aim - p;
@@ -878,7 +895,11 @@ impl Game {
                 time,
                 dt,
             };
+            let build_started = Instant::now();
             let frame = self.scene.build(&input);
+            if let Some(b) = &mut self.bench {
+                b.build_ms.push(build_started.elapsed().as_secs_f32() * 1000.0);
+            }
             self.notes.extend(self.scene.take_notes());
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, WorldPaint(Arc::new(frame))));
         }

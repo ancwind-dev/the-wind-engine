@@ -11,6 +11,7 @@ use crate::models::{MeshId, SOLDIER_VOXEL};
 use crate::ragdoll::{Ragdoll, world_points};
 use std::collections::{HashMap, HashSet};
 use crate::renderer::{FrameData, Globals, GroundPoint, Instance, MAX_POINTS, PendingMap, SHADOW_SIZE, SkinInstance};
+use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 use glam::camera::rh::{proj::directx as proj, view};
 use glam::{Mat4, Vec2, Vec3};
@@ -180,6 +181,8 @@ pub struct SceneBuilder {
     props: PropLibrary,
     /// Что не прочиталось из моделей предметов — забирает `take_notes`.
     notes: Vec<String>,
+    /// Буферы прошлых кадров (см. `renderer::Spare`).
+    spare: Arc<Mutex<Vec<crate::renderer::Spare>>>,
     /// Файлы травы (`data/models/grass`), перечитываются на лету.
     grass_files: crate::grass::GrassLibrary,
     /// Для чего расставлена трава: (карта, покрытие, предметы, модели предметов).
@@ -210,6 +213,7 @@ impl Default for SceneBuilder {
             pose_overrides: Vec::new(),
             props: PropLibrary::default(),
             notes: Vec::new(),
+            spare: Arc::default(),
             grass_files: Default::default(),
             grass_key: None,
             grass_pieces: 0,
@@ -267,6 +271,10 @@ impl SceneBuilder {
         let cam = input.camera;
         let reach = view_radius(cam);
         let reach2 = reach * reach;
+        // Что попадает на экран. Запас — на тень: то, что за краем кадра, может бросать
+        // тень в кадр; чем ниже солнце, тем тень длиннее (на метр высоты — `shade` м).
+        let frustum = cam.frustum(input.aspect);
+        let shade = (1.0 / input.atmosphere.sun_elevation.to_radians().tan().max(0.05)).min(4.0);
         self.update_ragdolls(input);
 
         // --- Карта.
@@ -303,7 +311,9 @@ impl SceneBuilder {
         let visible_chunks = (0..input.map.chunk_revisions.len() as u32)
             .filter(|&c| {
                 let center = Vec2::new(((c % cx) * CHUNK) as f32 + half, ((c / cx) * CHUNK) as f32 + half);
-                center.distance(cam.target) < reach + half * 1.5
+                // Чанк — шар вокруг середины: полдиагонали, стены и деревья до ~9 м и их тени.
+                let c3 = to_3d(center, input.map.height_at(center));
+                center.distance(cam.target) < reach + half * 1.5 && frustum.sees(c3, half * 1.42 + 9.0 + 9.0 * shade)
             })
             .collect();
 
@@ -313,7 +323,8 @@ impl SceneBuilder {
         // Свои солдаты: на каждого — один экземпляр и матрицы всех палок.
         // По мешу и уровню детализации: индекс = меш × LODS + уровень.
         let mut by_char: Vec<Vec<SkinInstance>> = vec![Vec::new(); characters.as_ref().map_or(0, |c| c.meshes.len() * LODS)];
-        let mut bones: Vec<[[f32; 4]; 4]> = Vec::new();
+        let spare = self.spare.lock().unwrap_or_else(|e| e.into_inner()).pop().unwrap_or_default();
+        let mut bones: Vec<[[f32; 4]; 4]> = spare.bones;
         let eye = cam.eye();
         // Уровень детализации — по тому, сколько пикселей занимает воксель при 1080p:
         // точка всё равно не меньше 2,6 пикселя, и мелкие воксели вдали сливаются.
@@ -338,87 +349,132 @@ impl SceneBuilder {
             SkinInstance { base: base as u32, flags: weapon as u32 | (ghost as u32) << 1, team: team_colors[team as usize & 1], _pad: 0 }
         };
         let v = SOLDIER_VOXEL;
+        // Сначала — состояние анимации (по порядку, оно копится от кадра к кадру), потом
+        // позы и матрицы палок видимых солдат — на всех ядрах: это самая тяжёлая часть
+        // сборки кадра (≈2 мкс на солдата), а солдаты друг от друга не зависят.
+        let mut jobs: Vec<(&SoldierDraw, f32, Anim)> = Vec::with_capacity(input.soldiers.len());
         for s in input.soldiers {
             let speed = self.animate(s, input.dt);
-            if s.pos.distance_squared(cam.target) > reach2 {
-                continue;
+            // Солдат — шар в 1,5 м вокруг пояса, плюс тень от двухметровой фигуры.
+            if s.pos.distance_squared(cam.target) <= reach2 && frustum.sees(to_3d(s.pos, input.map.height_at(s.pos) + 1.0), 1.5 + 2.0 * shade) {
+                jobs.push((s, speed, self.anim[s.id as usize]));
             }
-            let a = self.anim[s.id as usize];
-            // Свои модели: поза по скелету, оружие в правой руке.
-            let look = s.look.or_else(|| {
-                let set = characters.as_ref()?;
-                let (model, weapon) = set.pick(s.team, s.id)?;
-                // Перезарядка — по оружию: как и сколько секунд; бросок — по времени.
-                let w = &set.weapons[weapon];
-                let action = match (a.throw, a.reload) {
-                    (Some(t), _) => Some(Action::Throw { t }),
-                    (None, Some(t)) => Some(Action::Reload { kind: w.reload, t: t / w.reload_time.max(0.1), rounds: w.rounds }),
-                    _ => None,
-                };
-                let clock = input.time + s.id as f32 * 0.37;
-                Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock, lean: a.lean }, action })
-            });
-            if let Some(set) = &characters
-                && let Some(look) = look
-            {
-                let model = &set.models[look.model];
-                let pose = match self.pose_overrides.iter().find(|(id, _)| *id == s.id).filter(|_| s.look.is_some()) {
-                    Some((_, p)) => p.clone(),
-                    None => model.pose(look.motion),
-                };
-                // Отдача — поверх позы: от каждого выстрела оружие и руки толкает назад.
-                let pose = if look.motion.prone > 0.0 && look.motion.prone < 1.0 { pose } else { model.recoil(pose, s.shot_ago) };
-                // Пока ложится или встаёт, руки заняты — действия не показываем.
-                let (lying, getting) = (look.motion.prone >= 1.0, look.motion.prone > 0.0 && look.motion.prone < 1.0);
-                let (pose, grip, grenade) = match look.action {
-                    Some(action) if !getting => {
-                        let acted = model.act(&pose, action, lying);
-                        (acted.pose, acted.weapon, acted.grenade)
+        }
+        #[derive(Default)]
+        struct Posed {
+            /// (меш × LODS + уровень, экземпляр).
+            chars: Vec<(usize, SkinInstance)>,
+            /// (меш, экземпляр) — гранаты в руке и встроенные болванчики.
+            parts: Vec<(usize, Instance)>,
+        }
+        // Матрицы палок пишутся сразу на место: каждому солдату — место под палки самой
+        // большой модели и оружие (лишнее остаётся пустым), так что куски не мешают друг
+        // другу и ничего не надо копировать.
+        const CHUNK_SOLDIERS: usize = 48;
+        let stride = characters.as_ref().map_or(1, |c| c.models.iter().map(|m| m.sticks.len()).max().unwrap_or(0) + 1);
+        bones.resize(jobs.len() * stride, [[0.0; 4]; 4]);
+        let pose_overrides = &self.pose_overrides;
+        let team_tints = self.team_colors;
+        let posed: Vec<Posed> = jobs
+            .par_chunks(CHUNK_SOLDIERS)
+            .zip(bones.par_chunks_mut(CHUNK_SOLDIERS * stride))
+            .enumerate()
+            .map(|(n, (chunk, slots))| {
+                let mut out = Posed::default();
+                for (k, &(s, speed, a)) in chunk.iter().enumerate() {
+                    let first = (n * CHUNK_SOLDIERS + k) * stride;
+                    let slot = &mut slots[k * stride..(k + 1) * stride];
+                    // Свои модели: поза по скелету, оружие в правой руке.
+                    let look = s.look.or_else(|| {
+                        let set = characters.as_ref()?;
+                        let (model, weapon) = set.pick(s.team, s.id)?;
+                        // Перезарядка — по оружию: как и сколько секунд; бросок — по времени.
+                        let w = &set.weapons[weapon];
+                        let action = match (a.throw, a.reload) {
+                            (Some(t), _) => Some(Action::Throw { t }),
+                            (None, Some(t)) => Some(Action::Reload { kind: w.reload, t: t / w.reload_time.max(0.1), rounds: w.rounds }),
+                            _ => None,
+                        };
+                        let clock = input.time + s.id as f32 * 0.37;
+                        Some(Look { model, weapon: Some(weapon), motion: Motion { speed, phase: a.phase, dir: a.dir, carry: a.carry, crouch: a.crouch, prone: a.prone, rising: a.rising, clock, lean: a.lean }, action })
+                    });
+                    if let Some(set) = &characters
+                        && let Some(look) = look
+                    {
+                        let model = &set.models[look.model];
+                        let pose = match pose_overrides.iter().find(|(id, _)| *id == s.id).filter(|_| s.look.is_some()) {
+                            Some((_, p)) => p.clone(),
+                            None => model.pose(look.motion),
+                        };
+                        // Отдача — поверх позы: от каждого выстрела оружие и руки толкает назад.
+                        let pose = if look.motion.prone > 0.0 && look.motion.prone < 1.0 { pose } else { model.recoil(pose, s.shot_ago) };
+                        // Пока ложится или встаёт, руки заняты — действия не показываем.
+                        let (lying, getting) = (look.motion.prone >= 1.0, look.motion.prone > 0.0 && look.motion.prone < 1.0);
+                        let (pose, grip, grenade) = match look.action {
+                            Some(action) if !getting => {
+                                let acted = model.act(&pose, action, lying);
+                                (acted.pose, acted.weapon, acted.grenade)
+                            }
+                            _ => {
+                                let grip = model.weapon_frame(&pose);
+                                (pose, grip, None)
+                            }
+                        };
+                        let at = to_3d(s.pos, if s.in_boat { boat_floor(input.map, s.pos, input.time) } else { stand_height(input.map, s.pos) });
+                        let lod = lod_at(at);
+                        // Студия ставит угол сама; в игре — плавный поворот к прицелу.
+                        let facing = if s.look.is_some() { s.facing } else { a.facing };
+                        let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-facing);
+                        out.chars.push((model.mesh * LODS + lod, skin(first, s.team, false)));
+                        let mut used = 0;
+                        model.bones(&pose, &mut |m| {
+                            slot[used] = (root * m).to_cols_array_2d();
+                            used += 1;
+                        });
+                        if let Some(weapon) = look.weapon
+                            && let Some(grip) = grip
+                        {
+                            out.chars.push((set.weapons[weapon].mesh * LODS + lod, skin(first + used, s.team, true)));
+                            slot[used] = (root * grip).to_cols_array_2d();
+                        }
+                        // Граната в руке — до броска.
+                        if let Some(g) = grenade {
+                            let m = root * Mat4::from_translation(g * crate::rwr::VOXEL) * Mat4::from_scale(Vec3::splat(0.11));
+                            out.parts.push((MeshId::Cube as usize, Instance { model: m.to_cols_array_2d(), tint: [0.30, 0.36, 0.22, 0.5] }));
+                        }
+                        continue;
                     }
-                    _ => {
-                        let grip = model.weapon_frame(&pose);
-                        (pose, grip, None)
-                    }
-                };
-                let at = to_3d(s.pos, if s.in_boat { boat_floor(input.map, s.pos, input.time) } else { stand_height(input.map, s.pos) });
-                let lod = lod_at(at);
-                // Студия ставит угол сама; в игре — плавный поворот к прицелу.
-                let facing = if s.look.is_some() { s.facing } else { a.facing };
-                let root = Mat4::from_translation(at) * Mat4::from_rotation_y(-facing);
-                by_char[model.mesh * LODS + lod].push(skin(bones.len(), s.team, false));
-                model.bones(&pose, &mut |m| bones.push((root * m).to_cols_array_2d()));
-                if let Some(weapon) = look.weapon
-                    && let Some(grip) = grip
-                {
-                    by_char[set.weapons[weapon].mesh * LODS + lod].push(skin(bones.len(), s.team, true));
-                    bones.push((root * grip).to_cols_array_2d());
+                    let tint = {
+                        let c = team_tints[s.team as usize & 1];
+                        [c[0], c[1], c[2], 0.0]
+                    };
+                    let swing = a.phase.sin() * 0.7 * (speed / 4.5).min(1.0);
+                    let bob = (a.phase * 2.0).sin().abs() * 0.5 * v * (speed / 4.5).min(1.0);
+                    let root = Mat4::from_translation(to_3d(s.pos, input.map.height_at(s.pos) + bob)) * Mat4::from_rotation_y(-s.facing);
+                    let part = |offset: Vec3, rot_z: f32| {
+                        let m = root * Mat4::from_translation(offset * v) * Mat4::from_rotation_z(rot_z);
+                        Instance { model: m.to_cols_array_2d(), tint }
+                    };
+                    out.parts.push((MeshId::Leg as usize, part(Vec3::new(0.0, 8.0, -1.5), swing)));
+                    out.parts.push((MeshId::Leg as usize, part(Vec3::new(0.0, 8.0, 1.5), -swing)));
+                    out.parts.push((MeshId::Torso as usize, part(Vec3::new(0.0, 8.0, 0.0), 0.0)));
+                    out.parts.push((MeshId::Head as usize, part(Vec3::new(0.0, 15.0, 0.0), 0.0)));
+                    // Руки вытянуты вперёд — держат винтовку.
+                    out.parts.push((MeshId::Arm as usize, part(Vec3::new(0.0, 14.0, -4.5), 1.05)));
+                    out.parts.push((MeshId::Arm as usize, part(Vec3::new(0.0, 14.0, 4.5), 1.35)));
+                    out.parts.push((MeshId::Rifle as usize, part(Vec3::new(3.5, 10.5, 2.0), 0.0)));
                 }
-                // Граната в руке — до броска.
-                if let Some(g) = grenade {
-                    let m = root * Mat4::from_translation(g * crate::rwr::VOXEL) * Mat4::from_scale(Vec3::splat(0.11));
-                    by_mesh[MeshId::Cube as usize].push(Instance { model: m.to_cols_array_2d(), tint: [0.30, 0.36, 0.22, 0.5] });
-                }
-                continue;
+                out
+            })
+            .collect();
+        // Куски — в том же порядке, что и солдаты: кадр не зависит от числа ядер.
+        for out in posed {
+            for (key, skin) in out.chars {
+                by_char[key].push(skin);
             }
-            let tint = {
-                let c = self.team_colors[s.team as usize & 1];
-                [c[0], c[1], c[2], 0.0]
-            };
-            let swing = a.phase.sin() * 0.7 * (speed / 4.5).min(1.0);
-            let bob = (a.phase * 2.0).sin().abs() * 0.5 * v * (speed / 4.5).min(1.0);
-            let root = Mat4::from_translation(to_3d(s.pos, input.map.height_at(s.pos) + bob)) * Mat4::from_rotation_y(-s.facing);
-            let part = |offset: Vec3, rot_z: f32| {
-                let m = root * Mat4::from_translation(offset * v) * Mat4::from_rotation_z(rot_z);
-                Instance { model: m.to_cols_array_2d(), tint }
-            };
-            by_mesh[MeshId::Leg as usize].push(part(Vec3::new(0.0, 8.0, -1.5), swing));
-            by_mesh[MeshId::Leg as usize].push(part(Vec3::new(0.0, 8.0, 1.5), -swing));
-            by_mesh[MeshId::Torso as usize].push(part(Vec3::new(0.0, 8.0, 0.0), 0.0));
-            by_mesh[MeshId::Head as usize].push(part(Vec3::new(0.0, 15.0, 0.0), 0.0));
-            // Руки вытянуты вперёд — держат винтовку.
-            by_mesh[MeshId::Arm as usize].push(part(Vec3::new(0.0, 14.0, -4.5), 1.05));
-            by_mesh[MeshId::Arm as usize].push(part(Vec3::new(0.0, 14.0, 4.5), 1.35));
-            by_mesh[MeshId::Rifle as usize].push(part(Vec3::new(3.5, 10.5, 2.0), 0.0));
+            for (mesh, instance) in out.parts {
+                by_mesh[mesh].push(instance);
+            }
         }
 
         // Лодки — на воде, чуть покачиваются.
@@ -467,7 +523,7 @@ impl SceneBuilder {
             for c in input.corpses {
                 let Some(r) = self.ragdolls.get(&c.id) else { continue };
                 let Some(&origin) = r.points().first() else { continue };
-                if Vec2::new(origin.x, origin.z).distance_squared(cam.target) > reach2 {
+                if Vec2::new(origin.x, origin.z).distance_squared(cam.target) > reach2 || !frustum.sees(origin, 2.5 + 2.0 * shade) {
                     continue;
                 }
                 let model = &set.models[r.model];
@@ -498,7 +554,8 @@ impl SceneBuilder {
             self.pending.lock().unwrap_or_else(|e| e.into_inner()).grass = Some(upload);
         }
 
-        let mut instances = Vec::new();
+        let mut instances = spare.instances;
+        instances.clear();
         let mut batches = Vec::new();
         for (mesh, list) in by_mesh.iter().enumerate() {
             batches.push((mesh, instances.len() as u32, list.len() as u32));
@@ -519,6 +576,12 @@ impl SceneBuilder {
             if at.distance_squared(cam.target) > reach * reach {
                 continue;
             }
+            // Предмет — шар по размеру модели (высоту берём не больше 10 м) и её тень.
+            let size = radius * p.scale;
+            let tall = (10.0 * p.scale).max(size);
+            if !frustum.sees(to_3d(at, input.map.height_at(at) + tall * 0.5), size.max(tall * 0.5) + tall * shade) {
+                continue;
+            }
             let m = Mat4::from_translation(to_3d(at, input.map.height_at(at)))
                 * Mat4::from_rotation_y(-p.angle)
                 * Mat4::from_scale(Vec3::splat(p.scale));
@@ -533,7 +596,8 @@ impl SceneBuilder {
             prop_batches.push((name.to_owned(), instances.len() as u32, list.len() as u32));
             instances.extend(list);
         }
-        let mut skins = Vec::new();
+        let mut skins = spare.skins;
+        skins.clear();
         let mut char_batches = Vec::new();
         for (mesh, list) in by_char.iter().enumerate() {
             if !list.is_empty() {
@@ -555,6 +619,7 @@ impl SceneBuilder {
             particles: self.effects.particles(cam.eye()),
             map: self.pending.clone(),
             visible_chunks,
+            spare: self.spare.clone(),
         }
     }
 
